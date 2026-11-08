@@ -1,0 +1,72 @@
+/* Hacker Dark Monochrome Design System (Themeable via data-theme) */
+:root,
+[data-theme="hacker-dark"] {
+  --bg-0: #09090b;
+  --bg-1: #0d0f13;
+  --bg-2: #12151b;
+  --bg-3: #181c24;
+  --line: #222733;
+  --line-strong: #2f3646;
+  --fg-0: #e4e7ec;
+  --fg-1: #a0a8b8;
+  --fg-2: #687082;
+  --phosphor: #10b981;
+  --phosphor-dim: rgba(16, 185, 129, 0.12);
+  --cyan: #38bdf8;
+  --cyan-dim: rgba(56, 189, 248, 0.11);
+  --amber: #eab308;
+  --amber-dim: rgba(234, 179, 8, 0.12);
+  --red: #ef4444;
+  --red-dim: rgba(239, 68, 68, 0.12);
+  --mono: "JetBrains Mono", "Iosevka", "Fira Code", ui-monospace, SFMono-Regular, Consolas, monospace;
+  --sans: system-ui, -apple-system, "Segoe UI", Vazirmatn, Tahoma, sans-serif;
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+  background: var(--bg-0);
+  color: var(--fg-0);
+  font-family: var(--sans);
+  font-size: 13px;
+  line-height: 1.5;
+  overflow: hidden;
+  -webkit-font-smoothing: antialiased;
+}
+
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--line-strong); border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: var(--fg-2); }
+
+/* Outer shell defaults to LTR so Sidebar sits on the LEFT (Rule #1) */
+.shell {
+  display: flex;
+  flex-direction: row;
+  height: 100vh;
+  width: 100vw;
+  direction: ltr;
+}
+.shell.sidebar-right {
+  flex-direction: row-reverse;
+}
+
+.mono { font-family: var(--mono); }
+.rtl { direction: rtl; text-align: right; }
+.ltr { direction: ltr; text-align: left; }
+.muted { color: var(--fg-2); }
+.fg-1 { color: var(--fg-1); }
+
+code {
+  font-family: var(--mono);
+  font-size: 11.8px;
+  background: var(--bg-0);
+  border: 1px solid var(--line);
+  padding: 1px 5px;
+  border-radius: 3px;
+  direction: ltr;
+  unicode-bidi: isolate;
+}
