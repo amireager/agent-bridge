@@ -1,11 +1,10 @@
-// Pure Offline XSS-Safe CommonMark / GFM Renderer + Syntax Highlighter
+// Pure Offline XSS-Safe CommonMark / GFM + Immersive Interleaved Block Renderer
 window.ABMarkdown = (() => {
   const { esc } = window.ABUtils;
 
   const KW_RE = /\b(def|class|return|import|from|if|elif|else|for|while|try|except|finally|with|as|async|await|function|const|let|var|export|default|struct|impl|fn|pub|use|match|sudo|nix|git|python3|bash)\b/g;
 
   function highlightCode(raw) {
-    // Tokenize comments & strings first to avoid nested replacements
     const stash = [];
     let work = esc(raw);
     work = work.replace(/(#[^\n]*|\/\/[^\n]*)/g, m => {
@@ -25,8 +24,24 @@ window.ABMarkdown = (() => {
     const text = decodeURIComponent(encoded);
     navigator.clipboard?.writeText(text);
     const old = btn.textContent;
-    btn.textContent = 'COPIED';
+    btn.textContent = 'COPIED ✓';
     setTimeout(() => { btn.textContent = old; }, 1200);
+  }
+
+  function renderCodeCard(rawFence) {
+    const ch = String(rawFence || '').trim();
+    const nl = ch.indexOf('\n');
+    const lang = (nl > 3 ? ch.slice(3, nl).trim() : '') || 'code';
+    const rawCode = (nl > -1 ? ch.slice(nl + 1, -3) : ch.slice(3, -3)).replace(/\n$/, '');
+    const encoded = encodeURIComponent(rawCode);
+    return `
+      <div class="md-code">
+        <div class="md-code-bar">
+          <span>${esc(lang)}</span>
+          <button class="md-copy-btn" onclick="ABMarkdown.copyCodeBtn(this,'${encoded}')">Copy</button>
+        </div>
+        <pre>${highlightCode(rawCode)}</pre>
+      </div>`;
   }
 
   function renderInline(str) {
@@ -59,7 +74,7 @@ window.ABMarkdown = (() => {
   }
 
   function renderProseSegment(seg) {
-    const lines = seg.replace(/\r\n/g, '\n').split('\n');
+    const lines = String(seg ?? '').replace(/\r\n/g, '\n').split('\n');
     const out = [];
     let i = 0;
 
@@ -67,13 +82,11 @@ window.ABMarkdown = (() => {
       const ln = lines[i];
       if (!ln.trim()) { i++; continue; }
 
-      // Horizontal rule
       if (/^\s*([-*_])\1\1+\s*$/.test(ln)) {
         out.push('<hr/>');
         i++; continue;
       }
 
-      // Heading
       const hm = ln.match(/^(#{1,4})\s+(.+)$/);
       if (hm) {
         const lvl = hm[1].length;
@@ -81,7 +94,6 @@ window.ABMarkdown = (() => {
         i++; continue;
       }
 
-      // GFM Table
       if (ln.includes('|') && i + 1 < lines.length && /^\s*\|?[\s:-]+\|[\s|:-]*$/.test(lines[i + 1])) {
         const tbl = [ln, lines[i + 1]];
         i += 2;
@@ -92,7 +104,6 @@ window.ABMarkdown = (() => {
         continue;
       }
 
-      // Blockquote
       if (/^\s*>\s?/.test(ln)) {
         const bq = [];
         while (i < lines.length && /^\s*>\s?/.test(lines[i])) {
@@ -103,7 +114,6 @@ window.ABMarkdown = (() => {
         continue;
       }
 
-      // Unordered list
       if (/^\s*[-*+]\s+/.test(ln)) {
         const items = [];
         while (i < lines.length && /^\s*[-*+]\s+/.test(lines[i])) {
@@ -111,14 +121,13 @@ window.ABMarkdown = (() => {
           itemTxt = itemTxt.replace(/^\[([ xX])\]\s+/, (_, chk) =>
             `<input type="checkbox" disabled ${chk.toLowerCase() === 'x' ? 'checked' : ''} style="margin-inline-end:6px;"/>`
           );
-          items.push(`<li>${ itemTxt.startsWith('<input') ? itemTxt.slice(0, itemTxt.indexOf('/>') + 2) + renderInline(itemTxt.slice(itemTxt.indexOf('/>') + 2)) : renderInline(itemTxt) }</li>`);
+          items.push(`<li>${itemTxt.startsWith('<input') ? itemTxt.slice(0, itemTxt.indexOf('/>') + 2) + renderInline(itemTxt.slice(itemTxt.indexOf('/>') + 2)) : renderInline(itemTxt)}</li>`);
           i++;
         }
         out.push(`<ul>${items.join('')}</ul>`);
         continue;
       }
 
-      // Ordered list
       if (/^\s*\d+\.\s+/.test(ln)) {
         const items = [];
         while (i < lines.length && /^\s*\d+\.\s+/.test(lines[i])) {
@@ -129,7 +138,6 @@ window.ABMarkdown = (() => {
         continue;
       }
 
-      // Paragraph
       const para = [];
       while (
         i < lines.length &&
@@ -153,23 +161,54 @@ window.ABMarkdown = (() => {
     const chunks = String(markdownText).split(/(```[\s\S]*?```)/g);
     const html = chunks.map(ch => {
       if (ch.startsWith('```') && ch.endsWith('```')) {
-        const nl = ch.indexOf('\n');
-        const lang = (nl > 3 ? ch.slice(3, nl).trim() : '') || 'code';
-        const rawCode = (nl > -1 ? ch.slice(nl + 1, -3) : ch.slice(3, -3)).replace(/\n$/, '');
-        const encoded = encodeURIComponent(rawCode);
-        return `
-          <div class="md-code">
-            <div class="md-code-bar">
-              <span>${esc(lang)}</span>
-              <button class="md-copy-btn" onclick="ABMarkdown.copyCodeBtn(this,'${encoded}')">COPY</button>
-            </div>
-            <pre>${highlightCode(rawCode)}</pre>
-          </div>`;
+        return renderCodeCard(ch);
       }
       return renderProseSegment(ch);
     }).join('');
     return `<div class="md-body">${html}</div>`;
   }
 
-  return { render, copyCodeBtn };
+  /**
+   * Browser-extension-style block renderer:
+   * - code blocks rendered ONCE untouched
+   * - mode === 'interleaved': each English prose block + Persian translation right underneath it
+   * - mode === 'fa_only': seamless full-page Persian prose + untouched code blocks
+   * - mode === 'en_only': pure original English Markdown + code blocks
+   */
+  function renderBlocks(blocks, fallbackEn, fallbackFa, mode = 'interleaved') {
+    if (mode === 'en_only') {
+      return `<div class="ltr">${render(fallbackEn)}</div>`;
+    }
+    if (!Array.isArray(blocks) || !blocks.length) {
+      if (mode === 'fa_only' && fallbackFa) {
+        return `<div class="rtl">${render(fallbackFa)}</div>`;
+      }
+      return `<div class="ltr">${render(fallbackEn)}</div>`;
+    }
+
+    if (mode === 'fa_only') {
+      const inner = blocks.map(b => {
+        if (b.type === 'code') return renderCodeCard(b.raw);
+        if (b.type === 'hr') return '<hr/>';
+        const txt = (b.fa && b.fa.trim()) ? b.fa : (b.en || '');
+        const dirCls = (b.fa && b.fa.trim()) ? 'para-fa-seamless' : 'para-en';
+        return `<div class="md-body ${dirCls}">${renderProseSegment(txt)}</div>`;
+      }).join('');
+      return `<div class="immersive-flow fa-clean">${inner}</div>`;
+    }
+
+    // Default: 'interleaved' — English paragraph on top, Persian translation directly underneath
+    const inner = blocks.map(b => {
+      if (b.type === 'code') return renderCodeCard(b.raw);
+      if (b.type === 'hr') return '<hr/>';
+      const enHtml = b.en ? `<div class="md-body para-en">${renderProseSegment(b.en)}</div>` : '';
+      const faHtml = (b.fa && b.fa.trim())
+        ? `<div class="md-body para-fa">${renderProseSegment(b.fa)}</div>`
+        : '';
+      return `<div class="bilingual-pair">${enHtml}${faHtml}</div>`;
+    }).join('');
+    return `<div class="immersive-flow">${inner}</div>`;
+  }
+
+  return { render, renderBlocks, copyCodeBtn };
 })();

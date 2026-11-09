@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Passive Wire-Turn Listener + Lightweight English Prompt Sender & Session Tree."""
+"""Multi-Agent Session Tree, Passive Streaming /v1 Extractor, and PTY/RPC Dispatch."""
 
 from __future__ import annotations
 
@@ -17,13 +17,18 @@ from pathlib import Path
 
 from .engine import estimate_kv_mb_for_tokens, probe_upstream_passive
 from .store import DataStore
-from .translator import probe_translator_health, translate_prose
+from .translator import (
+    estimate_persian_token_savings,
+    probe_translator_health,
+    split_markdown_into_blocks,
+    translate_prose,
+)
 
 THINK_TAG_RE = re.compile(r"<think>([\s\S]*?)</think>", re.IGNORECASE)
 
 
 class BridgeHub:
-    """Listens between Agent and Model, translates prose, and forwards verified English prompts."""
+    """Listens between Agent and Model, translates paragraph-by-paragraph, and tracks KV cache."""
 
     def __init__(self, store: DataStore, bridge_port: int) -> None:
         self.store = store
@@ -38,7 +43,6 @@ class BridgeHub:
         self._sse_clients: list[queue.Queue] = []
         self._inspector_ring: list[dict] = []
 
-        # Dynamic {agent_id: {session_id: session_dict}}
         self.sessions_by_agent: dict[str, dict[str, dict]] = {}
         self.active_agent: str = "pi"
         self.active_session_by_agent: dict[str, str] = {}
@@ -46,6 +50,10 @@ class BridgeHub:
         self.pi_proc: subprocess.Popen | None = None
         self.pi_session_bound: str | None = None
         self.sandbox_worker_seen_ts: float = 0.0
+        self.pty_wrapper_seen_ts: float = 0.0
+        self.pending_fa_draft: dict | None = None  # Pairs Web FA draft with PTY-injected prompt!
+        self.pending_saved_tokens: int = 0
+
         self.session_state: str = "IDLE"
         self.current_turn: dict | None = None
 
@@ -85,6 +93,13 @@ class BridgeHub:
                 try:
                     data = json.loads(p.read_text(encoding="utf-8"))
                     data["agent_id"] = aid
+                    # Backfill blocks if older session turn lacked blocks
+                    for t in data.get("turns", []):
+                        if "blocks" not in t and t.get("reply_en"):
+                            blks = split_markdown_into_blocks(t["reply_en"])
+                            if t.get("reply_fa") and len(blks) == 1 and blks[0]["type"] == "prose":
+                                blks[0]["fa"] = t["reply_fa"]
+                            t["blocks"] = blks
                     self.sessions_by_agent[aid][data["id"]] = data
                 except Exception:
                     pass
@@ -94,17 +109,6 @@ class BridgeHub:
                     key=lambda x: x.get("updated_at", 0),
                 )
                 self.active_session_by_agent[aid] = latest["id"]
-
-        # Remove placeholder agents with 0 turns except primary 'pi'
-        for ghost in ("giant2", "external-tap"):
-            bucket = self.sessions_by_agent.get(ghost, {})
-            if bucket and all(len(s.get("turns", [])) == 0 for s in bucket.values()):
-                for s in list(bucket.values()):
-                    f = self._agent_sess_dir(ghost) / f"{s['id']}.json"
-                    if f.exists():
-                        f.unlink()
-                del self.sessions_by_agent[ghost]
-                self.active_session_by_agent.pop(ghost, None)
 
         self._ensure_agent_bucket("pi")
         if self.active_agent not in self.sessions_by_agent:
@@ -172,17 +176,6 @@ class BridgeHub:
         self.broadcast_state()
         return True
 
-    def dismiss_turn_english(self, turn_id: str) -> bool:
-        sess = self.sessions_by_agent[self.active_agent][self.active_session_by_agent[self.active_agent]]
-        for t in sess.get("turns", []):
-            if t["id"] == turn_id:
-                t["hide_en"] = not bool(t.get("hide_en", False))
-                self._persist_session(sess)
-                self.broadcast_state()
-                return True
-        return False
-
-    # ---- SSE event bus ----
     def subscribe_sse(self) -> queue.Queue:
         q: queue.Queue = queue.Queue(maxsize=256)
         with self._lock:
@@ -212,31 +205,63 @@ class BridgeHub:
             if len(self._inspector_ring) > 40:
                 self._inspector_ring = self._inspector_ring[-40:]
 
-    # ---- Passive Wire Turn Recorder (for ANY external agent hitting /v1!) ----
+    def consume_pending_saved_tokens(self) -> int:
+        val = self.pending_saved_tokens
+        self.pending_saved_tokens = 0
+        return val
+
+    def _translate_turn_blocks(self, turn: dict) -> None:
+        raw_en = turn.get("reply_en", "").strip()
+        if not raw_en:
+            turn["blocks"] = []
+            return
+        if not self.config["translation"].get("enabled", True):
+            turn["blocks"] = split_markdown_into_blocks(raw_en)
+            turn["tr_engine"] = "proxy-only"
+            return
+
+        tr_res = translate_prose(raw_en, "fa", self.config["translation"], self.glossary)
+        turn["reply_fa"] = tr_res.get("translation", "")
+        turn["blocks"] = tr_res.get("blocks") or split_markdown_into_blocks(raw_en)
+        turn["tr_engine"] = tr_res.get("engine", "")
+
+    # ---- Full Passive /v1 Extractor (Works with real standalone `pi` TUI in Terminal!) ----
     def record_passive_wire_turn(
         self,
         *,
         agent_name: str,
         model_name: str,
-        user_prompt: str,
+        messages: list[dict],
         raw_reply: str,
         reasoning_text: str,
         tool_calls: list[dict],
         metrics: dict,
+        kv_status: str,
         elapsed_s: float,
     ) -> None:
-        """Records and translates replies from external CLI agents passively tapped on /v1."""
-        # Skip duplicating internal pi-rpc turns already tracked via RPC stdout
         if agent_name == "pi" and self.current_turn is not None:
             self.current_turn["model"] = model_name
+            self.current_turn["kv_status"] = kv_status
             return
 
-        if not raw_reply.strip() and not tool_calls and not reasoning_text.strip():
-            return
-
-        self._ensure_agent_bucket(agent_name)
-        sid = self.active_session_by_agent[agent_name]
-        sess = self.sessions_by_agent[agent_name][sid]
+        # Extract latest user prompt and any tool results present in messages
+        last_user_txt = ""
+        tool_outputs_by_id: dict[str, str] = {}
+        for m in messages:
+            role = m.get("role")
+            c = m.get("content", "")
+            if isinstance(c, list):
+                c_str = "\n".join(
+                    x.get("text", "") for x in c if isinstance(x, dict) and x.get("type") == "text"
+                )
+            else:
+                c_str = str(c or "")
+            if role == "user" and c_str.strip():
+                last_user_txt = c_str.strip()
+            elif role == "tool":
+                tcid = m.get("tool_call_id", "")
+                if tcid:
+                    tool_outputs_by_id[tcid] = c_str
 
         clean_reply = raw_reply
         extracted_think = reasoning_text or ""
@@ -245,40 +270,97 @@ class BridgeHub:
             extracted_think = (extracted_think + "\n" + m_th.group(1)).strip()
             clean_reply = THINK_TAG_RE.sub("", clean_reply).strip()
 
-        reply_fa = ""
-        tr_eng = ""
-        if clean_reply.strip():
-            tr_res = translate_prose(clean_reply, "fa", self.config["translation"], self.glossary)
-            reply_fa = tr_res.get("translation", "")
-            tr_eng = tr_res.get("engine", "")
+        if not clean_reply.strip() and not tool_calls and not extracted_think.strip():
+            return
 
-        if len(sess["turns"]) == 0 and user_prompt.strip():
-            sess["title"] = user_prompt.strip().replace("\n", " ")[:28]
+        self._ensure_agent_bucket(agent_name)
+        self.active_agent = agent_name
+        sid = self.active_session_by_agent[agent_name]
+        sess = self.sessions_by_agent[agent_name][sid]
+
+        # Check if this /v1 call is a multi-step continuation of the last turn (e.g., after tool execution!)
+        existing_turn = sess["turns"][-1] if sess["turns"] else None
+        is_continuation = (
+            existing_turn is not None
+            and existing_turn.get("source") in ("tap", "pty")
+            and last_user_txt
+            and existing_turn.get("prompt_sent", "").strip() == last_user_txt
+        )
+
+        if is_continuation and existing_turn is not None:
+            # Attach tool outputs from messages onto previous tool calls
+            for tl in existing_turn.get("tools", []):
+                if tl["id"] in tool_outputs_by_id and not tl.get("output"):
+                    tl["output"] = tool_outputs_by_id[tl["id"]]
+                    tl["status"] = "done"
+            for new_tc in tool_calls:
+                existing_turn["tools"].append(new_tc)
+            if extracted_think:
+                existing_turn["thinking"] = (
+                    (existing_turn.get("thinking", "") + "\n" + extracted_think).strip()
+                )
+            if clean_reply.strip():
+                existing_turn["reply_en"] = (
+                    (existing_turn.get("reply_en", "") + "\n\n" + clean_reply).strip()
+                    if existing_turn.get("reply_en")
+                    else clean_reply
+                )
+                self._translate_turn_blocks(existing_turn)
+
+            em = existing_turn.setdefault("metrics", {"uncached_in": 0, "cached_in": 0, "out_tok": 0, "tg_tps": 0.0})
+            em["uncached_in"] += metrics.get("uncached_in", 0)
+            em["cached_in"] += metrics.get("cached_in", 0)
+            em["out_tok"] += metrics.get("out_tok", 0)
+            if metrics.get("tg_tps"):
+                em["tg_tps"] = metrics["tg_tps"]
+            existing_turn["kv_status"] = kv_status
+            existing_turn["elapsed_s"] = round(existing_turn.get("elapsed_s", 0.0) + elapsed_s, 1)
+            self._persist_session(sess)
+            self.emit_event("turn_complete", {"turn": existing_turn})
+            return
+
+        # Check if user submitted Persian draft via PTY injection seconds ago
+        user_display = last_user_txt
+        src_label = "tap"
+        saved_tok = 0
+        if self.pending_fa_draft and (time.time() - self.pending_fa_draft["ts"] < 30.0):
+            if self.pending_fa_draft["en"].strip() in last_user_txt:
+                user_display = self.pending_fa_draft["fa"]
+                saved_tok = self.pending_fa_draft["saved"]
+                src_label = "pty"
+                self.pending_fa_draft = None
+
+        if len(sess["turns"]) == 0 and user_display.strip():
+            sess["title"] = user_display.strip().replace("\n", " ")[:28]
 
         turn = {
             "id": uuid.uuid4().hex[:8],
             "session_id": sid,
             "agent": agent_name,
             "model": model_name,
-            "source": "tap",
+            "source": src_label,
             "ts": time.strftime("%H:%M:%S"),
             "started_ts": time.time() - elapsed_s,
-            "user_raw": user_prompt,
-            "prompt_sent": user_prompt,
+            "user_raw": user_display,
+            "prompt_sent": last_user_txt,
+            "saved_fa_tokens": saved_tok,
+            "kv_status": kv_status,
             "thinking": extracted_think,
             "tools": tool_calls,
             "reply_en": clean_reply,
-            "reply_fa": reply_fa,
-            "tr_engine": tr_eng,
+            "reply_fa": "",
+            "blocks": [],
+            "tr_engine": "",
             "status": "done",
             "elapsed_s": round(elapsed_s, 1),
             "metrics": metrics,
         }
+        self._translate_turn_blocks(turn)
         sess["turns"].append(turn)
         self._persist_session(sess)
         self.emit_event("turn_complete", {"turn": turn})
 
-    # ---- Lightweight Prompt Sender (Host cmd, Sandbox cmd like `box pi`, or Sandbox Worker!) ----
+    # ---- RPC / Sandbox Worker / PTY Dispatch ----
     def _ensure_pi_sender(self, model_id: str) -> tuple[bool, str]:
         if self.pi_proc and self.pi_proc.poll() is None:
             return True, "running"
@@ -289,7 +371,7 @@ class BridgeHub:
         if not (Path(exe).exists() or shutil.which(exe)):
             return (
                 False,
-                f"باینری '{exe}' روی سیستم اصلی پیدا نشد (چون داخل سندباکس است). یا داخل سندباکس دستور `python3 cli.py --pi-worker` را بزن، یا فرمان اجرا را در تنظیمات به شکل `box pi` بگذار، یا با دکمه COPY_EN متن انگلیسی را در ترمینال سندباکس پیست کن.",
+                "عامل مستقیم به وب وصل نیست؛ داخل ترمینال سندباکس `python3 cli.py --wrap pi` را بزن تا ترمینال تعاملی واقعی pi باز شود و پیام‌ها مستقیم بدون کپی-پیست تایپ شوند (متن انگلیسی در کلیپ‌بوردت هم کپی شد).",
             )
 
         pi_dir = self.store.pi_agent_dir
@@ -423,11 +505,7 @@ class BridgeHub:
                 if turn["reply_en"].strip():
                     self.session_state = "TRANSLATING_OUT"
                     self.broadcast_state()
-                    tr_res = translate_prose(
-                        turn["reply_en"], "fa", self.config["translation"], self.glossary
-                    )
-                    turn["reply_fa"] = tr_res.get("translation", "")
-                    turn["tr_engine"] = tr_res.get("engine", "")
+                    self._translate_turn_blocks(turn)
 
                 turn["status"] = "done"
                 sess = self.sessions_by_agent.get(turn["agent"], {}).get(turn["session_id"])
@@ -461,6 +539,20 @@ class BridgeHub:
         source: str = "web",
         agent_id: str | None = None,
     ) -> dict:
+        savings = estimate_persian_token_savings(user_raw, prompt_sent)
+        self.pending_saved_tokens = savings["saved"]
+
+        # Priority 1: Live Transparent PTY Wrapper (`cli.py --wrap pi` running real TUI in terminal!)
+        if (time.time() - self.pty_wrapper_seen_ts) < 25.0:
+            self.pending_fa_draft = {
+                "fa": user_raw,
+                "en": prompt_sent,
+                "saved": savings["saved"],
+                "ts": time.time(),
+            }
+            self.emit_event("pty_inject", {"message": prompt_sent})
+            return {"dispatched": "pty", "saved_tokens": savings["saved"]}
+
         aid = agent_id or self.active_agent
         self._ensure_agent_bucket(aid)
         self.active_agent = aid
@@ -496,10 +588,13 @@ class BridgeHub:
             "started_ts": time.time(),
             "user_raw": user_raw,
             "prompt_sent": prompt_sent,
+            "saved_fa_tokens": savings["saved"],
+            "kv_status": "warm",
             "thinking": "",
             "tools": [],
             "reply_en": "",
             "reply_fa": "",
+            "blocks": [],
             "tr_engine": "",
             "status": "streaming",
             "elapsed_s": 0.0,
@@ -531,8 +626,8 @@ class BridgeHub:
         if self.pi_proc and self.pi_proc.poll() is None and self.pi_proc.stdin:
             self.pi_proc.stdin.write((json.dumps({"type": "abort"}) + "\n").encode("utf-8"))
             self.pi_proc.stdin.flush()
-            self.session_state = "IDLE"
-            self.broadcast_state()
+        self.session_state = "IDLE"
+        self.broadcast_state()
 
     def build_state_snapshot(self) -> dict:
         up = probe_upstream_passive(self.config["tap"]["upstream_url"])
@@ -544,7 +639,6 @@ class BridgeHub:
             self.usage_agent_filter,
         )
 
-        # Annotate per-model KV volume estimate from observed peak tokens
         for mrow in usage.get("by_model", []):
             mrow["est_kv_mb_q8"] = estimate_kv_mb_for_tokens(
                 mrow["model"], mrow.get("peak_ctx", 0), "q8_0"
@@ -576,10 +670,15 @@ class BridgeHub:
         with self._lock:
             insp = list(self._inspector_ring)
 
+        pty_live = (time.time() - self.pty_wrapper_seen_ts) < 25.0
+        worker_live = (time.time() - self.sandbox_worker_seen_ts) < 25.0
+
         return {
             "config": self.config,
             "glossary": self.glossary,
             "session_state": self.session_state,
+            "pty_connected": pty_live,
+            "worker_connected": worker_live,
             "active_agent": self.active_agent,
             "active_session": active_sess,
             "agent_tree": agent_tree,

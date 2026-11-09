@@ -1,14 +1,14 @@
-// Central State Store, Expandable Left Tree Sidebar, HUD Bar, and Router
+// Central State Store, Arena-Smooth Tree Sidebar, HUD Bar & Router
 window.ABApp = (() => {
   const { ICONS, esc, api } = window.ABUtils;
 
   let state = null;
-  let route = 'chat'; // chat | usage-overview | usage-models | usage-agents | usage-xray | set-translate | set-hud | set-tap | set-retention
+  let route = 'chat';
   const openBranches = {
     agents: true,
     'agent-pi': true,
     usage: true,
-    'obs-models': true,
+    'obs-models': false,
     settings: true
   };
 
@@ -56,6 +56,14 @@ window.ABApp = (() => {
     await api('/api/config', { ui: { sidebar_side: cur === 'left' ? 'right' : 'left' } });
   }
 
+  async function toggleProxyMode() {
+    const cur = state?.config?.translation?.enabled !== false;
+    await api('/api/config', {
+      translation: { enabled: !cur },
+      ui: { chat_mode: !cur ? 'interleaved' : 'en_only' }
+    });
+  }
+
   function toggleSidebarCollapse() {
     document.getElementById('sidebar').classList.toggle('collapsed');
   }
@@ -65,7 +73,6 @@ window.ABApp = (() => {
     const treeEl = document.getElementById('sbTree');
     if (!treeEl) return;
 
-    // 1. Nested Agent -> Sessions Tree
     const agentNodes = (state.agent_tree || []).map(ag => {
       const bKey = 'agent-' + ag.id;
       if (openBranches[bKey] === undefined) openBranches[bKey] = (ag.id === state.active_agent);
@@ -81,7 +88,7 @@ window.ABApp = (() => {
             </span>
             <span style="display:flex;align-items:center;gap:4px;">
               <span class="tiny-tag">${s.turn_count}</span>
-              ${ag.sessions.length > 1 ? `<span title="حذف نشست" style="opacity:0.55;padding:0 3px;" onclick="ABApp.deleteAgentSession('${esc(ag.id)}','${esc(s.id)}',event)">×</span>` : ''}
+              ${ag.sessions.length > 1 ? `<span title="حذف نشست" style="opacity:0.55;padding:0 4px;" onclick="ABApp.deleteAgentSession('${esc(ag.id)}','${esc(s.id)}',event)">×</span>` : ''}
             </span>
           </div>`;
       }).join('');
@@ -93,9 +100,7 @@ window.ABApp = (() => {
               ${isOpen ? ICONS.chevronDown : ICONS.chevronRight}
               <span class="mono">${esc(ag.label)}</span>
             </span>
-            <span style="display:flex;align-items:center;gap:4px;">
-              <span class="tiny-tag" title="نشست جدید برای این عامل" onclick="ABApp.createAgentSession('${esc(ag.id)}',event)">+</span>
-            </span>
+            <span class="tiny-tag" title="نشست جدید" onclick="ABApp.createAgentSession('${esc(ag.id)}',event)">+</span>
           </div>
           <div class="tree-sub-children ${isOpen ? 'open' : ''}">
             ${sessHtml}
@@ -103,7 +108,6 @@ window.ABApp = (() => {
         </div>`;
     }).join('');
 
-    // 2. Nested Observed Models Sub-Tree under Telemetry
     const obsModels = state.usage?.observed_models || [];
     const curModelFilter = state.usage?.model_filter || 'all';
     const modelsSubOpen = !!openBranches['obs-models'];
@@ -139,27 +143,28 @@ window.ABApp = (() => {
         </div>
       </div>`;
 
-    const mkLeaf = (rId, label, rightTag = '') => `
+    const mkLeaf = (rId, label, rightTag = '', tagCls = '') => `
       <button class="tree-node ${route === rId ? 'active' : ''}" onclick="ABApp.navigate('${rId}')">
         <span><span class="node-indicator mono">·</span> ${label}</span>
-        ${rightTag ? `<span class="tiny-tag">${rightTag}</span>` : ''}
+        ${rightTag ? `<span class="tiny-tag ${tagCls}">${rightTag}</span>` : ''}
       </button>`;
 
     const kvPct = state.usage?.window?.cache_hit_pct ?? 0;
+    const trOn = state.config.translation.enabled !== false;
 
     treeEl.innerHTML = [
-      mkRoot('agents', ICONS.terminal, 'Agents / چت و نشست‌ها', agentNodes),
-      mkRoot('usage', ICONS.chart, 'Telemetry / توکن و کش',
-        mkLeaf('usage-overview', 'کنتور کش، توکن و هزینه', `KV ${kvPct}%`) +
+      mkRoot('agents', ICONS.terminal, 'چت و نشست‌ها', agentNodes),
+      mkRoot('usage', ICONS.chart, 'شکارچی کش و توکن‌ها',
+        mkLeaf('usage-overview', 'داشبورد KV-Cache و توکن', `${kvPct}%`, 'on') +
         obsModelSubTree +
-        mkLeaf('usage-agents', 'مقایسه مدل‌ها و عامل‌ها') +
-        mkLeaf('usage-xray', 'بازرس پیام خام (X-Ray)')
+        mkLeaf('usage-agents', 'جدول مقایسه‌ای مدل‌ها و عامل‌ها') +
+        mkLeaf('usage-xray', 'بازرس بسته خام (Wire X-Ray)')
       ),
-      mkRoot('settings', ICONS.sliders, 'Config / تنظیمات',
-        mkLeaf('set-translate', 'مترجم و واژه‌نامه', state.config.translation.engine) +
-        mkLeaf('set-hud', 'نمایش چت و توکن‌ها') +
-        mkLeaf('set-tap', 'شنود (/v1) و ترمینال') +
-        mkLeaf('set-retention', 'نگهداری تاریخچه و .data', `${state.config.retention.days || '∞'}d`)
+      mkRoot('settings', ICONS.sliders, 'تنظیمات',
+        mkLeaf('set-translate', 'مترجم و واژه‌نامه', trOn ? state.config.translation.engine : 'OFF') +
+        mkLeaf('set-hud', 'چیدمان نمایش و زبان') +
+        mkLeaf('set-tap', 'پروکسی /v1 و اتصال به pi') +
+        mkLeaf('set-retention', 'نگهداری تاریخچه (.data)', `${state.config.retention.days || '∞'}d`)
       )
     ].join('');
   }
@@ -169,31 +174,39 @@ window.ABApp = (() => {
     const up = state.upstream || {};
     const u = state.usage?.window || {};
     const ui = state.config.ui || {};
+    const trEnabled = state.config.translation.enabled !== false;
 
     document.getElementById('shellRoot').classList.toggle('sidebar-right', ui.sidebar_side === 'right');
-    document.documentElement.setAttribute('data-theme', ui.theme || 'hacker-dark');
+
+    const ptyTag = state.pty_connected
+      ? `<div><i class="led ok"></i>PTY : <span style="color:var(--phosphor)">pi TUI linked</span></div>`
+      : `<div><i class="led ${up.online ? 'ok' : 'warn'}"></i>TAP : <span class="fg-1">:18080/v1 → ${esc(up.detected_model)}</span></div>`;
 
     document.getElementById('sbFoot').innerHTML = `
-      <div><i class="led ${up.online ? 'ok' : 'warn'}"></i>TAP : <span class="fg-1">:18080/v1 → ${esc(up.detected_model)}</span></div>
-      <div><i class="led ${state.translator_online ? 'ok' : ''}"></i>TR  : <span class="fg-1">${esc(state.config.translation.engine)}</span></div>
+      ${ptyTag}
+      <div><i class="led ${trEnabled && state.translator_online ? 'ok' : 'warn'}"></i>TR  : <span class="fg-1">${trEnabled ? esc(state.config.translation.engine) : 'Proxy-Only (OFF)'}</span></div>
       <div><i class="led ok"></i>DATA: <span class="fg-1">.data/ (${state.storage?.total_kib || 0} KiB)</span></div>
     `;
 
     const modelBadge = (state.usage?.model_filter && state.usage.model_filter !== 'all')
-      ? `filter:${state.usage.model_filter}`
-      : `model:${up.detected_model}`;
+      ? `filter: ${state.usage.model_filter}`
+      : `${up.detected_model}`;
 
     document.getElementById('hudBar').innerHTML = `
       <div class="hud-group">
-        <span class="hud-chip state-${esc(state.session_state)}">[${esc(state.session_state)}]</span>
-        <span class="hud-chip">agent:<strong style="color:var(--fg-0)">${esc(state.active_agent)}</strong></span>
+        <span class="hud-chip state-${esc(state.session_state)}">${esc(state.session_state)}</span>
+        <span class="hud-chip">agent: <strong style="color:var(--fg-0)">${esc(state.active_agent)}</strong></span>
         <span class="hud-chip">${esc(modelBadge)}</span>
-        ${up.peak_kv_mb_q8 ? `<span class="hud-chip">kv_vol:~${up.peak_kv_mb_q8}MB</span>` : ''}
+        ${state.pty_connected ? `<span class="hud-chip" style="color:var(--phosphor);border-color:rgba(52,211,153,0.35);">TTY Live</span>` : ''}
       </div>
       <div class="hud-group">
-        ${ui.show_inline_tokens ? `<span class="hud-chip">kv_hit:<strong style="color:var(--phosphor)">${u.cache_hit_pct || 0}%</strong> · tok:${(u.total_tokens || 0).toLocaleString()}</span>` : ''}
-        ${ui.show_shadow_cost ? `<span class="hud-chip">est:$${Number(u.shadow_cost_usd || 0).toFixed(4)}</span>` : ''}
-        <button class="btn ghost" onclick="ABApp.toggleSidebarSide()" title="تغییر جهت سایدبار">${ICONS.swap} ${ui.sidebar_side === 'left' ? 'L→R' : 'R→L'}</button>
+        <button class="btn ghost ${trEnabled ? 'on' : ''}" onclick="ABApp.toggleProxyMode()" title="خاموش/روشن کردن ترجمه (استفاده صرفاً به‌عنوان پروکسی شکارچی کش KV)">
+          ${trEnabled ? 'ترجمه: روشن' : 'حالت پروکسی خالص (بدون ترجمه)'}
+        </button>
+        ${ui.show_inline_tokens ? `<span class="hud-chip">KV <strong style="color:var(--phosphor)">${u.cache_hit_pct || 0}%</strong> · ${(u.total_tokens || 0).toLocaleString()} tok</span>` : ''}
+        ${(u.saved_fa_tokens > 0) ? `<span class="hud-chip" style="color:var(--cyan)" title="تخمین توکن صرفه‌جویی‌شده با ارسال انگلیسی به‌جای فارسی">⚡ +${u.saved_fa_tokens.toLocaleString()} saved</span>` : ''}
+        ${ui.show_shadow_cost ? `<span class="hud-chip">$${Number(u.shadow_cost_usd || 0).toFixed(4)}</span>` : ''}
+        <button class="btn ghost" onclick="ABApp.toggleSidebarSide()" title="تغییر جهت سایدبار">${ICONS.swap}</button>
       </div>
     `;
   }
@@ -201,6 +214,7 @@ window.ABApp = (() => {
   function renderMainPage(forceFull = false) {
     if (!state) return;
     const host = document.getElementById('pageHost');
+    host.classList.toggle('is-chat', route === 'chat');
     if (route === 'chat') {
       window.ABChatPage.render(host, state, forceFull);
     } else if (route.startsWith('usage-')) {
@@ -235,6 +249,7 @@ window.ABApp = (() => {
   return {
     getState, getRoute, navigate, toggleBranch,
     selectAgentSession, createAgentSession, deleteAgentSession,
-    filterByObservedModel, toggleSidebarSide, toggleSidebarCollapse, boot
+    filterByObservedModel, toggleSidebarSide, toggleProxyMode,
+    toggleSidebarCollapse, boot
   };
 })();

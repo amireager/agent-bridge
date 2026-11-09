@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""HTTP/SSE API router, modular static server, and passive /v1 wire tap."""
+"""HTTP/SSE API router, static server, and streaming /v1 conversation & cache-hunter tap."""
 
 from __future__ import annotations
 
@@ -94,7 +94,7 @@ def make_handler(hub: BridgeHub):
                 res = translate_prose(
                     body.get("text", ""),
                     body.get("to", "en"),
-                    hub.config["translation"],
+                    {**hub.config["translation"], "enabled": True},
                     hub.glossary,
                 )
                 return self._send_json(res)
@@ -105,25 +105,24 @@ def make_handler(hub: BridgeHub):
                 prompt_sent = body.get("prompt_sent", "")
                 allow_persian = bool(body.get("allow_persian", False))
 
-                # Server-side Persian guardrail enforcement
                 has_fa = any("\u0600" <= ch <= "\u06ff" for ch in prompt_sent)
                 if has_fa and not allow_persian:
                     return self._send_json(
                         {
                             "ok": False,
                             "code": "PERSIAN_DETECTED",
-                            "error": "در متن ارسالی عبارات فارسی وجود دارد؛ ابتدا اصلاح/ترجمه کنید یا تیک تایید ارسال فارسی را بزنید.",
+                            "error": "در متن ارسالی عبارات فارسی وجود دارد؛ ابتدا اصلاح کنید یا تیک تایید را بزنید.",
                         },
                         400,
                     )
                 try:
-                    turn = hub.submit_prompt(
+                    res = hub.submit_prompt(
                         user_raw=user_raw or prompt_sent,
                         prompt_sent=prompt_sent,
                         source=body.get("source", "web"),
                         agent_id=body.get("agent_id"),
                     )
-                    return self._send_json({"ok": True, "turn": turn})
+                    return self._send_json({"ok": True, "result": res})
                 except Exception as exc:
                     return self._send_json({"ok": False, "error": str(exc)}, 500)
 
@@ -133,22 +132,28 @@ def make_handler(hub: BridgeHub):
                 sess = hub.sessions_by_agent[hub.active_agent][hub.active_session_by_agent[hub.active_agent]]
                 for t in sess.get("turns", []):
                     if t["id"] == tid and t.get("reply_en"):
-                        tr = translate_prose(t["reply_en"], "fa", hub.config["translation"], hub.glossary)
+                        tr = translate_prose(
+                            t["reply_en"],
+                            "fa",
+                            {**hub.config["translation"], "enabled": True},
+                            hub.glossary,
+                        )
                         t["reply_fa"] = tr.get("translation", "")
+                        t["blocks"] = tr.get("blocks", [])
                         t["tr_engine"] = tr.get("engine", "")
                         hub._persist_session(sess)
                         hub.broadcast_state()
-                        return self._send_json({"ok": True, "reply_fa": t["reply_fa"]})
+                        return self._send_json({"ok": True})
                 return self._send_json({"ok": False, "error": "Turn not found"}, 404)
-
-            if path == "/api/turn/toggle-en":
-                body = self._read_json()
-                ok = hub.dismiss_turn_english(body.get("turn_id", ""))
-                return self._send_json({"ok": ok})
 
             if path == "/api/abort":
                 hub.abort_agent()
                 hub.emit_event("worker_abort", {})
+                hub.emit_event("pty_abort", {})
+                return self._send_json({"ok": True})
+
+            if path == "/api/pty/heartbeat":
+                hub.pty_wrapper_seen_ts = time.time()
                 return self._send_json({"ok": True})
 
             if path == "/api/worker/heartbeat":
@@ -280,10 +285,10 @@ def make_handler(hub: BridgeHub):
             m = str(payload.get("model", ""))
             if m.startswith("agent:"):
                 return m.split("agent:", 1)[1]
-            return "external"
+            return "pi"
 
         def _handle_v1_tap(self, path: str) -> None:
-            """100% transparent listener between Agent and Model (zero parameter mutation)."""
+            """Transparent mid-path wire tap extracting streaming tools, thinking, replies & KV cache."""
             n = int(self.headers.get("Content-Length", "0"))
             raw_req = self.rfile.read(n)
             try:
@@ -305,7 +310,12 @@ def make_handler(hub: BridgeHub):
                     sys_chars += len(str(m.get("content", "")))
                 if m.get("role") == "user":
                     c = m.get("content", "")
-                    preview_txt = c if isinstance(c, str) else json.dumps(c, ensure_ascii=False)
+                    if isinstance(c, list):
+                        preview_txt = " ".join(
+                            x.get("text", "") for x in c if isinstance(x, dict) and x.get("type") == "text"
+                        )
+                    else:
+                        preview_txt = str(c)
 
             upstream_url = hub.config["tap"]["upstream_url"].rstrip("/") + path
             req = urllib.request.Request(
@@ -334,6 +344,7 @@ def make_handler(hub: BridgeHub):
             model_used = str(payload.get("model", "unknown-model"))
             acc_content: list[str] = []
             acc_reasoning: list[str] = []
+            stream_tool_map: dict[int, dict] = {}
             acc_tools: list[dict] = []
 
             if is_stream:
@@ -362,12 +373,42 @@ def make_handler(hub: BridgeHub):
                                         acc_content.append(d["content"])
                                     if d.get("reasoning_content"):
                                         acc_reasoning.append(d["reasoning_content"])
+                                    for tcd in d.get("tool_calls", []) or []:
+                                        idx = int(tcd.get("index", 0))
+                                        entry = stream_tool_map.setdefault(
+                                            idx, {"id": "", "name": "", "args_raw": ""}
+                                        )
+                                        if tcd.get("id"):
+                                            entry["id"] = tcd["id"]
+                                        fn = tcd.get("function", {})
+                                        if fn.get("name"):
+                                            entry["name"] += fn["name"]
+                                        if fn.get("arguments"):
+                                            entry["args_raw"] += fn["arguments"]
                             except Exception:
                                 pass
                 except (BrokenPipeError, ConnectionResetError):
                     pass
                 finally:
                     resp.close()
+
+                for idx in sorted(stream_tool_map.keys()):
+                    it = stream_tool_map[idx]
+                    try:
+                        parsed_args = json.loads(it["args_raw"]) if it["args_raw"] else {}
+                    except Exception:
+                        parsed_args = it["args_raw"]
+                    acc_tools.append(
+                        {
+                            "id": it["id"] or f"tc-{idx}",
+                            "name": it["name"] or "tool",
+                            "args": parsed_args,
+                            "output": "",
+                            "status": "done",
+                            "is_error": False,
+                            "duration_ms": 0,
+                        }
+                    )
             else:
                 body_bytes = resp.read()
                 resp.close()
@@ -384,11 +425,16 @@ def make_handler(hub: BridgeHub):
                             acc_reasoning.append(str(msg_obj["reasoning_content"]))
                         for tc in msg_obj.get("tool_calls", []) or []:
                             fn = tc.get("function", {})
+                            raw_a = fn.get("arguments", {})
+                            try:
+                                parsed_a = json.loads(raw_a) if isinstance(raw_a, str) else raw_a
+                            except Exception:
+                                parsed_a = raw_a
                             acc_tools.append(
                                 {
                                     "id": tc.get("id", "tc"),
                                     "name": fn.get("name", "tool"),
-                                    "args": fn.get("arguments", {}),
+                                    "args": parsed_a,
                                     "output": "",
                                     "status": "done",
                                     "is_error": False,
@@ -423,15 +469,17 @@ def make_handler(hub: BridgeHub):
             clean_model = Path(model_used).name or model_used
             prof = hub.config["pricing"]["active_profile"]
             cost_usd = hub.store.compute_shadow_cost(uncached_in, cached_in, out_tok, prof)
+            saved_fa = hub.consume_pending_saved_tokens()
 
             act_sid = hub.active_session_by_agent.get(agent_name, "default")
-            hub.store.record_llm_request(
+            kv_status = hub.store.record_llm_request(
                 agent=agent_name,
                 session_id=act_sid,
                 model=clean_model,
                 uncached_input=uncached_in,
                 cached_input=cached_in,
                 output_tokens=out_tok,
+                saved_fa_tokens=saved_fa,
                 prompt_ms=p_ms,
                 decode_ms=d_ms,
                 prompt_tps=p_tps,
@@ -444,6 +492,7 @@ def make_handler(hub: BridgeHub):
                 "uncached_in": uncached_in,
                 "cached_in": cached_in,
                 "out_tok": out_tok,
+                "pp_tps": round(p_tps, 1),
                 "tg_tps": round(d_tps, 1),
             }
             if agent_name == "pi" and hub.current_turn is not None:
@@ -457,11 +506,12 @@ def make_handler(hub: BridgeHub):
             hub.record_passive_wire_turn(
                 agent_name=agent_name,
                 model_name=clean_model,
-                user_prompt=preview_txt,
+                messages=msgs,
                 raw_reply="".join(acc_content),
                 reasoning_text="".join(acc_reasoning),
                 tool_calls=acc_tools,
                 metrics=turn_metrics,
+                kv_status=kv_status,
                 elapsed_s=elapsed_s,
             )
 
@@ -470,6 +520,7 @@ def make_handler(hub: BridgeHub):
                     "ts": time.strftime("%H:%M:%S"),
                     "agent": agent_name,
                     "model": clean_model,
+                    "kv_status": kv_status,
                     "system_chars": sys_chars,
                     "message_count": len(msgs),
                     "uncached_in": uncached_in,

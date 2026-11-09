@@ -1,9 +1,9 @@
 <!doctype html>
-<html lang="fa" data-theme="hacker-dark">
+<html lang="fa" data-theme="arena-dark">
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>agent-bridge // wire translator & token tap</title>
+  <title>Agent Bridge · KV-Cache Hunter & Bilingual Wire Tap</title>
   <link rel="stylesheet" href="/static/styles/base.css" />
   <link rel="stylesheet" href="/static/styles/components.css" />
   <link rel="stylesheet" href="/static/styles/markdown.css" />
@@ -11,12 +11,11 @@
 </head>
 <body>
   <div id="shellRoot" class="shell">
-    <!-- Left-by-default Multi-Branch Tree Sidebar -->
     <aside id="sidebar" class="sidebar">
       <div class="sb-brand">
-        <span class="hide-collapsed" style="display:flex;align-items:center;gap:7px;">
-          <span>AGENT_BRIDGE</span>
-          <span class="sb-brand-tag">v0.4</span>
+        <span class="hide-collapsed" style="display:flex;align-items:center;gap:8px;">
+          <span>Agent Bridge</span>
+          <span class="sb-brand-tag">v0.5</span>
         </span>
         <button class="btn ghost" onclick="ABApp.toggleSidebarCollapse()" title="جمع/باز کردن سایدبار">≡</button>
       </div>
@@ -25,10 +24,9 @@
       <footer id="sbFoot" class="sb-status-foot hide-collapsed"></footer>
     </aside>
 
-    <!-- Main HUD + Modular Page Host -->
     <main class="workspace">
       <header id="hudBar" class="hud-bar"></header>
-      <div id="pageHost" class="page-host"></div>
+      <div id="pageHost" class="page-host is-chat"></div>
     </main>
   </div>
 

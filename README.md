@@ -1,18 +1,19 @@
 # agent-bridge
 
-Lightweight, zero-dependency local wire listener (`/v1`), **built-in** prose-only Persian $\leftrightarrow$ English translator, Markdown workspace, and per-model/per-agent KV-cache & token ledger.
+Smooth, zero-dependency local `/v1` KV-cache hunter proxy, **paragraph-interleaved** Persian $\leftrightarrow$ English prose translator (browser-extension style), and interactive `pi` TUI companion.
 
-## Core Design Principles
+## Key Capabilities
 
-1. **Built-in Online Translation + Standard API Offline Modes**:
-   - **Built-in Online (`0` extra servers needed)**: Works immediately upon running `python3 bridge.py` (`Google Chrome` $\rightarrow$ `Google GTX` $\rightarrow$ `MyMemory` fallback, `SOCKS5H`/`HTTP` proxy support via `curl`, code/path/flag shield, and `SHA-256` LRU cache).
-   - **API-Driven Offline Modes**: Connect either to any OpenAI-compatible translation model (`POST /v1/chat/completions`, e.g., `llama-server` running `hy-mt2-1.8b` or `qwen3.5-0.8b`) or a lightweight REST server (`POST /translate`, e.g., `Bergamot` `:18092` / `PLaMo` `:18093`).
-2. **Do One Thing Well (Listener + Translator, Not Process Manager)**:
-   - Sits transparently between your CLI coding agent (`pi` inside a Bubblewrap sandbox, `opencode`, etc.) and `llama-server` (`http://127.0.0.1:18080/v1` $\rightarrow$ `http://127.0.0.1:8080/v1`), bypassing system `HTTP_PROXY`/`ALL_PROXY` on loopback automatically.
-3. **Two-Stage Verified Prompt Composer + Persian Guardrail**:
-   - Write in Persian $\rightarrow$ preview & edit the translated English prompt $\rightarrow$ automatic guardrail blocks accidental untranslated Persian text unless explicitly confirmed via checkbox.
-4. **Strict `./.data/` Isolation**:
-   - Zero files written to `~` or `~/.config`. All SQLite telemetry (`WAL`), session logs, and settings stay inside `./.data/` with configurable retention (`1d` / `7d` / `30d` / `forever`).
+1. **Immersive Paragraph-by-Paragraph Bilingual View (Zero Duplicate Code Blocks)**:
+   - Fenced code blocks (` ``` `) are rendered **once** untouched with syntax highlighting.
+   - Switch instantly between **Interleaved (`EN + FA` paragraph-by-paragraph)**, **Full-Page Clean Persian (`FA + Code`)**, or **Pure English (`Proxy-Only`)**.
+2. **Pro KV-Cache Hunter & Categorized Token Ledger (Works With or Without Translation)**:
+   - Toggle **Pure Proxy Mode** (`ترجمه خاموش`) anytime to use `agent-bridge` purely as a zero-overhead mid-path `/v1` KV-cache hunter (`Cached KV %`, `Uncached Input`, `Output`, `pp/tg` speeds, `KV FLUSH!` drop detector, and `O(1)` multiplication estimate of Persian-vs-English token savings).
+3. **Real Interactive `pi` TUI in Terminal + Web Extraction**:
+   - Point any standalone CLI agent (`pi`, `opencode`, `aider`) at `http://127.0.0.1:18080/v1` to extract streaming replies, `<think>`, and tool calls automatically.
+   - Or launch `python3 cli.py --wrap pi` inside your sandbox terminal to keep **100% genuine interactive `pi` TUI** open in the terminal while also typing verified English prompts straight from the Web UI into `pi` via PTY!
+4. **Built-in Online + Standard API Offline Translation & Strict `./.data/` Isolation**:
+   - Built-in online translator (`0` extra servers) + offline OpenAI (`/v1/chat/completions`) & REST (`/translate`) APIs; all state isolated inside `./.data/`.
 
 ## Quick Start (NixOS Host + Sandboxed `pi`)
 
@@ -21,9 +22,10 @@ Lightweight, zero-dependency local wire listener (`/v1`), **built-in** prose-onl
 llama-server -m ~/models/qwen3.5-4b-claude-3xmerge-heretic-q4_k_m.gguf \
   --device Vulkan1 -ngl 99 --jinja --metrics -ctk q8_0 -ctv q8_0 -c 32768 --port 8080
 
-# Terminal 2 (Normal Host — NO sandbox needed for agent-bridge):
+# Terminal 2 (Normal Host): Start Agent Bridge UI & /v1 Proxy
 python3 bridge.py --host 127.0.0.1 --port 18080 --upstream http://127.0.0.1:8080
 
-# Terminal 3 (Inside your Sandbox `dev agent` / `box` on target project folder):
-python3 /path/to/agent-bridge/cli.py --pi-worker
+# Terminal 3 (Inside your Sandbox `box` / `dev agent` on target project folder):
+# Opens the REAL interactive `pi` TUI + links Web UI Send & live /v1 extraction!
+python3 /path/to/agent-bridge/cli.py --wrap pi
 ```

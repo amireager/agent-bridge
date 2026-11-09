@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Isolated ./.data/ persistence, per-model/per-agent SQLite telemetry, and retention manager."""
+"""Isolated ./.data/ persistence, KV-Cache Hunter SQLite ledger, and retention manager."""
 
 from __future__ import annotations
 
@@ -94,6 +94,8 @@ class DataStore:
                     uncached_input INTEGER NOT NULL,
                     cached_input INTEGER NOT NULL,
                     output_tokens INTEGER NOT NULL,
+                    saved_fa_tokens INTEGER NOT NULL DEFAULT 0,
+                    kv_status TEXT NOT NULL DEFAULT 'cold',
                     prompt_ms REAL NOT NULL,
                     decode_ms REAL NOT NULL,
                     prompt_tps REAL NOT NULL,
@@ -104,42 +106,10 @@ class DataStore:
                 """
             )
             cols = {r[1] for r in conn.execute("PRAGMA table_info(llm_requests);").fetchall()}
-            if "uncached_input" not in cols and "prompt_tokens" in cols:
-                conn.executescript(
-                    """
-                    ALTER TABLE llm_requests RENAME TO llm_requests_legacy;
-                    CREATE TABLE llm_requests (
-                        id INTEGER PRIMARY KEY AUTOINCREMENT,
-                        ts REAL NOT NULL,
-                        hour_bucket TEXT NOT NULL,
-                        agent TEXT NOT NULL,
-                        session_id TEXT NOT NULL,
-                        model TEXT NOT NULL,
-                        uncached_input INTEGER NOT NULL,
-                        cached_input INTEGER NOT NULL,
-                        output_tokens INTEGER NOT NULL,
-                        prompt_ms REAL NOT NULL,
-                        decode_ms REAL NOT NULL,
-                        prompt_tps REAL NOT NULL,
-                        decode_tps REAL NOT NULL,
-                        shadow_cost_usd REAL NOT NULL,
-                        preview TEXT NOT NULL
-                    );
-                    INSERT INTO llm_requests (
-                        id, ts, hour_bucket, agent, session_id, model,
-                        uncached_input, cached_input, output_tokens,
-                        prompt_ms, decode_ms, prompt_tps, decode_tps,
-                        shadow_cost_usd, preview
-                    )
-                    SELECT
-                        id, ts, hour_bucket, agent, session_id, model_name,
-                        prompt_tokens, cached_tokens, completion_tokens,
-                        0.0, duration_ms, prompt_tps, decode_tps,
-                        0.0, preview
-                    FROM llm_requests_legacy;
-                    DROP TABLE llm_requests_legacy;
-                    """
-                )
+            if "saved_fa_tokens" not in cols:
+                conn.execute("ALTER TABLE llm_requests ADD COLUMN saved_fa_tokens INTEGER NOT NULL DEFAULT 0;")
+            if "kv_status" not in cols:
+                conn.execute("ALTER TABLE llm_requests ADD COLUMN kv_status TEXT NOT NULL DEFAULT 'cold';")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_req_ts ON llm_requests(ts);")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_req_agent ON llm_requests(agent);")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_req_model ON llm_requests(model);")
@@ -149,17 +119,17 @@ class DataStore:
         return {
             "ui": {
                 "sidebar_side": "left",
-                "theme": "hacker-dark",
-                "show_english_reply": True,   # نمایش/مخفی کردن متن انگلیسی کنار ترجمه فارسی
+                "theme": "arena-dark",
+                "chat_mode": "interleaved",  # interleaved (EN+FA per block) | fa_only | en_only
                 "show_think": True,
                 "show_tools": True,
                 "show_inline_tokens": True,
                 "show_shadow_cost": True,
-                "show_wire_en": True,
             },
             "translation": {
-                "engine": "builtin-online",   # builtin-online (0 external servers) | bergamot | plamo | offline-openai
-                "proxy": "",                  # Optional proxy e.g. socks5h://127.0.0.1:1080 or http://127.0.0.1:10808
+                "enabled": True,             # False = Pure Mid-Path Proxy / KV Hunter Mode!
+                "engine": "builtin-online",  # builtin-online | bergamot | plamo | offline-openai
+                "proxy": "",
                 "openai_model": "hy-mt2-1.8b",
                 "endpoints": {
                     "bergamot": "http://127.0.0.1:18092",
@@ -176,7 +146,7 @@ class DataStore:
                 "active_profile": "claude-sonnet-4.6",
             },
             "retention": {
-                "days": 7,  # 1 | 7 | 30 | 0 (forever)
+                "days": 7,
                 "auto_prune_on_boot": True,
             },
         }
@@ -195,11 +165,7 @@ class DataStore:
         if not self.config_path.exists():
             self.save_config(defaults)
         else:
-            raw = self.load_config_raw()
-            # Migrate upstream_url if previously under engine
-            if "engine" in raw and "upstream_url" in raw["engine"]:
-                raw.setdefault("tap", {})["upstream_url"] = raw["engine"]["upstream_url"]
-            merged = self._deep_merge(defaults, raw)
+            merged = self._deep_merge(defaults, self.load_config_raw())
             self.save_config(merged)
 
         if not self.glossary_path.exists():
@@ -259,24 +225,58 @@ class DataStore:
         uncached_input: int,
         cached_input: int,
         output_tokens: int,
+        saved_fa_tokens: int = 0,
         prompt_ms: float,
         decode_ms: float,
         prompt_tps: float,
         decode_tps: float,
         shadow_cost_usd: float,
         preview: str,
-    ) -> None:
+    ) -> str:
         now = time.time()
         hour_bucket = time.strftime("%Y-%m-%d %H:00", time.localtime(now))
+        tot_in = int(uncached_input) + int(cached_input)
+        hit_ratio = (cached_input / tot_in) if tot_in > 0 else 0.0
+
         with self._db_lock, sqlite3.connect(self.db_path) as conn:
+            # Cache-Hunter Diagnostic: detect sudden KV eviction / prompt rewrite!
+            prev = conn.execute(
+                """
+                SELECT uncached_input, cached_input, ts
+                FROM llm_requests
+                WHERE agent = ? AND model = ?
+                ORDER BY id DESC LIMIT 1
+                """,
+                (agent, model),
+            ).fetchone()
+
+            if prev and (now - float(prev[2])) < 1200:
+                prev_tot = int(prev[0]) + int(prev[1])
+                if prev_tot >= 400 and cached_input < (prev_tot * 0.35) and uncached_input > 300:
+                    kv_status = "flush"
+                elif hit_ratio >= 0.75:
+                    kv_status = "warm"
+                elif hit_ratio >= 0.25:
+                    kv_status = "partial"
+                else:
+                    kv_status = "cold"
+            else:
+                if hit_ratio >= 0.75:
+                    kv_status = "warm"
+                elif hit_ratio >= 0.25:
+                    kv_status = "partial"
+                else:
+                    kv_status = "cold"
+
             conn.execute(
                 """
                 INSERT INTO llm_requests (
                     ts, hour_bucket, agent, session_id, model,
                     uncached_input, cached_input, output_tokens,
+                    saved_fa_tokens, kv_status,
                     prompt_ms, decode_ms, prompt_tps, decode_tps,
                     shadow_cost_usd, preview
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     now,
@@ -287,6 +287,8 @@ class DataStore:
                     int(uncached_input),
                     int(cached_input),
                     int(output_tokens),
+                    int(saved_fa_tokens),
+                    kv_status,
                     float(prompt_ms),
                     float(decode_ms),
                     float(prompt_tps),
@@ -295,6 +297,7 @@ class DataStore:
                     preview[:200],
                 ),
             )
+        return kv_status
 
     def prune_expired(self, days: int | None = None) -> dict:
         cfg = self.load_config()
@@ -370,6 +373,8 @@ class DataStore:
                         COALESCE(SUM(uncached_input), 0) AS u_in,
                         COALESCE(SUM(cached_input), 0) AS c_in,
                         COALESCE(SUM(output_tokens), 0) AS out_t,
+                        COALESCE(SUM(saved_fa_tokens), 0) AS saved_fa,
+                        COALESCE(SUM(CASE WHEN kv_status = 'flush' THEN 1 ELSE 0 END), 0) AS flushes,
                         COALESCE(MAX(uncached_input + cached_input), 0) AS peak_ctx,
                         COALESCE(AVG(NULLIF(decode_tps, 0)), 0) AS avg_tg,
                         COALESCE(AVG(NULLIF(prompt_tps, 0)), 0) AS avg_pp
@@ -386,8 +391,11 @@ class DataStore:
                     "requests": int(row["reqs"]),
                     "uncached_input": u_in,
                     "cached_input": c_in,
+                    "total_input": tot_in,
                     "output_tokens": out_t,
                     "total_tokens": tot_in + out_t,
+                    "saved_fa_tokens": int(row["saved_fa"]),
+                    "flush_count": int(row["flushes"]),
                     "peak_ctx_tokens": int(row["peak_ctx"]),
                     "cache_hit_pct": round((c_in / tot_in * 100.0), 1) if tot_in > 0 else 0.0,
                     "avg_decode_tps": round(float(row["avg_tg"]), 1),
@@ -405,6 +413,9 @@ class DataStore:
                     COALESCE(SUM(uncached_input), 0) AS u_in,
                     COALESCE(SUM(cached_input), 0) AS c_in,
                     COALESCE(SUM(output_tokens), 0) AS out_t,
+                    COALESCE(SUM(saved_fa_tokens), 0) AS saved_fa,
+                    COALESCE(SUM(CASE WHEN kv_status = 'flush' THEN 1 ELSE 0 END), 0) AS flushes,
+                    COALESCE(AVG(NULLIF(prompt_tps, 0)), 0) AS avg_pp,
                     COALESCE(AVG(NULLIF(decode_tps, 0)), 0) AS avg_tg
                 FROM llm_requests
                 WHERE ts >= ?
@@ -422,7 +433,9 @@ class DataStore:
                     COALESCE(SUM(uncached_input), 0) AS u_in,
                     COALESCE(SUM(cached_input), 0) AS c_in,
                     COALESCE(SUM(output_tokens), 0) AS out_t,
+                    COALESCE(SUM(CASE WHEN kv_status = 'flush' THEN 1 ELSE 0 END), 0) AS flushes,
                     COALESCE(MAX(uncached_input + cached_input), 0) AS peak_ctx,
+                    COALESCE(AVG(NULLIF(prompt_tps, 0)), 0) AS avg_pp,
                     COALESCE(AVG(NULLIF(decode_tps, 0)), 0) AS avg_tg
                 FROM llm_requests
                 WHERE ts >= ?
@@ -452,11 +465,11 @@ class DataStore:
             recent_rows = conn.execute(
                 f"""
                 SELECT id, ts, agent, session_id, model, uncached_input, cached_input,
-                       output_tokens, prompt_tps, decode_tps, preview
+                       output_tokens, saved_fa_tokens, kv_status, prompt_tps, decode_tps, preview
                 FROM llm_requests
                 WHERE ts >= ? {extra_sql}
                 ORDER BY id DESC
-                LIMIT 35
+                LIMIT 40
                 """,
                 [win_since, *params_extra],
             ).fetchall()
@@ -466,20 +479,25 @@ class DataStore:
             for r in rows:
                 u_in, c_in, out_t = int(r["u_in"]), int(r["c_in"]), int(r["out_t"])
                 tot_in = u_in + c_in
+                rk = r.keys()
                 item = {
                     key_name: r[key_name],
                     "requests": int(r["reqs"]),
                     "uncached_input": u_in,
                     "cached_input": c_in,
+                    "total_input": tot_in,
                     "output_tokens": out_t,
                     "total_tokens": tot_in + out_t,
+                    "flushes": int(r["flushes"]) if "flushes" in rk else 0,
+                    "saved_fa_tokens": int(r["saved_fa"]) if "saved_fa" in rk else 0,
                     "cache_hit_pct": round((c_in / tot_in * 100.0), 1) if tot_in > 0 else 0.0,
+                    "avg_prompt_tps": round(float(r["avg_pp"]), 1) if "avg_pp" in rk else 0.0,
                     "avg_decode_tps": round(float(r["avg_tg"]), 1),
                     "shadow_cost_usd": round(
                         self.compute_shadow_cost(u_in, c_in, out_t, pricing_profile), 5
                     ),
                 }
-                if "peak_ctx" in r.keys():
+                if "peak_ctx" in rk:
                     item["peak_ctx"] = int(r["peak_ctx"])
                 out.append(item)
             return out
@@ -495,30 +513,34 @@ class DataStore:
             for r in hourly_rows
         ]
 
-        recent = [
-            {
-                "id": int(r["id"]),
-                "time": time.strftime("%H:%M:%S", time.localtime(float(r["ts"]))),
-                "agent": r["agent"],
-                "session_id": r["session_id"],
-                "model": r["model"],
-                "uncached_in": int(r["uncached_input"]),
-                "cached_in": int(r["cached_input"]),
-                "out_tok": int(r["output_tokens"]),
-                "decode_tps": round(float(r["decode_tps"]), 1),
-                "cost_usd": round(
-                    self.compute_shadow_cost(
-                        int(r["uncached_input"]),
-                        int(r["cached_input"]),
-                        int(r["output_tokens"]),
-                        pricing_profile,
+        recent = []
+        for r in recent_rows:
+            u_in = int(r["uncached_input"])
+            c_in = int(r["cached_input"])
+            out_t = int(r["output_tokens"])
+            tot_in = u_in + c_in
+            recent.append(
+                {
+                    "id": int(r["id"]),
+                    "time": time.strftime("%H:%M:%S", time.localtime(float(r["ts"]))),
+                    "agent": r["agent"],
+                    "session_id": r["session_id"],
+                    "model": r["model"],
+                    "uncached_in": u_in,
+                    "cached_in": c_in,
+                    "total_in": tot_in,
+                    "hit_pct": round((c_in / tot_in * 100.0), 1) if tot_in > 0 else 0.0,
+                    "out_tok": out_t,
+                    "saved_fa": int(r["saved_fa_tokens"]),
+                    "kv_status": r["kv_status"],
+                    "prompt_tps": round(float(r["prompt_tps"]), 1),
+                    "decode_tps": round(float(r["decode_tps"]), 1),
+                    "cost_usd": round(
+                        self.compute_shadow_cost(u_in, c_in, out_t, pricing_profile), 6
                     ),
-                    6,
-                ),
-                "preview": r["preview"],
-            }
-            for r in recent_rows
-        ]
+                    "preview": r["preview"],
+                }
+            )
 
         return {
             "window_hours": window_hours,

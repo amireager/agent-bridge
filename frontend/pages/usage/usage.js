@@ -1,4 +1,4 @@
-// Modular Telemetry Page — Observed-Model Selector, KV Volume, Agent Split & X-Ray
+// Pro KV-Cache Hunter, Categorized Token Analytics & Zero-Overhead Persian Savings
 window.ABUsagePage = (() => {
   const { esc, api } = window.ABUtils;
 
@@ -14,6 +14,25 @@ window.ABUsagePage = (() => {
     await api('/api/telemetry/clear', {});
   }
 
+  function renderTokBar(kv, uncached, out) {
+    const tot = Math.max(1, (kv || 0) + (uncached || 0) + (out || 0));
+    const pKv = ((kv || 0) / tot * 100).toFixed(1);
+    const pIn = ((uncached || 0) / tot * 100).toFixed(1);
+    const pOut = ((out || 0) / tot * 100).toFixed(1);
+    return `
+      <div class="tok-bar" title="Cached KV: ${kv} | Uncached In: ${uncached} | Output: ${out}">
+        <i class="seg-kv" style="width:${pKv}%"></i>
+        <i class="seg-in" style="width:${pIn}%"></i>
+        <i class="seg-out" style="width:${pOut}%"></i>
+      </div>`;
+  }
+
+  function renderKvPill(status, pct) {
+    const st = status || (pct >= 75 ? 'warm' : (pct >= 25 ? 'partial' : 'cold'));
+    const lbl = st === 'flush' ? `FLUSH (${pct}%)` : `${st.toUpperCase()} ${pct}%`;
+    return `<span class="kv-pill ${esc(st)}">${esc(lbl)}</span>`;
+  }
+
   function render(host, state, route) {
     const u = state.usage || {};
     const w = u.window || {};
@@ -27,19 +46,25 @@ window.ABUsagePage = (() => {
         <div class="panel-wrap">
           <div class="panel">
             <div class="panel-head">
-              <h3>بازرس پیام خام عبوری بین عامل و مدل (Wire X-Ray)</h3>
+              <h3>بازرس بسته خام عبوری (Wire X-Ray Inspector)</h3>
               <span class="mono muted">${items.length} frames</span>
             </div>
-            <div style="display:flex;flex-direction:column;gap:8px;">
-              ${items.map(it => `
-                <details class="trace-acc">
-                  <summary>
-                    <span>[${esc(it.ts)}] agent=${esc(it.agent)} · model=${esc(it.model)} · msgs=${it.message_count} · sys=${it.system_chars}ch</span>
-                    <span>kv:${it.cached_in} + in:${it.uncached_in} → out:${it.out_tok} (${it.tg_tps}t/s)</span>
-                  </summary>
-                  <div class="acc-body">${esc(JSON.stringify(it.messages_tail, null, 2))}</div>
-                </details>
-              `).join('') || '<div class="muted">هنوز ترافیکی از گذرگاه عبور نکرده است.</div>'}
+            <div style="display:flex;flex-direction:column;gap:10px;">
+              ${items.map(it => {
+                const totIn = (it.cached_in || 0) + (it.uncached_in || 0);
+                const pct = totIn > 0 ? Math.round((it.cached_in / totIn) * 100) : 0;
+                return `
+                  <details class="trace-acc">
+                    <summary>
+                      <span>[${esc(it.ts)}] <strong>${esc(it.agent)}</strong> → ${esc(it.model)} · msgs:${it.message_count} · sys:${it.system_chars}ch</span>
+                      <span style="display:flex;align-items:center;gap:8px;">
+                        ${renderKvPill(it.kv_status, pct)}
+                        <span>in:${it.uncached_in} · kv:${it.cached_in} · out:${it.out_tok} (${it.tg_tps}t/s)</span>
+                      </span>
+                    </summary>
+                    <div class="acc-body">${esc(JSON.stringify(it.messages_tail, null, 2))}</div>
+                  </details>`;
+              }).join('') || '<div class="muted">هنوز ترافیکی از گذرگاه /v1 عبور نکرده است.</div>'}
             </div>
           </div>
         </div>`;
@@ -51,74 +76,90 @@ window.ABUsagePage = (() => {
         <div class="panel-wrap">
           <div class="panel">
             <div class="panel-head">
-              <h3>تفکیک توکن و کش بر اساس نام مدل ارسالی عامل (Observed Models)</h3>
+              <h3>تفکیک دقیق توکن، کش و حافظه بر اساس مدل (Observed Models)</h3>
               <span class="mono muted">window: ${curWin === 0 ? 'ALL' : curWin + 'h'}</span>
             </div>
-            <table class="grid-table">
-              <thead>
-                <tr>
-                  <th>نام مدل در پیام عامل</th>
-                  <th>درخواست</th>
-                  <th>ورودی جدید</th>
-                  <th>خوانده از کش</th>
-                  <th>نرخ کش</th>
-                  <th>خروجی</th>
-                  <th>حجم تخمینی کش (q8_0)</th>
-                  <th>سرعت</th>
-                  <th>معادل کلود</th>
-                </tr>
-              </thead>
-              <tbody>
-                ${(u.by_model || []).map(m => `
+            <div class="table-scroll">
+              <table class="grid-table">
+                <thead>
                   <tr>
-                    <td class="m"><strong style="cursor:pointer;color:var(--cyan)" onclick="ABApp.filterByObservedModel('${esc(m.model)}')">${esc(m.model)}</strong></td>
-                    <td class="m">${m.requests}</td>
-                    <td class="m">${m.uncached_input.toLocaleString()}</td>
-                    <td class="m" style="color:var(--phosphor)">${m.cached_input.toLocaleString()}</td>
-                    <td class="m">${m.cache_hit_pct}%</td>
-                    <td class="m">${m.output_tokens.toLocaleString()}</td>
-                    <td class="m">~${m.est_kv_mb_q8 || 0} MB (peak ${m.peak_ctx || 0}t)</td>
-                    <td class="m">${m.avg_decode_tps} t/s</td>
-                    <td class="m">$${m.shadow_cost_usd}</td>
+                    <th>مدل</th>
+                    <th>درخواست</th>
+                    <th>ورودی جدید (Uncached)</th>
+                    <th>کش بازیافتی (KV Hit)</th>
+                    <th>نرخ کش و افت</th>
+                    <th>خروجی (Output)</th>
+                    <th>توزیع توکن</th>
+                    <th>حجم کش تخمینی (q8_0)</th>
+                    <th>سرعت تولید</th>
                   </tr>
-                `).join('') || '<tr><td colspan="9" class="muted">هنوز مدلی ثبت نشده است.</td></tr>'}
-              </tbody>
-            </table>
+                </thead>
+                <tbody>
+                  ${(u.by_model || []).map(m => `
+                    <tr>
+                      <td class="m"><strong style="cursor:pointer;color:var(--cyan)" onclick="ABApp.filterByObservedModel('${esc(m.model)}')">${esc(m.model)}</strong></td>
+                      <td class="m">${m.requests}</td>
+                      <td class="m" style="color:var(--cyan)">${m.uncached_input.toLocaleString()}</td>
+                      <td class="m" style="color:var(--phosphor)">${m.cached_input.toLocaleString()}</td>
+                      <td class="m">
+                        ${renderKvPill(m.flushes > 0 ? 'flush' : '', m.cache_hit_pct)}
+                        ${m.flushes > 0 ? `<span class="muted">(${m.flushes} flush)</span>` : ''}
+                      </td>
+                      <td class="m" style="color:var(--violet)">${m.output_tokens.toLocaleString()}</td>
+                      <td style="min-width:110px;">${renderTokBar(m.cached_input, m.uncached_input, m.output_tokens)}</td>
+                      <td class="m">~${m.est_kv_mb_q8 || 0} MB (peak ${(m.peak_ctx || 0).toLocaleString()})</td>
+                      <td class="m">${m.avg_decode_tps} t/s</td>
+                    </tr>
+                  `).join('') || '<tr><td colspan="9" class="muted">هنوز مدلی ثبت نشده است.</td></tr>'}
+                </tbody>
+              </table>
+            </div>
           </div>
 
           <div class="panel">
-            <div class="panel-head"><h3>تفکیک توکن و کش بر اساس عامل (Agents)</h3></div>
-            <table class="grid-table">
-              <thead>
-                <tr>
-                  <th>نام عامل</th><th>درخواست</th><th>ورودی جدید</th><th>خوانده از کش</th><th>نرخ کش</th><th>خروجی</th><th>سرعت</th><th>معادل کلود</th>
-                </tr>
-              </thead>
-              <tbody>
-                ${(u.by_agent || []).map(a => `
+            <div class="panel-head"><h3>مقایسه بازده کش عامل‌ها (Agents KV Efficiency)</h3></div>
+            <div class="table-scroll">
+              <table class="grid-table">
+                <thead>
                   <tr>
-                    <td class="m"><strong>${esc(a.agent)}</strong></td>
-                    <td class="m">${a.requests}</td>
-                    <td class="m">${a.uncached_input.toLocaleString()}</td>
-                    <td class="m" style="color:var(--phosphor)">${a.cached_input.toLocaleString()}</td>
-                    <td class="m">${a.cache_hit_pct}%</td>
-                    <td class="m">${a.output_tokens.toLocaleString()}</td>
-                    <td class="m">${a.avg_decode_tps} t/s</td>
-                    <td class="m">$${a.shadow_cost_usd}</td>
+                    <th>عامل</th>
+                    <th>درخواست</th>
+                    <th>ورودی جدید (Uncached)</th>
+                    <th>کش KV</th>
+                    <th>نرخ کش</th>
+                    <th>خروجی (Output)</th>
+                    <th>صرفه‌جویی FA→EN</th>
+                    <th>سرعت</th>
+                    <th>معادل کلود</th>
                   </tr>
-                `).join('') || '<tr><td colspan="8" class="muted">داده‌ای ثبت نشده است.</td></tr>'}
-              </tbody>
-            </table>
+                </thead>
+                <tbody>
+                  ${(u.by_agent || []).map(a => `
+                    <tr>
+                      <td class="m"><strong>${esc(a.agent)}</strong></td>
+                      <td class="m">${a.requests}</td>
+                      <td class="m" style="color:var(--cyan)">${a.uncached_input.toLocaleString()}</td>
+                      <td class="m" style="color:var(--phosphor)">${a.cached_input.toLocaleString()}</td>
+                      <td class="m">${renderKvPill(a.flushes > 0 ? 'flush' : '', a.cache_hit_pct)}</td>
+                      <td class="m" style="color:var(--violet)">${a.output_tokens.toLocaleString()}</td>
+                      <td class="m" style="color:var(--phosphor)">+${(a.saved_fa_tokens || 0).toLocaleString()} tok</td>
+                      <td class="m">${a.avg_decode_tps} t/s</td>
+                      <td class="m">$${a.shadow_cost_usd}</td>
+                    </tr>
+                  `).join('') || '<tr><td colspan="9" class="muted">داده‌ای ثبت نشده است.</td></tr>'}
+                </tbody>
+              </table>
+            </div>
           </div>
         </div>`;
       return;
     }
 
-    // Default: usage-overview with Model & Agent Filter Selectors
+    // Default: usage-overview (Categorized KV-Cache Hunter Dashboard)
     const maxBar = Math.max(1, ...(u.hourly || []).map(h => h.uncached_input + h.cached_input + h.output_tokens));
     const winBtns = [
       [1, '1H'], [24, '24H'], [168, '7D'], [720, '30D'], [0, 'ALL']
-    ].map(([hrs, lbl]) => `<button class="btn ghost ${curWin === hrs ? 'on' : ''}" onclick="ABUsagePage.setFilter({hours:${hrs}})">${lbl}</button>`).join('');
+    ].map(([hrs, lbl]) => `<button class="seg-btn ${curWin === hrs ? 'on' : ''}" onclick="ABUsagePage.setFilter({hours:${hrs}})">${lbl}</button>`).join('');
 
     const modelOpts = ['all', ...(u.observed_models || [])].map(m =>
       `<option value="${esc(m)}" ${curModel === m ? 'selected' : ''}>${m === 'all' ? 'همه مدل‌ها (All Models)' : esc(m)}</option>`
@@ -132,80 +173,138 @@ window.ABUsagePage = (() => {
       `<option value="${esc(k)}" ${k === u.pricing_profile ? 'selected' : ''}>${esc(v.label)}</option>`
     ).join('');
 
+    const totAll = Math.max(1, w.total_tokens || 0);
+    const savedFa = w.saved_fa_tokens || 0;
+
     host.innerHTML = `
       <div class="panel-wrap">
-        <div class="panel" style="padding:10px 14px;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px;">
-          <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;">
-            ${winBtns}
-            <select class="btn mono" onchange="ABUsagePage.setFilter({model:this.value})" title="فیلتر بر اساس نام مدل">${modelOpts}</select>
-            <select class="btn mono" onchange="ABUsagePage.setFilter({agent:this.value})" title="فیلتر بر اساس عامل">${agentOpts}</select>
+        <div class="panel" style="padding:12px 18px;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:12px;">
+          <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;">
+            <div class="seg-group">${winBtns}</div>
+            <select class="btn mono" onchange="ABUsagePage.setFilter({model:this.value})">${modelOpts}</select>
+            <select class="btn mono" onchange="ABUsagePage.setFilter({agent:this.value})">${agentOpts}</select>
           </div>
-          <div style="display:flex;gap:8px;align-items:center;">
+          <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
             <select class="btn mono" onchange="ABUsagePage.setPricing(this.value)">${profOpts}</select>
-            <button class="btn danger" onclick="ABUsagePage.clearAll()">ریست کنتور</button>
+            <button class="btn danger" onclick="ABUsagePage.clearAll()">صفر کردن آمار</button>
           </div>
         </div>
 
+        <!-- ۵ ستون تفکیک‌شده و استاندارد برای شکارچی کش و توکن -->
         <div class="stat-strip">
           <div class="stat-box">
-            <div class="stat-lbl">کل توکن‌های شمارش‌شده</div>
-            <div class="stat-num">${(w.total_tokens || 0).toLocaleString()}</div>
-            <div class="stat-sub">reqs:${w.requests || 0} · out:${(w.output_tokens || 0).toLocaleString()}</div>
+            <div class="stat-lbl"><span>کش بازیافتی (Cached KV)</span><span class="kv-pill warm">${w.cache_hit_pct || 0}%</span></div>
+            <div class="stat-num" style="color:var(--phosphor)">${(w.cached_input || 0).toLocaleString()}</div>
+            <div class="stat-sub">flushes: ${w.flush_count || 0} · peak_ctx: ${(w.peak_ctx_tokens || 0).toLocaleString()}</div>
           </div>
+
           <div class="stat-box">
-            <div class="stat-lbl">بازده کش (KV Cache Hit)</div>
-            <div class="stat-num" style="color:var(--phosphor)">${w.cache_hit_pct || 0}%</div>
-            <div class="stat-sub">kv:${(w.cached_input || 0).toLocaleString()} · new:${(w.uncached_input || 0).toLocaleString()}</div>
+            <div class="stat-lbl"><span>ورودی پردازش‌شده (Uncached In)</span><span class="mono muted">pp</span></div>
+            <div class="stat-num" style="color:var(--cyan)">${(w.uncached_input || 0).toLocaleString()}</div>
+            <div class="stat-sub">pp_speed: ${w.avg_prompt_tps || 0} t/s · reqs: ${w.requests || 0}</div>
           </div>
+
           <div class="stat-box">
-            <div class="stat-lbl">بیشینه کانتکست و سرعت</div>
-            <div class="stat-num">${w.avg_decode_tps || 0} t/s</div>
-            <div class="stat-sub">peak_ctx:${(w.peak_ctx_tokens || 0).toLocaleString()} tok · pp:${w.avg_prompt_tps || 0} t/s</div>
+            <div class="stat-lbl"><span>توکن خروجی مدل (Output)</span><span class="mono muted">tg</span></div>
+            <div class="stat-num" style="color:var(--violet)">${(w.output_tokens || 0).toLocaleString()}</div>
+            <div class="stat-sub">tg_speed: ${w.avg_decode_tps || 0} t/s · total: ${(w.total_tokens || 0).toLocaleString()}</div>
           </div>
+
           <div class="stat-box">
-            <div class="stat-lbl">هزینه معادل کلود</div>
+            <div class="stat-lbl"><span>صرفه‌جویی تخمینی انگلیسی بر فارسی</span><span class="mono muted">O(1) ×</span></div>
+            <div class="stat-num" style="color:var(--phosphor)">+${savedFa.toLocaleString()}</div>
+            <div class="stat-sub">ضریب سبک: FA ~0.68 vs EN ~0.25 tok/ch</div>
+          </div>
+
+          <div class="stat-box">
+            <div class="stat-lbl"><span>ارزش معادل کلود (Shadow $)</span><span class="mono muted">USD</span></div>
             <div class="stat-num">$${Number(w.shadow_cost_usd || 0).toFixed(4)}</div>
-            <div class="stat-sub">1h: $${Number(u.last_1h?.shadow_cost_usd || 0).toFixed(4)}</div>
+            <div class="stat-sub">last 1h: $${Number(u.last_1h?.shadow_cost_usd || 0).toFixed(4)}</div>
           </div>
         </div>
 
+        <!-- نوار تناسب کل توکن‌های عبوری -->
+        <div class="panel" style="padding:14px 20px;">
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;font-size:12px;flex-wrap:wrap;gap:8px;">
+            <strong>نسبت تفکیکی کل توکن‌های عبوری در این بازه</strong>
+            <div class="mono" style="display:flex;gap:14px;direction:ltr;font-size:11.5px;">
+              <span style="color:var(--phosphor)">● Cached KV (${Math.round((w.cached_input || 0) / totAll * 100)}%)</span>
+              <span style="color:var(--cyan)">● Uncached Input (${Math.round((w.uncached_input || 0) / totAll * 100)}%)</span>
+              <span style="color:var(--violet)">● Output (${Math.round((w.output_tokens || 0) / totAll * 100)}%)</span>
+            </div>
+          </div>
+          ${renderTokBar(w.cached_input || 0, w.uncached_input || 0, w.output_tokens || 0)}
+        </div>
+
+        <!-- نمودار ساعتی تفکیک‌شده -->
         <div class="panel">
-          <div class="panel-head"><h3>هیستوگرام ساعتی مصرف توکن</h3></div>
-          <div style="display:flex;align-items:flex-end;gap:8px;height:105px;direction:ltr;padding-top:10px;">
+          <div class="panel-head">
+            <h3>نمودار ساعتی بار کش و توکن‌ها (Stacked Hourly Traffic)</h3>
+            <span class="mono muted">سبز = کش KV · آبی = ورودی جدید · بنفش = خروجی</span>
+          </div>
+          <div style="display:flex;align-items:flex-end;gap:10px;height:125px;direction:ltr;padding-top:12px;">
             ${(u.hourly?.length ? u.hourly : [{ hour: '00:00', uncached_input: 0, cached_input: 0, output_tokens: 0 }]).map(h => {
               const tot = h.uncached_input + h.cached_input + h.output_tokens;
-              const px = Math.max(3, Math.round((tot / maxBar) * 74));
-              return `<div style="flex:1;display:flex;flex-direction:column;align-items:center;gap:4px;">
-                <span class="mono muted" style="font-size:10px;">${tot}</span>
-                <div style="width:100%;max-width:34px;height:${px}px;background:var(--fg-1);border-radius:2px 2px 0 0;"></div>
-                <span class="mono muted" style="font-size:10px;">${esc(String(h.hour).slice(-5))}</span>
-              </div>`;
+              const px = Math.max(4, Math.round((tot / maxBar) * 86));
+              const kvH = tot > 0 ? Math.round((h.cached_input / tot) * px) : 0;
+              const inH = tot > 0 ? Math.round((h.uncached_input / tot) * px) : 0;
+              const outH = Math.max(0, px - kvH - inH);
+              return `
+                <div style="flex:1;display:flex;flex-direction:column;align-items:center;gap:5px;">
+                  <span class="mono muted" style="font-size:10px;">${tot > 999 ? (tot / 1000).toFixed(1) + 'k' : tot}</span>
+                  <div style="width:100%;max-width:32px;height:${px}px;display:flex;flex-direction:column;border-radius:6px 6px 2px 2px;overflow:hidden;background:rgba(255,255,255,0.05);">
+                    <i style="height:${outH}px;background:var(--violet);display:block;"></i>
+                    <i style="height:${inH}px;background:var(--cyan);display:block;"></i>
+                    <i style="height:${kvH}px;background:var(--phosphor);display:block;"></i>
+                  </div>
+                  <span class="mono muted" style="font-size:10px;">${esc(String(h.hour).slice(-5))}</span>
+                </div>`;
             }).join('')}
           </div>
         </div>
 
+        <!-- جدول تمیز آخرین درخواست‌ها برای شکار افت کش -->
         <div class="panel">
-          <div class="panel-head"><h3>آخرین پیام‌های عبوری شمارش‌شده</h3></div>
-          <table class="grid-table">
-            <thead>
-              <tr><th>ساعت</th><th>عامل</th><th>نام مدل</th><th>ورودی جدید</th><th>کش KV</th><th>خروجی</th><th>سرعت</th><th>هزینه فرضی</th><th>پیش‌نمایش</th></tr>
-            </thead>
-            <tbody>
-              ${(u.recent || []).map(r => `
+          <div class="panel-head">
+            <h3>جدول شکارچی کش — آخرین درخواست‌های عبوری از <code>/v1</code></h3>
+            <span class="mono muted">ردیابی زنده پرش یا افت ناگهانی کش (KV Flush Detector)</span>
+          </div>
+          <div class="table-scroll">
+            <table class="grid-table">
+              <thead>
                 <tr>
-                  <td class="m">${esc(r.time)}</td>
-                  <td class="m"><strong>${esc(r.agent)}</strong></td>
-                  <td class="m" style="color:var(--cyan)">${esc(r.model)}</td>
-                  <td class="m">${r.uncached_in}</td>
-                  <td class="m" style="color:var(--phosphor)">${r.cached_in}</td>
-                  <td class="m">${r.out_tok}</td>
-                  <td class="m">${r.decode_tps}</td>
-                  <td class="m">$${r.cost_usd}</td>
-                  <td style="max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${esc(r.preview)}</td>
+                  <th>زمان</th>
+                  <th>عامل</th>
+                  <th>مدل</th>
+                  <th>وضعیت کش</th>
+                  <th>کش KV</th>
+                  <th>ورودی جدید</th>
+                  <th>خروجی</th>
+                  <th>توزیع</th>
+                  <th>سرعت (pp / tg)</th>
+                  <th>صرفه‌جویی FA</th>
+                  <th>پیش‌نمایش پرامپت</th>
                 </tr>
-              `).join('')}
-            </tbody>
-          </table>
+              </thead>
+              <tbody>
+                ${(u.recent || []).map(r => `
+                  <tr>
+                    <td class="m">${esc(r.time)}</td>
+                    <td class="m"><strong>${esc(r.agent)}</strong></td>
+                    <td class="m" style="color:var(--cyan)">${esc(r.model)}</td>
+                    <td class="m">${renderKvPill(r.kv_status, r.cache_pct)}</td>
+                    <td class="m" style="color:var(--phosphor)">${r.cached_in.toLocaleString()}</td>
+                    <td class="m" style="color:var(--cyan)">${r.uncached_in.toLocaleString()}</td>
+                    <td class="m" style="color:var(--violet)">${r.out_tok.toLocaleString()}</td>
+                    <td style="min-width:95px;">${renderTokBar(r.cached_in, r.uncached_in, r.out_tok)}</td>
+                    <td class="m">${r.prompt_tps || 0} / ${r.decode_tps || 0} t/s</td>
+                    <td class="m" style="color:var(--phosphor)">${r.saved_fa > 0 ? '+' + r.saved_fa : '—'}</td>
+                    <td style="max-width:210px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${esc(r.preview)}</td>
+                  </tr>
+                `).join('') || '<tr><td colspan="11" class="muted">هنوز درخواستی ثبت نشده است.</td></tr>'}
+              </tbody>
+            </table>
+          </div>
         </div>
       </div>`;
   }
