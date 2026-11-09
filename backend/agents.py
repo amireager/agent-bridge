@@ -57,6 +57,8 @@ class BridgeHub:
         self._lock = threading.Lock()
         self._sse_clients: list[queue.Queue] = []
         self._inspector_ring: list[dict] = []
+        # Translator endpoints are remembered only for this process after an explicit successful health/translation test.
+        self.tested_translators: list[dict] = []
 
         # 1. Live Terminal Mirrors (keyed by agent_id: 'pi', 'pi-2', 'hermes', ...)
         self.mirrors: dict[str, dict] = {}
@@ -79,7 +81,7 @@ class BridgeHub:
 
         # Active view target: ("mirror", "pi") or ("lab", "<session_id>")
         self.view_kind: str = "mirror"
-        self.view_id: str = "pi"
+        self.view_id: str = ""
         self.session_state: str = "IDLE"
 
         self.usage_window_hours: int = 24
@@ -109,9 +111,6 @@ class BridgeHub:
             except Exception:
                 pass
 
-        if "pi" not in self.mirrors:
-            self.mirrors["pi"] = self._new_mirror_obj("pi")
-
         lab_dir = self.store.sessions_dir / "lab"
         lab_dir.mkdir(parents=True, exist_ok=True)
         for p in sorted(lab_dir.glob("*.json")):
@@ -122,10 +121,6 @@ class BridgeHub:
             except Exception:
                 pass
 
-        if not self.lab_sessions:
-            s = self._make_lab_session("تست مستقیم مدل #1")
-            self.lab_sessions[s["id"]] = s
-            self._persist_lab_session(s)
 
     def _new_mirror_obj(self, agent_id: str) -> dict:
         return {
@@ -192,6 +187,29 @@ class BridgeHub:
         self.pty_heartbeats.pop(agent_id, None)
         self.broadcast_state()
 
+    def delete_mirror(self, agent_id: str) -> bool:
+        """Explicitly remove an offline terminal history; active channels cannot be deleted."""
+        if time.time() - self.pty_heartbeats.get(agent_id, 0.0) <= 25.0:
+            return False
+        self.mirrors.pop(agent_id, None)
+        safe = re.sub(r"[^a-zA-Z0-9_.-]", "-", agent_id) or "agent"
+        try:
+            (self.store.mirrors_dir / f"{safe}.json").unlink(missing_ok=True)
+        except OSError:
+            pass
+        self.broadcast_state()
+        return True
+
+    def rename_lab_session(self, session_id: str, title: str) -> bool:
+        sess = self.lab_sessions.get(session_id)
+        clean = " ".join(str(title or "").split())[:64]
+        if not sess or not clean:
+            return False
+        sess["title"] = clean
+        self._persist_lab_session(sess)
+        self.broadcast_state()
+        return True
+
     # ---- View & Lab Session Controls ----
     def select_view(self, kind: str, target_id: str) -> None:
         if kind == "mirror":
@@ -209,6 +227,80 @@ class BridgeHub:
             self.mirrors[agent_id] = self._new_mirror_obj(agent_id)
             self._persist_mirror(self.mirrors[agent_id])
             self.broadcast_state()
+
+    def cleanup_preview(self, days: int, scopes: list[str]) -> dict:
+        cutoff = 0.0 if int(days) <= 0 else time.time() - int(days) * 86400.0
+        items = []
+        base = self.store.data_dir
+        for scope, folder in (("lab", self.store.sessions_dir / "lab"), ("mirrors", self.store.mirrors_dir)):
+            if scope not in scopes:
+                continue
+            for path in folder.glob("*.json"):
+                if scope == "mirrors":
+                    try:
+                        doc = json.loads(path.read_text(encoding="utf-8"))
+                        aid = str(doc.get("agent_id", path.stem))
+                        if time.time() - self.pty_heartbeats.get(aid, 0.0) <= 25.0:
+                            continue
+                    except Exception:
+                        pass
+                try:
+                    if cutoff == 0 or path.stat().st_mtime < cutoff:
+                        items.append({"scope": scope, "path": str(path.relative_to(base)), "bytes": path.stat().st_size})
+                except OSError:
+                    pass
+        req_count = 0
+        if "telemetry" in scopes:
+            with self.store._db_lock:
+                import sqlite3
+                with sqlite3.connect(self.store.db_path) as conn:
+                    req_count = int(conn.execute("SELECT COUNT(*) FROM llm_requests WHERE ts < ?", (cutoff or time.time()+1,)).fetchone()[0])
+        return {"days": int(days), "scopes": scopes, "telemetry_requests": req_count, "files": items, "file_count": len(items), "bytes": sum(x["bytes"] for x in items)}
+
+    def run_cleanup(self, days: int, scopes: list[str]) -> dict:
+        preview = self.cleanup_preview(days, scopes)
+        cutoff = 0.0 if int(days) <= 0 else time.time() - int(days) * 86400.0
+        deleted_requests = 0
+        db_size_before = self.store.db_path.stat().st_size if self.store.db_path.exists() else 0
+        if "telemetry" in scopes:
+            with self.store._db_lock:
+                import sqlite3
+                with sqlite3.connect(self.store.db_path) as conn:
+                    cur = conn.execute("DELETE FROM llm_requests WHERE ts < ?", (cutoff or time.time()+1,))
+                    deleted_requests = cur.rowcount or 0
+                    conn.commit()
+                    conn.execute("VACUUM;")
+        db_size_after = self.store.db_path.stat().st_size if self.store.db_path.exists() else 0
+        freed_db_bytes = max(0, db_size_before - db_size_after) if "telemetry" in scopes else 0
+        deleted_files = 0
+        freed_file_bytes = 0
+        deleted_lab_ids = []
+        live_ids = {aid for aid, ts in self.pty_heartbeats.items() if time.time()-ts <= 25.0}
+        for item in preview["files"]:
+            path = self.store.data_dir / item["path"]
+            try:
+                if item["scope"] == "lab":
+                    sid = path.stem
+                    self.lab_sessions.pop(sid, None)
+                    deleted_lab_ids.append(sid)
+                elif item["scope"] == "mirrors":
+                    aid = path.stem
+                    if aid in live_ids:
+                        continue
+                    self.mirrors.pop(aid, None)
+                item_bytes = path.stat().st_size if path.exists() else 0
+                path.unlink(missing_ok=True)
+                deleted_files += 1
+                freed_file_bytes += item_bytes
+            except OSError:
+                pass
+        if self.view_kind == "lab" and self.view_id not in self.lab_sessions:
+            if self.lab_sessions:
+                self.view_id = next(iter(self.lab_sessions))
+            else:
+                self.view_kind, self.view_id = "mirror", ""
+        self.broadcast_state()
+        return {"deleted_requests": deleted_requests, "deleted_files": deleted_files, "freed_bytes": freed_file_bytes + freed_db_bytes, "deleted_lab_sessions": len(deleted_lab_ids)}
 
     def clear_observed_history(self) -> dict:
         """Clear telemetry/X-Ray and mirror history; preserve only currently live PTY channels."""
@@ -241,8 +333,6 @@ class BridgeHub:
                     p.unlink(missing_ok=True)
                 except OSError:
                     pass
-        if not self.mirrors and not live_ids:
-            self.mirrors["pi"] = self._new_mirror_obj("pi")
         self.broadcast_state()
         return {"cleared": True, "removed_channels": removed_channels, "preserved_live_channels": len(live_ids)}
 
@@ -263,12 +353,11 @@ class BridgeHub:
         f = self.store.sessions_dir / "lab" / f"{session_id}.json"
         if f.exists():
             f.unlink()
-        if not self.lab_sessions:
-            s = self._make_lab_session("تست مستقیم #1")
-            self.lab_sessions[s["id"]] = s
-            self._persist_lab_session(s)
         if self.view_kind == "lab" and self.view_id == session_id:
-            self.view_id = next(iter(self.lab_sessions.keys()))
+            if self.lab_sessions:
+                self.view_id = next(iter(self.lab_sessions.keys()))
+            else:
+                self.view_kind, self.view_id = "mirror", ""
         self.broadcast_state()
         return True
 
@@ -301,8 +390,9 @@ class BridgeHub:
     def push_inspector(self, item: dict) -> None:
         with self._lock:
             self._inspector_ring.append(item)
-            if len(self._inspector_ring) > 45:
-                self._inspector_ring = self._inspector_ring[-45:]
+            limit = max(1, min(200, int(self.config.get("ui", {}).get("xray_limit", 40))))
+            if len(self._inspector_ring) > limit:
+                self._inspector_ring = self._inspector_ring[-limit:]
 
     def consume_saved_tokens(self, agent_name: str) -> int:
         return self.pending_saved_by_agent.pop(agent_name, 0)
@@ -328,23 +418,30 @@ class BridgeHub:
         elif raw_think:
             turn["think_blocks"] = split_markdown_into_blocks(raw_think)
 
-    def retranslate_turn(self, turn_id: str) -> bool:
+    def retranslate_turn(self, turn_id: str, scope: str = "all", step_index: int = -1) -> bool:
         turns = self._active_turns_list()
         for t in turns:
-            if t["id"] == turn_id:
-                forced_cfg = {**self.config["translation"], "enabled": True}
-                if t.get("reply_en"):
-                    r = translate_prose(t["reply_en"], "fa", forced_cfg, self.glossary)
-                    t["reply_fa"] = r.get("translation", "")
-                    t["blocks"] = r.get("blocks", [])
-                    t["tr_engine"] = r.get("engine", "")
-                if t.get("thinking"):
-                    rt = translate_prose(t["thinking"], "fa", forced_cfg, self.glossary)
-                    t["thinking_fa"] = rt.get("translation", "")
-                    t["think_blocks"] = rt.get("blocks", [])
-                self._persist_active_container()
-                self.broadcast_state()
-                return True
+            if t["id"] != turn_id:
+                continue
+            forced_cfg = {**self.config["translation"], "enabled": True}
+            if scope in ("all", "reply") and t.get("reply_en"):
+                r = translate_prose(t["reply_en"], "fa", forced_cfg, self.glossary)
+                t["reply_fa"] = r.get("translation", "")
+                t["blocks"] = r.get("blocks", [])
+                t["tr_engine"] = r.get("engine", "")
+            if scope in ("all", "think") and t.get("thinking"):
+                rt = translate_prose(t["thinking"], "fa", forced_cfg, self.glossary)
+                t["thinking_fa"] = rt.get("translation", "")
+                t["think_blocks"] = rt.get("blocks", [])
+            if scope == "step-think":
+                steps = t.get("steps", [])
+                if 0 <= step_index < len(steps) and steps[step_index].get("thinking"):
+                    rt = translate_prose(steps[step_index]["thinking"], "fa", forced_cfg, self.glossary)
+                    steps[step_index]["thinking_fa"] = rt.get("translation", "")
+                    steps[step_index]["think_blocks"] = rt.get("blocks", [])
+            self._persist_active_container()
+            self.broadcast_state()
+            return True
         return False
 
     def _active_turns_list(self) -> list[dict]:
@@ -743,7 +840,7 @@ class BridgeHub:
         if self.view_kind == "lab":
             sess = self.lab_sessions.get(self.view_id)
             if not sess:
-                sess = self.create_lab_session()
+                sess = self.create_lab_session((user_raw or "گفتگوی Lab").replace("\\n", " ")[:32])
             up = probe_upstream_passive(self.config["tap"]["upstream_url"])
             if not up["online"]:
                 raise RuntimeError(
@@ -808,6 +905,14 @@ class BridgeHub:
         self.session_state = "IDLE"
         self.broadcast_state()
 
+    def mark_translator_tested(self, cfg: dict, result: dict) -> None:
+        if not result.get("ok"):
+            return
+        mode = "online" if cfg.get("engine") in ("builtin-online", "online") else "offline"
+        item = {"mode": mode, "label": result.get("engine", mode), "latency_ms": result.get("latency_ms", 0), "tested_at": time.strftime("%H:%M:%S")}
+        self.tested_translators = [x for x in self.tested_translators if x.get("mode") != mode]
+        self.tested_translators.append(item)
+
     def build_state_snapshot(self) -> dict:
         up = probe_upstream_passive(self.config["tap"]["upstream_url"])
         tr_ok = probe_translator_health(self.config["translation"])
@@ -816,6 +921,7 @@ class BridgeHub:
             self.usage_window_hours,
             self.usage_model_filter,
             self.usage_agent_filter,
+            int(self.config.get("ui", {}).get("recent_requests_limit", 10)),
         )
 
         for mrow in usage.get("by_model", []):
@@ -825,15 +931,15 @@ class BridgeHub:
 
         now = time.time()
         mirrors_list = []
+        history_list = []
         for aid, m in sorted(self.mirrors.items()):
-            mirrors_list.append(
-                {
-                    "agent_id": aid,
-                    "title": m.get("title") or aid,
-                    "turn_count": len(m.get("turns", [])),
-                    "pty_live": (now - self.pty_heartbeats.get(aid, 0.0)) < 25.0,
-                }
-            )
+            item = {
+                "agent_id": aid,
+                "title": m.get("title") or aid,
+                "turn_count": len(m.get("turns", [])),
+                "pty_live": (now - self.pty_heartbeats.get(aid, 0.0)) < 25.0,
+            }
+            (mirrors_list if item["pty_live"] else history_list).append(item)
 
         lab_list = [
             {"id": s["id"], "title": s["title"], "turn_count": len(s.get("turns", []))}
@@ -842,12 +948,13 @@ class BridgeHub:
 
         if self.view_kind == "lab":
             if self.view_id not in self.lab_sessions:
-                self.view_id = next(iter(self.lab_sessions.keys()))
-            active_conv = self.lab_sessions[self.view_id]
+                if self.lab_sessions:
+                    self.view_id = next(iter(self.lab_sessions.keys()))
+                else:
+                    self.view_kind, self.view_id = "mirror", ""
+            active_conv = self.lab_sessions[self.view_id] if self.view_kind == "lab" else self._new_mirror_obj("")
         else:
-            if self.view_id not in self.mirrors:
-                self.mirrors[self.view_id] = self._new_mirror_obj(self.view_id)
-            active_conv = self.mirrors[self.view_id]
+            active_conv = self.mirrors.get(self.view_id) or self._new_mirror_obj(self.view_id)
 
         with self._lock:
             insp = list(self._inspector_ring)
@@ -859,10 +966,12 @@ class BridgeHub:
             "view_kind": self.view_kind,
             "view_id": self.view_id,
             "mirrors": mirrors_list,
+            "mirror_history": history_list,
             "lab_sessions": lab_list,
             "active_conversation": active_conv,
             "upstream": up,
             "translator_online": tr_ok,
+            "tested_translators": list(self.tested_translators),
             "bridge_port": self.bridge_port,
             "usage": usage,
             "inspector": insp,

@@ -75,9 +75,19 @@ window.ABUsagePage = (() => {
     }
 
     if (route === 'usage-agents') {
+      const agentRows = u.by_agent || [];
+      const palette = ['#34d399','#60a5fa','#a78bfa','#fbbf24','#fb7185','#22d3ee','#f472b6'];
+      const agentTotal = agentRows.reduce((n,a)=>n+(a.total_tokens||0),0);
+      let cursor = 0;
+      const donutStops = agentRows.map((a,i)=>{ const pct=agentTotal ? (a.total_tokens||0)/agentTotal*100 : 0; const from=cursor; cursor+=pct; return `${palette[i%palette.length]} ${from}% ${cursor}%`; }).join(', ');
       host.innerHTML = `
         <div class="panel-wrap">
           <div class="panel">
+          <div class="panel-head"><h3>سهم مصرف بر اساس عامل/کانال</h3><span class="muted">درخواست‌های همین بازه</span></div>
+          <div class="agent-share"><div class="agent-donut" style="background:conic-gradient(${donutStops || 'var(--bg-3) 0 100%'})"><span>${agentTotal.toLocaleString()}<small>tokens</small></span></div><div class="agent-share-legend">${agentRows.map((a,i)=>`<div><i style="background:${palette[i%palette.length]}"></i><strong>${esc(a.agent)}</strong><span>${a.total_tokens.toLocaleString()} · ${agentTotal ? (a.total_tokens/agentTotal*100).toFixed(1) : '0.0'}%</span></div>`).join('') || '<span class="muted">هنوز داده‌ای نیست.</span>'}</div></div>
+        </div>
+
+        <div class="panel">
             <div class="panel-head">
               <h3>تفکیک دقیق توکن، کش و حافظه بر اساس مدل (Observed Models)</h3>
               <span class="mono muted">window: ${curWin === 0 ? 'ALL' : curWin + 'h'}</span>
@@ -189,7 +199,7 @@ window.ABUsagePage = (() => {
           </div>
           <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
             <select class="btn mono" onchange="ABUsagePage.setPricing(this.value)">${profOpts}</select>
-            <button class="btn danger" onclick="ABUsagePage.clearAll()">صفر کردن آمار</button>
+            <button class="btn danger" onclick="ABApp.navigate('set-retention')">پاکسازی انتخابی…</button>
           </div>
         </div>
 
@@ -223,6 +233,13 @@ window.ABUsagePage = (() => {
             <div class="stat-lbl"><span>ارزش معادل کلود (Shadow $)</span><span class="mono muted">USD</span></div>
             <div class="stat-num">$${Number(w.shadow_cost_usd || 0).toFixed(4)}</div>
             <div class="stat-sub">last 1h: $${Number(u.last_1h?.shadow_cost_usd || 0).toFixed(4)}</div>
+          </div>
+        </div>
+
+        <div class="panel">
+          <div class="panel-head"><h3>مقایسه‌ی هزینه‌ی همین مصرف با قیمت هر مدل</h3><span class="muted">هزینه‌ی ورودی بدون کش / ورودی کش‌شده / خروجی · USD به‌ازای یک‌میلیون توکن</span></div>
+          <div class="stat-strip cost-matrix">
+            ${(u.cost_matrix || []).map(p => `<button class="stat-box clickable ${u.pricing_profile === p.id ? 'selected' : ''}" onclick="ABUsagePage.setPricing('${esc(p.id)}')"><div class="stat-lbl">${esc(p.label)}</div><div class="stat-num">$${Number(p.cost_usd).toFixed(4)}</div><div class="stat-sub">نرخ ${p.rates || '—'} · بدون کش $${Number(p.nocache_usd).toFixed(4)} · ذخیره $${Number(p.saved_usd).toFixed(4)}</div></button>`).join('') || '<div class="muted">پروفایل قیمتی در دسترس نیست.</div>'}
           </div>
         </div>
 

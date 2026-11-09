@@ -125,6 +125,8 @@ class DataStore:
                 "show_tools": True,
                 "show_inline_tokens": True,
                 "show_shadow_cost": True,
+                "recent_requests_limit": 10,
+                "xray_limit": 40,
             },
             "translation": {
                 "enabled": True,
@@ -334,6 +336,8 @@ class DataStore:
     def clear_telemetry(self) -> None:
         with self._db_lock, sqlite3.connect(self.db_path) as conn:
             conn.execute("DELETE FROM llm_requests;")
+            conn.commit()
+            conn.execute("VACUUM;")
 
     def query_usage(
         self,
@@ -341,6 +345,7 @@ class DataStore:
         window_hours: int = 24,
         model_filter: str = "all",
         agent_filter: str = "all",
+        recent_limit: int = 10,
     ) -> dict:
         if pricing_profile not in CLOUD_PRICING_PROFILES:
             pricing_profile = "claude-sonnet-4.6"
@@ -456,9 +461,9 @@ class DataStore:
                 SELECT id, ts, agent, session_id, model, uncached_input, cached_input,
                        output_tokens, saved_fa_tokens, kv_status, prompt_tps, decode_tps, preview
                 FROM llm_requests WHERE ts >= ? {extra_sql}
-                ORDER BY id DESC LIMIT 45
+                ORDER BY id DESC LIMIT ?
                 """,
-                [win_since, *params_extra],
+                [win_since, *params_extra, max(1, min(100, int(recent_limit)))],
             ).fetchall()
 
         win_summary = agg_since(win_since)

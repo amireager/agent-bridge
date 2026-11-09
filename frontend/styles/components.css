@@ -113,6 +113,10 @@
   color: var(--phosphor);
   background: var(--phosphor-dim);
 }
+.tree-empty { color:var(--fg-2); font-size:12px; padding:7px 10px; }
+.mini-action { border:0; background:transparent; color:var(--fg-2); border-radius:6px; cursor:pointer; padding:1px 5px; }
+.mini-action:hover { background:var(--bg-3); color:var(--fg-0); }
+.mini-action.danger:hover { color:var(--red); background:var(--red-dim); }
 
 .sb-status-foot {
   border-top: 1px solid var(--line);
@@ -350,6 +354,16 @@ table.grid-table tr:last-child td { border-bottom: none; }
 table.grid-table tbody tr:hover { background: rgba(255, 255, 255, 0.025); }
 table.grid-table th { background: rgba(255, 255, 255, 0.03); color: var(--fg-2); font-weight: 600; font-size: 12px; white-space: nowrap; }
 table.grid-table td.m { font-family: var(--mono); font-size: 12.6px; direction: ltr; unicode-bidi: isolate; white-space: nowrap; }
+
+.agent-share { display:flex; gap:22px; align-items:center; flex-wrap:wrap; }
+.agent-donut { width:156px; height:156px; border-radius:50%; display:grid; place-items:center; position:relative; flex:none; }
+.agent-donut::before { content:""; position:absolute; inset:17px; border-radius:50%; background:var(--bg-1); }
+.agent-donut span { z-index:1; font:700 18px var(--mono); text-align:center; direction:ltr; }
+.agent-donut small { display:block; color:var(--fg-2); font:10px var(--mono); }
+.agent-share-legend { display:flex; flex-direction:column; gap:8px; min-width:min(100%,300px); }
+.agent-share-legend > div { display:grid; grid-template-columns:10px minmax(100px,1fr) auto; gap:8px; align-items:center; font-size:12px; }
+.agent-share-legend i { width:9px; height:9px; border-radius:50%; }
+.agent-share-legend span { color:var(--fg-2); font-family:var(--mono); }
 
 /* OS-Style Settings Rows & Real Pill Toggle Switches (macOS / GNOME Libadwaita) */
 .os-card {

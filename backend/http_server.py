@@ -98,18 +98,22 @@ def make_handler(hub: BridgeHub):
 
             if path == "/api/translate":
                 body = self._read_json()
-                res = translate_prose(
-                    body.get("text", ""),
-                    body.get("to", "en"),
-                    {**hub.config["translation"], "enabled": True},
-                    hub.glossary,
-                )
+                tr_cfg = {**hub.config["translation"], "enabled": True}
+                if body.get("engine_mode") == "online":
+                    tr_cfg["engine"] = "builtin-online"
+                elif body.get("engine_mode") == "offline":
+                    tr_cfg["engine"] = "custom-offline"
+                res = translate_prose(body.get("text", ""), body.get("to", "en"), tr_cfg, hub.glossary)
                 return self._send_json(res)
 
             if path == "/api/translate/ping":
                 body = self._read_json()
                 merged_cfg = {**hub.config["translation"], **body}
-                return self._send_json(test_translator_connection(merged_cfg))
+                result = test_translator_connection(merged_cfg)
+                hub.mark_translator_tested(merged_cfg, result)
+                if result.get("ok"):
+                    hub.broadcast_state()
+                return self._send_json(result)
 
             if path == "/api/prompt":
                 body = self._read_json()
@@ -135,7 +139,7 @@ def make_handler(hub: BridgeHub):
 
             if path == "/api/turn/translate":
                 body = self._read_json()
-                ok = hub.retranslate_turn(body.get("turn_id", ""))
+                ok = hub.retranslate_turn(body.get("turn_id", ""), body.get("scope", "all"), int(body.get("step_index", -1)))
                 return self._send_json({"ok": ok})
 
             if path == "/api/abort":
@@ -172,6 +176,11 @@ def make_handler(hub: BridgeHub):
                 hub.clear_mirror_view(body.get("agent_id", hub.view_id))
                 return self._send_json({"ok": True})
 
+            if path == "/api/mirror/delete":
+                body = self._read_json()
+                ok = hub.delete_mirror(body.get("agent_id", ""))
+                return self._send_json({"ok": ok})
+
             if path == "/api/lab/new":
                 body = self._read_json()
                 s = hub.create_lab_session(body.get("title"))
@@ -180,6 +189,11 @@ def make_handler(hub: BridgeHub):
             if path == "/api/lab/delete":
                 body = self._read_json()
                 ok = hub.delete_lab_session(body.get("session_id", ""))
+                return self._send_json({"ok": ok})
+
+            if path == "/api/lab/rename":
+                body = self._read_json()
+                ok = hub.rename_lab_session(body.get("session_id", ""), body.get("title", ""))
                 return self._send_json({"ok": ok})
 
             if path == "/api/lab/delete-all":
@@ -213,6 +227,18 @@ def make_handler(hub: BridgeHub):
                     hub.store.save_glossary(items)
                 hub.broadcast_state()
                 return self._send_json({"ok": True, "glossary": hub.glossary})
+
+            if path == "/api/cleanup/preview":
+                body = self._read_json()
+                days = max(0, min(3650, int(body.get("days", 7))))
+                scopes = [x for x in body.get("scopes", []) if x in ("telemetry", "lab", "mirrors")]
+                return self._send_json(hub.cleanup_preview(days, scopes))
+
+            if path == "/api/cleanup/run":
+                body = self._read_json()
+                days = max(0, min(3650, int(body.get("days", 7))))
+                scopes = [x for x in body.get("scopes", []) if x in ("telemetry", "lab", "mirrors")]
+                return self._send_json({"ok": True, **hub.run_cleanup(days, scopes)})
 
             if path == "/api/retention/prune":
                 body = self._read_json()

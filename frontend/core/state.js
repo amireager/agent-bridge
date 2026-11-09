@@ -6,6 +6,7 @@ window.ABApp = (() => {
   let route = 'chat';
   const openBranches = {
     mirrors: true,
+    history: false,
     lab: true,
     usage: true,
     settings: true
@@ -39,9 +40,24 @@ window.ABApp = (() => {
 
   async function createLabSession(ev) {
     if (ev) ev.stopPropagation();
+    const title = prompt('نام این چت Lab را وارد کن:', `تست مدل ${new Date().toLocaleString()}`);
+    if (title === null) return;
     openBranches.lab = true;
-    await api('/api/lab/new', {});
+    await api('/api/lab/new', { title: title.trim() || 'تست مدل جدید' });
     route = 'chat';
+  }
+
+  async function renameLabSession(sessionId, ev) {
+    if (ev) ev.stopPropagation();
+    const current = state?.lab_sessions?.find(x => x.id === sessionId)?.title || '';
+    const title = prompt('نام جدید چت Lab:', current);
+    if (title && title.trim()) await api('/api/lab/rename', { session_id: sessionId, title: title.trim() });
+  }
+
+  async function deleteMirror(agentId, ev) {
+    if (ev) ev.stopPropagation();
+    if (!confirm(`حذف تاریخچه‌ی کانال آفلاین «${agentId}»؟`)) return;
+    await api('/api/mirror/delete', { agent_id: agentId });
   }
 
   async function deleteLabSession(sessionId, ev) {
@@ -89,7 +105,12 @@ window.ABApp = (() => {
           </span>
           <span class="tiny-tag ${m.pty_live ? 'on' : ''}">${m.pty_live ? 'زنده' : m.turn_count}</span>
         </div>`;
-    }).join('');
+    }).join('') || '<div class="tree-empty">ترمینال زنده‌ای نیست</div>';
+
+    const historyHtml = (state.mirror_history || []).map(m => {
+      const isAct = route === 'chat' && state.view_kind === 'mirror' && state.view_id === m.agent_id;
+      return `<div class="tree-node ${isAct ? 'active' : ''}" onclick="ABApp.selectMirror('${esc(m.agent_id)}')"><span>◷ <strong class="mono">${esc(m.agent_id)}</strong> <small>${m.turn_count} turn</small></span><button class="mini-action danger" title="حذف تاریخچه" onclick="ABApp.deleteMirror('${esc(m.agent_id)}',event)">×</button></div>`;
+    }).join('') || '<div class="tree-empty">تاریخچه‌ای نیست</div>';
 
     // 2. Built-in Direct Model & Tool Lab (for KV/translation testing & growing our own agent!)
     const labHtml = (state.lab_sessions || []).map(s => {
@@ -101,10 +122,11 @@ window.ABApp = (() => {
           </span>
           <span style="display:flex;align-items:center;gap:4px;">
             <span class="tiny-tag">${s.turn_count}</span>
-            ${state.lab_sessions.length > 1 ? `<span title="حذف تست" style="opacity:0.6;padding:0 4px;" onclick="ABApp.deleteLabSession('${esc(s.id)}',event)">×</span>` : ''}
+            <button class="mini-action" title="تغییر نام" onclick="ABApp.renameLabSession('${esc(s.id)}',event)">✎</button>
+            <button class="mini-action danger" title="بستن/حذف چت" onclick="ABApp.deleteLabSession('${esc(s.id)}',event)">×</button>
           </span>
         </div>`;
-    }).join('');
+    }).join('') || '<div class="tree-empty">چتی ساخته نشده؛ برای شروع «+ جدید» را بزن.</div>';
 
     const mkRoot = (key, icon, title, bodyHtml, extraAction = '') => `
       <div class="tree-group">
@@ -130,7 +152,8 @@ window.ABApp = (() => {
     const trOn = state.config.translation.enabled !== false;
 
     treeEl.innerHTML = [
-      mkRoot('mirrors', ICONS.terminal, 'ترمینال‌های زنده (Mirror)', mirrorHtml),
+      mkRoot('mirrors', ICONS.terminal, 'ترمینال‌های زنده', mirrorHtml),
+      mkRoot('history', ICONS.clock || ICONS.terminal, 'تاریخچه‌ی ترمینال‌ها', historyHtml),
       mkRoot(
         'lab',
         ICONS.cpu,
@@ -158,6 +181,12 @@ window.ABApp = (() => {
     const u = state.usage?.window || {};
     const ui = state.config.ui || {};
     const trEnabled = state.config.translation.enabled !== false;
+    const activeTurns = state.active_conversation?.turns || [];
+    const sessionTokenTotal = activeTurns.reduce((sum,t)=>sum+(t.metrics?.uncached_in||0)+(t.metrics?.cached_in||0)+(t.metrics?.out_tok||0),0);
+    const latestMetrics = activeTurns[activeTurns.length-1]?.metrics || {};
+    const lastPrompt = (latestMetrics.uncached_in||0)+(latestMetrics.cached_in||0);
+    const contextCap = Number(up.server_ctx||0);
+    const contextLeft = Math.max(0, contextCap-lastPrompt);
 
     document.documentElement.setAttribute('data-theme', ui.theme || 'openwebui-dark');
     document.documentElement.setAttribute('data-font', ui.font_scale || 'large');
@@ -172,12 +201,13 @@ window.ABApp = (() => {
 
     const viewBadge = state.view_kind === 'lab'
       ? `Lab · ${state.active_conversation?.title || ''}`
-      : `ترمینال زنده · ${state.view_id}`;
+      : (state.view_id ? `ترمینال · ${state.view_id}` : 'ترمینال زنده‌ای متصل نیست');
 
     document.getElementById('hudBar').innerHTML = `
       <div class="hud-group">
         <span class="hud-chip" style="color:var(--fg-0);font-weight:600;">${esc(viewBadge)}</span>
         <span class="hud-chip">${esc(up.detected_model)} (${slotCount} اسلات)</span>
+        <span class="hud-chip" title="تقریبی بر اساس آخرین prompt گزارش‌شده؛ کانتکست سقف سرور است">این چت · ${activeTurns.length} دور · ${sessionTokenTotal.toLocaleString()} tok · آخرین زمینه ${lastPrompt.toLocaleString()} / ${contextCap ? contextCap.toLocaleString() : '?'} · مانده ~${contextCap ? contextLeft.toLocaleString() : '?'} </span>
       </div>
       <div class="hud-group">
         <button class="btn ghost ${trEnabled ? 'on' : ''}" onclick="ABApp.toggleProxyMode()">
@@ -227,7 +257,7 @@ window.ABApp = (() => {
 
   return {
     getState, getRoute, navigate, toggleBranch,
-    selectMirror, selectLab, createLabSession, deleteLabSession,
+    selectMirror, selectLab, createLabSession, renameLabSession, deleteLabSession, deleteMirror,
     filterByObservedModel, toggleSidebarSide, toggleProxyMode,
     toggleSidebarCollapse, boot
   };

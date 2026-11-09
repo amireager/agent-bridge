@@ -25,6 +25,13 @@ window.ABChatPage = (() => {
     host.innerHTML = `
       <div id="chatRoot" class="chat-root">
         <div id="chatSubBar" class="chat-subbar"></div>
+        <div id="selectionTranslatePanel" class="selection-translate" hidden>
+          <div class="selection-head"><strong>ترجمه‌ی متن انتخاب‌شده</strong><button class="mini-action" onclick="ABChatPage.closeSelectionTranslate()">×</button></div>
+          <select id="selectionEngine" class="btn"></select>
+          <div id="selectionSource" class="selection-source"></div>
+          <div id="selectionResult" class="selection-result muted">موتور را انتخاب و ترجمه را اجرا کن.</div>
+          <button class="btn primary" onclick="ABChatPage.translateSelection()">ترجمه / آزمایش</button>
+        </div>
 
         <div id="chatFeed" class="chat-feed">
           <div id="chatFeedInner" class="chat-feed-inner"></div>
@@ -87,6 +94,21 @@ window.ABChatPage = (() => {
       stickToBottom = dist < 95;
       jumpBtn.classList.toggle('show', dist > 220);
     });
+    const openSelectionPanel = () => {
+      const selected = String(window.getSelection?.().toString() || '').trim();
+      if (selected.length < 2) return;
+      const panel = document.getElementById('selectionTranslatePanel');
+      const tested = window.ABApp.getState()?.tested_translators || [];
+      const engine = document.getElementById('selectionEngine');
+      engine.innerHTML = tested.length
+        ? tested.map(x => `<option value="${esc(x.mode)}">${esc(x.mode === 'online' ? 'آنلاین' : 'آفلاین')} · ${esc(x.label)} (${x.latency_ms}ms)</option>`).join('')
+        : '<option value="">ابتدا موتور را در تنظیمات تست کن</option>';
+      document.getElementById('selectionSource').textContent = selected.slice(0, 4000);
+      document.getElementById('selectionResult').textContent = 'موتور را انتخاب و ترجمه را اجرا کن.';
+      panel.hidden = false;
+    };
+    feed.addEventListener('mouseup', () => setTimeout(openSelectionPanel, 0));
+    feed.addEventListener('keyup', openSelectionPanel);
 
     const rawEl = document.getElementById('composerRaw');
     const wireEl = document.getElementById('wireInput');
@@ -313,8 +335,32 @@ window.ABChatPage = (() => {
     await api('/api/config', { ui: { [key]: !cur } });
   }
 
+  function closeSelectionTranslate() {
+    document.getElementById('selectionTranslatePanel').hidden = true;
+    window.getSelection?.().removeAllRanges();
+  }
+
+  async function translateSelection() {
+    const text = document.getElementById('selectionSource').textContent || '';
+    const engineMode = document.getElementById('selectionEngine').value;
+    const out = document.getElementById('selectionResult');
+    if (!engineMode) { out.textContent = 'ابتدا در Settings موتور را تست کن.'; return; }
+    out.textContent = 'در حال ترجمه...';
+    const res = await api('/api/translate', { text, to: 'auto', engine_mode: engineMode });
+    out.innerHTML = res.error ? `<span class="term-error">${esc(res.error)}</span>` : window.ABMarkdown.render(res.translation || '');
+  }
+
   async function retranslate(turnId) {
-    await api('/api/turn/translate', { turn_id: turnId });
+    await api('/api/turn/translate', { turn_id: turnId, scope: 'reply' });
+  }
+
+  async function translateThink(turnId, stepIndex = -1, ev) {
+    if (ev) ev.stopPropagation();
+    await api('/api/turn/translate', {
+      turn_id: turnId,
+      scope: stepIndex >= 0 ? 'step-think' : 'think',
+      step_index: stepIndex
+    });
   }
 
   async function abort() {
@@ -324,20 +370,33 @@ window.ABChatPage = (() => {
   function summarizeToolArgs(tl) {
     const a = tl.args || {};
     if (typeof a === 'string') return a.slice(0, 74);
+    if (a.command) return `$ ${String(a.command).replace(/\\s+/g, ' ').slice(0, 74)}`;
     if (a.path) return a.path;
-    if (a.command) return String(a.command).slice(0, 76);
     return JSON.stringify(a).slice(0, 72);
   }
 
   function formatToolBody(tl) {
     const a = tl.args || {};
     let head = typeof a === 'string' ? a : JSON.stringify(a, null, 2);
+    if (a.command) head = `$ ${a.command}`;
+    else if (a.path && !a.content) head = `${tl.name || 'file'}  ${a.path}`;
     if (tl.name === 'write' && a.content) {
       head = `// file: ${a.path || ''}\n${a.content}`;
     } else if (tl.name === 'edit' && (a.oldText || a.newText)) {
       head = `--- old\n${a.oldText || ''}\n+++ new\n${a.newText || ''}`;
     }
     return `${head}${tl.output ? `\n\n// output\n${tl.output}` : ''}`;
+  }
+
+  function renderToolContent(tl) {
+    const safe = esc(formatToolBody(tl));
+    const highlighted = safe
+      .replace(/(^|\s)(sudo|cd|ls|cat|grep|find|git|python3?|nix|curl|mkdir|rm|cp|mv|pytest|node)(?=\s|$)/gm, '$1<span class="term-command">$2</span>')
+      .replace(/(--[a-zA-Z0-9_-]+)/g, '<span class="term-flag">$1</span>')
+      .replace(/(https?:\/\/[^\s]+)/g, '<span class="term-url">$1</span>')
+      .replace(/(\$HOME|~\/[\w./-]+|\/[\w./-]+)/g, '<span class="term-path">$1</span>');
+    const rows = highlighted.split('\n').map((line, i) => `<div class="term-line"><span class="term-ln">${i + 1}</span><code>${line || ' '}</code></div>`).join('');
+    return `<div class="terminal-view"><div class="terminal-chrome"><i></i><i></i><i></i><span>${esc(tl.name || 'tool')} · ${esc(tl.status || 'done')}</span></div><div class="terminal-content">${rows}</div></div>`;
   }
 
   function render(host, state, forceFull = false) {
@@ -386,7 +445,7 @@ window.ABChatPage = (() => {
       feedInner.innerHTML = `
         <div class="panel rtl" style="margin:36px auto;max-width:680px;">
           <div class="panel-head">
-            <h3>آماده شنود، شکار کش KV و ترجمه پاراگرافی — <span class="mono">${esc(state.active_agent)}</span></h3>
+            <h3>آماده شنود، شکار کش KV و ترجمه پاراگرافی — <span class="mono">${esc(state.view_id || 'ترمینال زنده‌ای انتخاب نشده')}</span></h3>
           </div>
           <p class="fg-1" style="line-height:1.9;margin:0 0 12px;">
             ۱. اگر در ترمینال عادی یا سندباکس، عاملت (مثل <code>pi</code>) به <code>http://127.0.0.1:${state.bridge_port}/v1</code> وصل باشد، تمام پاسخ‌ها، ابزارها و آمار دقیق کش <strong>به‌صورت زنده اینجا استخراج می‌شوند</strong> و کدها فقط یک‌بار بدون تکرار نمایش داده می‌شوند.
@@ -427,7 +486,7 @@ window.ABChatPage = (() => {
       const thinkAcc = (ui.show_think && t.thinking) ? `
         <details class="think-drawer" data-acc-id="${esc(thinkId)}" ${autoOpenThink ? 'open' : ''}>
           <summary><span>تفکر مدل · Think</span><span>${t.thinking.length} chars · باز/بسته</span></summary>
-          <div class="think-body">${window.ABMarkdown.renderBlocks(t.think_blocks || [], t.thinking, t.thinking_fa || '', chatMode)}</div>
+          <div class="think-body">${window.ABMarkdown.renderBlocks(t.think_blocks || [], t.thinking, t.thinking_fa || '', chatMode)}<button class="btn ghost think-translate-btn" onclick="ABChatPage.translateThink('${esc(t.id)}',-1,event)">${t.thinking_fa ? 'ترجمه‌ی مجدد تفکر' : 'ترجمه‌ی تفکر'}</button></div>
         </details>` : '';
 
       const toolsAcc = ui.show_tools ? (t.tools || []).map((tl, tIdx) => {
@@ -440,7 +499,7 @@ window.ABChatPage = (() => {
         return `
           <details class="tool-pill kind-${kind}" data-acc-id="${esc(detId)}" ${isOpen ? 'open' : ''}>
             <summary><span class="tool-badge">${esc(toolName)}</span><span class="tool-cmd-preview">${esc(summarizeToolArgs(tl))}</span><span class="tiny-tag">${stTxt}</span></summary>
-            <div class="acc-body">${esc(formatToolBody(tl))}</div>
+            <div class="acc-body">${renderToolContent(tl)}</div>
           </details>`;
       }).join('') : '';
 
@@ -451,9 +510,9 @@ window.ABChatPage = (() => {
           const nm = String(tool.name || 'tool');
           const kind = /shell|bash|terminal|exec/i.test(nm) ? 'shell' : (/read|list|search/i.test(nm) ? 'read' : (/edit|write|patch/i.test(nm) ? 'edit' : 'other'));
           const toolId = `${t.id}-step-${sIdx}-tool-${tIdx}`;
-          return `<details class="tool-pill kind-${kind}" data-acc-id="${esc(toolId)}"><summary><span class="tool-badge">${esc(nm)}</span><span class="tool-cmd-preview">${esc(summarizeToolArgs(tool))}</span><span class="tiny-tag">${esc(tool.status || 'done')}</span></summary><div class="acc-body">${esc(formatToolBody(tool))}</div></details>`;
+          return `<details class="tool-pill kind-${kind}" data-acc-id="${esc(toolId)}"><summary><span class="tool-badge">${esc(nm)}</span><span class="tool-cmd-preview">${esc(summarizeToolArgs(tool))}</span><span class="tiny-tag">${esc(tool.status || 'done')}</span></summary><div class="acc-body">${renderToolContent(tool)}</div></details>`;
         }).join('') : '';
-        const reasoning = ui.show_think && step.thinking ? `<details class="think-drawer" data-acc-id="${esc(stepThinkId)}" ${wasOpen(stepThinkId, true) ? 'open' : ''}><summary><span>تفکر · مرحله ${sIdx + 1}</span><span>${step.thinking.length} chars · باز/بسته</span></summary><div class="think-body md-body">${window.ABMarkdown.render(step.thinking)}</div></details>` : '';
+        const reasoning = ui.show_think && step.thinking ? `<details class="think-drawer" data-acc-id="${esc(stepThinkId)}" ${wasOpen(stepThinkId, true) ? 'open' : ''}><summary><span>تفکر · مرحله ${sIdx + 1}</span><span>${step.thinking.length} chars · باز/بسته</span></summary><div class="think-body md-body">${window.ABMarkdown.render(step.thinking)}${step.thinking_fa ? `<div class="think-translation">${window.ABMarkdown.render(step.thinking_fa)}</div>` : ''}<button class="btn ghost think-translate-btn" onclick="ABChatPage.translateThink('${esc(t.id)}',${sIdx},event)">${step.thinking_fa ? 'ترجمه دوباره' : 'ترجمه‌ی این مرحله'}</button></div></details>` : '';
         return `<details class="agent-step" data-acc-id="${esc(stageId)}" ${wasOpen(stageId, true) ? 'open' : ''}><summary class="step-label">مرحله ${sIdx + 1} · ${esc(step.status || 'در حال اجرا')} · تفکر و ابزارهای این دور</summary><div class="step-content">${reasoning}${stepTools}</div></details>`;
       }).join('') : '';
 
@@ -511,6 +570,6 @@ window.ABChatPage = (() => {
   return {
     render, translateDraft, sendFinal, validateOutgoing,
     toggleComposerMd, closePreview, copyOutgoing,
-    setChatMode, toggleUiFlag, retranslate, abort, scrollToBottom
+    setChatMode, toggleUiFlag, retranslate, translateThink, translateSelection, closeSelectionTranslate, abort, scrollToBottom
   };
 })();
