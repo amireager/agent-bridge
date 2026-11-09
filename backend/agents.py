@@ -59,6 +59,7 @@ class BridgeHub:
         self._inspector_ring: list[dict] = []
         # Translator endpoints are remembered only for this process after an explicit successful health/translation test.
         self.tested_translators: list[dict] = []
+        self.tested_translator_configs: dict[str, dict] = {}
 
         # 1. Live Terminal Mirrors (keyed by agent_id: 'pi', 'pi-2', 'hermes', ...)
         self.mirrors: dict[str, dict] = {}
@@ -231,6 +232,7 @@ class BridgeHub:
     def cleanup_preview(self, days: int, scopes: list[str]) -> dict:
         cutoff = 0.0 if int(days) <= 0 else time.time() - int(days) * 86400.0
         items = []
+        xray_count = len(self._inspector_ring) if "xray" in scopes else 0
         base = self.store.data_dir
         for scope, folder in (("lab", self.store.sessions_dir / "lab"), ("mirrors", self.store.mirrors_dir)):
             if scope not in scopes:
@@ -255,12 +257,16 @@ class BridgeHub:
                 import sqlite3
                 with sqlite3.connect(self.store.db_path) as conn:
                     req_count = int(conn.execute("SELECT COUNT(*) FROM llm_requests WHERE ts < ?", (cutoff or time.time()+1,)).fetchone()[0])
-        return {"days": int(days), "scopes": scopes, "telemetry_requests": req_count, "files": items, "file_count": len(items), "bytes": sum(x["bytes"] for x in items)}
+        return {"days": int(days), "scopes": scopes, "telemetry_requests": req_count, "xray_frames": xray_count, "files": items, "file_count": len(items), "bytes": sum(x["bytes"] for x in items)}
 
     def run_cleanup(self, days: int, scopes: list[str]) -> dict:
         preview = self.cleanup_preview(days, scopes)
         cutoff = 0.0 if int(days) <= 0 else time.time() - int(days) * 86400.0
         deleted_requests = 0
+        deleted_xray = 0
+        if "xray" in scopes:
+            deleted_xray = len(self._inspector_ring)
+            self._inspector_ring.clear()
         db_size_before = self.store.db_path.stat().st_size if self.store.db_path.exists() else 0
         if "telemetry" in scopes:
             with self.store._db_lock:
@@ -300,7 +306,7 @@ class BridgeHub:
             else:
                 self.view_kind, self.view_id = "mirror", ""
         self.broadcast_state()
-        return {"deleted_requests": deleted_requests, "deleted_files": deleted_files, "freed_bytes": freed_file_bytes + freed_db_bytes, "deleted_lab_sessions": len(deleted_lab_ids)}
+        return {"deleted_requests": deleted_requests, "deleted_files": deleted_files, "deleted_xray_frames": deleted_xray, "freed_bytes": freed_file_bytes + freed_db_bytes, "deleted_lab_sessions": len(deleted_lab_ids)}
 
     def clear_observed_history(self) -> dict:
         """Clear telemetry/X-Ray and mirror history; preserve only currently live PTY channels."""
@@ -912,6 +918,10 @@ class BridgeHub:
         item = {"mode": mode, "label": result.get("engine", mode), "latency_ms": result.get("latency_ms", 0), "tested_at": time.strftime("%H:%M:%S")}
         self.tested_translators = [x for x in self.tested_translators if x.get("mode") != mode]
         self.tested_translators.append(item)
+        self.tested_translator_configs[mode] = {
+            "engine": "builtin-online" if mode == "online" else "custom-offline",
+            **{k: cfg[k] for k in ("proxy", "offline_protocol", "offline_url", "offline_model") if k in cfg},
+        }
 
     def build_state_snapshot(self) -> dict:
         up = probe_upstream_passive(self.config["tap"]["upstream_url"])

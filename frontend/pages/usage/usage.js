@@ -199,7 +199,7 @@ window.ABUsagePage = (() => {
           </div>
           <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
             <select class="btn mono" onchange="ABUsagePage.setPricing(this.value)">${profOpts}</select>
-            <button class="btn danger" onclick="ABApp.navigate('set-retention')">پاکسازی انتخابی…</button>
+            <button class="btn danger" onclick="ABApp.navigate('set-retention')">حذف آمار توکن…</button>
           </div>
         </div>
 

@@ -99,10 +99,16 @@ def make_handler(hub: BridgeHub):
             if path == "/api/translate":
                 body = self._read_json()
                 tr_cfg = {**hub.config["translation"], "enabled": True}
-                if body.get("engine_mode") == "online":
+                engine_mode = body.get("engine_mode")
+                if engine_mode in hub.tested_translator_configs:
+                    tr_cfg.update(hub.tested_translator_configs[engine_mode])
+                if engine_mode == "online":
                     tr_cfg["engine"] = "builtin-online"
-                elif body.get("engine_mode") == "offline":
+                elif engine_mode == "offline":
                     tr_cfg["engine"] = "custom-offline"
+                for key in ("proxy", "offline_protocol", "offline_url", "offline_model"):
+                    if key in body:
+                        tr_cfg[key] = body[key]
                 res = translate_prose(body.get("text", ""), body.get("to", "en"), tr_cfg, hub.glossary)
                 return self._send_json(res)
 
@@ -231,13 +237,13 @@ def make_handler(hub: BridgeHub):
             if path == "/api/cleanup/preview":
                 body = self._read_json()
                 days = max(0, min(3650, int(body.get("days", 7))))
-                scopes = [x for x in body.get("scopes", []) if x in ("telemetry", "lab", "mirrors")]
+                scopes = [x for x in body.get("scopes", []) if x in ("telemetry", "lab", "mirrors", "xray")]
                 return self._send_json(hub.cleanup_preview(days, scopes))
 
             if path == "/api/cleanup/run":
                 body = self._read_json()
                 days = max(0, min(3650, int(body.get("days", 7))))
-                scopes = [x for x in body.get("scopes", []) if x in ("telemetry", "lab", "mirrors")]
+                scopes = [x for x in body.get("scopes", []) if x in ("telemetry", "lab", "mirrors", "xray")]
                 return self._send_json({"ok": True, **hub.run_cleanup(days, scopes)})
 
             if path == "/api/retention/prune":
