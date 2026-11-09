@@ -70,6 +70,12 @@
   background: var(--bg-2);
 }
 
+/* Foldable original prompt (the source text remains available, but can be tucked away) */
+.prompt-fold { width:min(90%, 760px); direction:rtl; }
+.prompt-fold > summary { cursor:pointer; list-style:none; background:var(--bg-1); border:1px solid var(--line); border-radius:14px; padding:7px 13px; display:flex; justify-content:space-between; gap:12px; color:var(--fg-2); font-size:12px; }
+.prompt-fold > summary::-webkit-details-marker { display:none; }
+.prompt-fold[open] > .user-bubble { margin-top:6px; }
+
 /* Open-WebUI Soft User Pill */
 .user-bubble-row {
   display: flex;
@@ -100,8 +106,13 @@
 }
 
 /* Iterative agent trace: each think/tool round gets its own lightweight timeline section */
-.agent-step { border-left: 2px solid var(--line-strong); padding-left: 10px; margin: 8px 0; display:flex; flex-direction:column; gap:7px; }
-.step-label { color:var(--fg-2); font: 11px var(--mono); letter-spacing:.02em; }
+.agent-step { border-left: 2px solid var(--line-strong); padding-left: 10px; margin: 10px 0; }
+.agent-step > summary { cursor:pointer; list-style:none; }
+.agent-step > summary::-webkit-details-marker { display:none; }
+.step-label { color:var(--fg-1); font: 12px var(--mono); letter-spacing:.02em; padding:5px 0; }
+.step-content { display:flex; flex-direction:column; gap:8px; padding:5px 0 8px; }
+.think-body { max-height:280px; overflow-y:auto; position:relative; }
+.think-drawer:not([open]) { opacity:.92; }
 
 /* Each assistant turn can be folded independently for clean long-chat reading */
 details.assistant-fold { display:block; }

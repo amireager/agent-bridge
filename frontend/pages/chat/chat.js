@@ -377,9 +377,10 @@ window.ABChatPage = (() => {
 
     // Capture open <details> IDs & scroll position BEFORE updating DOM
     const prevScrollTop = feed.scrollTop;
-    const openDetailsIds = new Set(
-      [...feedInner.querySelectorAll('details[data-acc-id][open]')].map(d => d.getAttribute('data-acc-id'))
+    const detailsState = new Map(
+      [...feedInner.querySelectorAll('details[data-acc-id]')].map(d => [d.getAttribute('data-acc-id'), d.open])
     );
+    const wasOpen = (id, defaultOpen = false) => detailsState.has(id) ? detailsState.get(id) : defaultOpen;
 
     if (!turns.length) {
       feedInner.innerHTML = `
@@ -413,7 +414,7 @@ window.ABChatPage = (() => {
 
       const wireId = `${t.id}-wire`;
       const wireAcc = (ui.show_wire_en && t.prompt_sent && t.prompt_sent !== t.user_raw) ? `
-        <details class="trace-acc" data-acc-id="${esc(wireId)}" ${openDetailsIds.has(wireId) ? 'open' : ''} style="margin-top:8px;">
+        <details class="trace-acc" data-acc-id="${esc(wireId)}" ${wasOpen(wireId, true) ? 'open' : ''} style="margin-top:8px;">
           <summary>
             <span>Sent English Prompt</span>
             <span class="muted">${t.prompt_sent.length} chars</span>
@@ -422,7 +423,7 @@ window.ABChatPage = (() => {
         </details>` : '';
 
       const thinkId = `${t.id}-think`;
-      const autoOpenThink = (t.status === 'streaming' && !t.reply_en) || openDetailsIds.has(thinkId);
+      const autoOpenThink = wasOpen(thinkId, true);
       const thinkAcc = (ui.show_think && t.thinking) ? `
         <details class="think-drawer" data-acc-id="${esc(thinkId)}" ${autoOpenThink ? 'open' : ''}>
           <summary><span>تفکر مدل · Think</span><span>${t.thinking.length} chars · باز/بسته</span></summary>
@@ -433,7 +434,7 @@ window.ABChatPage = (() => {
         const cls = tl.status === 'running' ? 'run' : (tl.is_error ? 'err' : 'ok');
         const stTxt = tl.status === 'running' ? 'RUN' : (tl.is_error ? 'ERR' : 'OK');
         const detId = `${t.id}-tool-${tIdx}`;
-        const isOpen = tl.status === 'running' || openDetailsIds.has(detId);
+        const isOpen = wasOpen(detId, tl.status === 'running');
         const toolName = String(tl.name || 'tool');
         const kind = /shell|bash|terminal|exec/i.test(toolName) ? 'shell' : (/read|list|search/i.test(toolName) ? 'read' : (/edit|write|patch/i.test(toolName) ? 'edit' : 'other'));
         return `
@@ -445,14 +446,15 @@ window.ABChatPage = (() => {
 
       const stepTimeline = (Array.isArray(t.steps) && t.steps.length) ? t.steps.map((step, sIdx) => {
         const stepThinkId = `${t.id}-step-${sIdx}-think`;
+        const stageId = `${t.id}-stage-${sIdx}`;
         const stepTools = ui.show_tools ? (step.tools || []).map((tool, tIdx) => {
           const nm = String(tool.name || 'tool');
           const kind = /shell|bash|terminal|exec/i.test(nm) ? 'shell' : (/read|list|search/i.test(nm) ? 'read' : (/edit|write|patch/i.test(nm) ? 'edit' : 'other'));
           const toolId = `${t.id}-step-${sIdx}-tool-${tIdx}`;
           return `<details class="tool-pill kind-${kind}" data-acc-id="${esc(toolId)}"><summary><span class="tool-badge">${esc(nm)}</span><span class="tool-cmd-preview">${esc(summarizeToolArgs(tool))}</span><span class="tiny-tag">${esc(tool.status || 'done')}</span></summary><div class="acc-body">${esc(formatToolBody(tool))}</div></details>`;
         }).join('') : '';
-        const reasoning = ui.show_think && step.thinking ? `<details class="think-drawer" data-acc-id="${esc(stepThinkId)}"><summary><span>تفکر · مرحله ${sIdx + 1}</span><span>${step.thinking.length} chars · باز/بسته</span></summary><div class="think-body md-body">${window.ABMarkdown.render(step.thinking)}</div></details>` : '';
-        return `<section class="agent-step"><div class="step-label">مرحله ${sIdx + 1} · ${esc(step.status || 'در حال اجرا')}</div>${reasoning}${stepTools}</section>`;
+        const reasoning = ui.show_think && step.thinking ? `<details class="think-drawer" data-acc-id="${esc(stepThinkId)}" ${wasOpen(stepThinkId, true) ? 'open' : ''}><summary><span>تفکر · مرحله ${sIdx + 1}</span><span>${step.thinking.length} chars · باز/بسته</span></summary><div class="think-body md-body">${window.ABMarkdown.render(step.thinking)}</div></details>` : '';
+        return `<details class="agent-step" data-acc-id="${esc(stageId)}" ${wasOpen(stageId, true) ? 'open' : ''}><summary class="step-label">مرحله ${sIdx + 1} · ${esc(step.status || 'در حال اجرا')} · تفکر و ابزارهای این دور</summary><div class="step-content">${reasoning}${stepTools}</div></details>`;
       }).join('') : '';
 
       const bodyContent = (t.reply_en || (t.blocks && t.blocks.length))
@@ -468,17 +470,20 @@ window.ABChatPage = (() => {
         <article class="turn-card">
           ${t.user_raw ? `
             <div class="user-bubble-row">
-              <div class="user-bubble">
-                ${window.ABMarkdown.render(t.user_raw)}
-                <div class="user-bubble-meta">
-                  <span>#${String(idx + 1).padStart(2, '0')} · <span class="src-badge ${src !== 'WEB' ? 'cli' : ''}">${esc(src)}</span></span>
-                  ${savedPill}
+              <details class="prompt-fold" data-acc-id="${esc(t.id)}-prompt" ${wasOpen(`${t.id}-prompt`, true) ? 'open' : ''}>
+                <summary><span>پرامپت شما · ${String(t.user_raw || '').length} نویسه</span><span>${esc(src)} · باز/بسته</span></summary>
+                <div class="user-bubble">
+                  ${window.ABMarkdown.render(t.user_raw)}
+                  <div class="user-bubble-meta">
+                    <span>#${String(idx + 1).padStart(2, '0')} · <span class="src-badge ${src !== 'WEB' ? 'cli' : ''}">${esc(src)}</span></span>
+                    ${savedPill}
+                  </div>
+                  ${wireAcc}
                 </div>
-                ${wireAcc}
-              </div>
+              </details>
             </div>` : ''}
 
-          <details class="assistant-fold" data-acc-id="${esc(t.id)}-message" open>
+          <details class="assistant-fold" data-acc-id="${esc(t.id)}-message" ${wasOpen(`${t.id}-message`, true) ? 'open' : ''}>
             <summary class="assistant-fold-head"><span>پاسخ ${esc(t.model || t.agent || 'مدل')} · ${esc(tokStr)}</span><span class="kv-pill ${esc(kvState)}">${esc(kvLabel)} · باز/بسته</span></summary>
             <div class="assistant-stream">
               <div class="turn-meta-bar"><strong>${esc(t.agent)}</strong><span>${esc(t.model || '')}</span></div>

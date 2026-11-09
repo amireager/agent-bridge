@@ -225,9 +225,8 @@ def make_handler(hub: BridgeHub):
                 return self._send_json({"ok": True, **res})
 
             if path == "/api/telemetry/clear":
-                hub.store.clear_telemetry()
-                hub.broadcast_state()
-                return self._send_json({"ok": True})
+                result = hub.clear_observed_history()
+                return self._send_json({"ok": True, **result})
 
             if path in ("/v1/chat/completions", "/v1/completions"):
                 return self._handle_v1_tap(path)

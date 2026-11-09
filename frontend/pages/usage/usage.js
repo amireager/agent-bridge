@@ -11,7 +11,10 @@ window.ABUsagePage = (() => {
   }
 
   async function clearAll() {
-    await api('/api/telemetry/clear', {});
+    const ok = confirm('پاکسازی آمار و تاریخچه‌ی آینه‌ها؟\n\nحذف می‌شود: آمار توکن/هزینه، X-Ray و تاریخچه‌ی کانال‌های آفلاین مثل pi قدیمی.\nحفظ می‌شود: کانال‌های ترمینالی که همین حالا زنده‌اند (فقط تاریخچه‌شان خالی می‌شود) و نشست‌های Lab.\n\nادامه بدهم؟');
+    if (!ok) return;
+    const res = await api('/api/telemetry/clear', {});
+    alert(`پاکسازی انجام شد. کانال‌های قدیمی حذف‌شده: ${res.removed_channels || 0} · ترمینال‌های زنده‌ی حفظ‌شده: ${res.preserved_live_channels || 0}`);
   }
 
   function renderTokBar(kv, uncached, out) {

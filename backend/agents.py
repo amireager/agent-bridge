@@ -210,6 +210,42 @@ class BridgeHub:
             self._persist_mirror(self.mirrors[agent_id])
             self.broadcast_state()
 
+    def clear_observed_history(self) -> dict:
+        """Clear telemetry/X-Ray and mirror history; preserve only currently live PTY channels."""
+        self.store.clear_telemetry()
+        self._inspector_ring.clear()
+        now = time.time()
+        live_ids = {aid for aid, ts in self.pty_heartbeats.items() if now - ts <= 25.0}
+        removed_channels = 0
+        for aid in list(self.mirrors):
+            if aid in live_ids:
+                self.mirrors[aid] = self._new_mirror_obj(aid)
+                self._persist_mirror(self.mirrors[aid])
+            else:
+                self.mirrors.pop(aid, None)
+                safe = re.sub(r"[^a-zA-Z0-9_.-]", "-", aid) or "agent"
+                p = self.store.mirrors_dir / f"{safe}.json"
+                try:
+                    p.unlink(missing_ok=True)
+                except OSError:
+                    pass
+                removed_channels += 1
+        # Remove orphan/stale mirror files even if they were not loaded into memory.
+        for p in self.store.mirrors_dir.glob("*.json"):
+            try:
+                content = json.loads(p.read_text(encoding="utf-8"))
+                if content.get("agent_id") not in live_ids:
+                    p.unlink(missing_ok=True)
+            except Exception:
+                try:
+                    p.unlink(missing_ok=True)
+                except OSError:
+                    pass
+        if not self.mirrors and not live_ids:
+            self.mirrors["pi"] = self._new_mirror_obj("pi")
+        self.broadcast_state()
+        return {"cleared": True, "removed_channels": removed_channels, "preserved_live_channels": len(live_ids)}
+
     def create_lab_session(self, title: str | None = None) -> dict:
         idx = len(self.lab_sessions) + 1
         s = self._make_lab_session(title or f"تست مستقیم #{idx}")
