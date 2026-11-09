@@ -1,4 +1,4 @@
-// Modular Focused Settings — Translation, Display HUD, /v1 Tap & History Retention
+// Modular Focused Settings — Built-in Online + API-Driven Offline Translation, HUD, Tap & Retention
 window.ABSettingsPage = (() => {
   const { esc, api } = window.ABUtils;
 
@@ -6,10 +6,12 @@ window.ABSettingsPage = (() => {
     await api('/api/config', {
       translation: {
         engine: document.getElementById('sTrEngine').value,
+        proxy: document.getElementById('sTrProxy').value.trim(),
+        openai_model: document.getElementById('sOpenaiModel').value.trim(),
         endpoints: {
-          online: document.getElementById('sEpOnline').value.trim(),
           bergamot: document.getElementById('sEpBerg').value.trim(),
-          plamo: document.getElementById('sEpPlamo').value.trim()
+          plamo: document.getElementById('sEpPlamo').value.trim(),
+          openai: document.getElementById('sEpOpenai').value.trim()
         }
       }
     });
@@ -18,7 +20,7 @@ window.ABSettingsPage = (() => {
   async function testTranslator() {
     const txt = document.getElementById('sTrTestIn').value;
     const out = document.getElementById('sTrTestOut');
-    out.value = '...';
+    out.value = 'در حال ترجمه...';
     const r = await api('/api/translate', { text: txt, to: 'en' });
     out.value = r.error ? `ERR: ${r.error}` : `${r.translation}\n[${r.engine} · ${r.elapsed_ms}ms]`;
   }
@@ -76,34 +78,44 @@ window.ABSettingsPage = (() => {
 
   function render(host, state, route) {
     const c = state.config;
+    const curEng = c.translation.engine === 'online' ? 'builtin-online' : (c.translation.engine || 'builtin-online');
 
     if (route === 'set-translate') {
       host.innerHTML = `
         <div class="panel-wrap">
           <div class="panel">
             <div class="panel-head">
-              <h3>موتور ترجمه دوزبانه (پیش‌فرض: Online :18091)</h3>
+              <h3>مترجم داخلی آنلاین + درگاه‌های استاندارد API آفلاین</h3>
               <button class="btn primary" onclick="ABSettingsPage.saveTranslation()">ذخیره تنظیمات ترجمه</button>
             </div>
             <div class="field-grid">
               <div class="fld">
-                <label>موتور فعال ترجمه نثر (کدها هرگز ترجمه نمی‌شوند)</label>
+                <label>حالت فعال ترجمه</label>
                 <select id="sTrEngine">
-                  <option value="online" ${c.translation.engine === 'online' ? 'selected' : ''}>Online (:18091 — Google Shielded)</option>
-                  <option value="bergamot" ${c.translation.engine === 'bergamot' ? 'selected' : ''}>Bergamot Offline (:18092 — 47MB WASM)</option>
-                  <option value="plamo" ${c.translation.engine === 'plamo' ? 'selected' : ''}>PLaMo-3 0.8B Offline (:18093)</option>
+                  <option value="builtin-online" ${curEng === 'builtin-online' ? 'selected' : ''}>Built-in Online (داخلی — بدون نیاز به سرور جدا)</option>
+                  <option value="offline-openai" ${curEng === 'offline-openai' ? 'selected' : ''}>Offline OpenAI API (/v1/chat/completions — مثل HY-MT2 یا Qwen)</option>
+                  <option value="bergamot" ${curEng === 'bergamot' ? 'selected' : ''}>Offline REST API — Bergamot (:18092)</option>
+                  <option value="plamo" ${curEng === 'plamo' ? 'selected' : ''}>Offline REST API — PLaMo-3 (:18093)</option>
                 </select>
               </div>
               <div class="fld">
-                <label>درگاه Online</label>
-                <input id="sEpOnline" class="mono ltr" value="${esc(c.translation.endpoints?.online || 'http://127.0.0.1:18091')}" />
+                <label>پروکسی اختیاری برای حالت آنلاین (پشتیبانی از SOCKS5H / HTTP)</label>
+                <input id="sTrProxy" class="mono ltr" placeholder="مثلاً socks5h://127.0.0.1:1080 (خالی = متغیر سیستم)" value="${esc(c.translation.proxy || '')}" />
               </div>
               <div class="fld">
-                <label>درگاه Bergamot</label>
+                <label>آدرس API آفلاین OpenAI-Compatible</label>
+                <input id="sEpOpenai" class="mono ltr" value="${esc(c.translation.endpoints?.openai || 'http://127.0.0.1:18093')}" />
+              </div>
+              <div class="fld">
+                <label>نام مدل در API آفلاین OpenAI</label>
+                <input id="sOpenaiModel" class="mono ltr" value="${esc(c.translation.openai_model || 'hy-mt2-1.8b')}" />
+              </div>
+              <div class="fld">
+                <label>آدرس API آفلاین Bergamot REST</label>
                 <input id="sEpBerg" class="mono ltr" value="${esc(c.translation.endpoints?.bergamot || 'http://127.0.0.1:18092')}" />
               </div>
               <div class="fld">
-                <label>درگاه PLaMo-3</label>
+                <label>آدرس API آفلاین PLaMo REST</label>
                 <input id="sEpPlamo" class="mono ltr" value="${esc(c.translation.endpoints?.plamo || 'http://127.0.0.1:18093')}" />
               </div>
             </div>
@@ -111,13 +123,22 @@ window.ABSettingsPage = (() => {
 
           <div class="panel">
             <div class="panel-head">
-              <h3>تست زنده سپر محافظ کد و واژه‌نامه</h3>
+              <h3>تست زنده ترجمه و سپر محافظ کد</h3>
               <button class="btn" onclick="ABSettingsPage.testTranslator()">تست FA → EN</button>
             </div>
             <div class="field-grid">
               <div class="fld"><textarea id="sTrTestIn" rows="2">کش کی‌وی را در فایل `bridge.py` با دستور `--metrics` بررسی کن.</textarea></div>
               <div class="fld"><textarea id="sTrTestOut" class="mono ltr" rows="2" readonly placeholder="output..."></textarea></div>
             </div>
+          </div>
+
+          <div class="panel">
+            <div class="panel-head"><h3>راهنمای استاندارد API برای حالت‌های کاملاً آفلاین</h3></div>
+            <p class="fg-1" style="margin:0 0 6px;"><strong>روش ۱ (مستقیم با <code>llama-server</code> روی CPU بدون هیچ اسکریپت کمکی — حالت <code>Offline OpenAI API</code>):</strong></p>
+            <div class="md-code"><div class="md-code-bar"><span>fish / bash</span></div><pre>llama-server -m ~/models/micro/translate/hy-mt2-1.8b-heretic-iq4_xs.gguf --device none -ngl 0 -t 4 -tb 8 -c 2048 --port 18093</pre></div>
+            <p class="fg-1" style="margin:10px 0 6px;"><strong>روش ۲ (قرارداد استاندارد <code>Offline REST API</code> — <code>POST /translate</code>):</strong> هر سرویسی که JSON زیر را بگیرد و برگرداند:</p>
+            <div class="md-code"><div class="md-code-bar"><span>JSON Contract</span></div><pre>// Request  -> POST /translate  {"text": "سلام", "from": "auto", "to": "en"}
+// Response <- 200 OK           {"translation": "Hello", "engine": "custom-offline"}</pre></div>
           </div>
 
           <div class="panel">
@@ -203,35 +224,34 @@ window.ABSettingsPage = (() => {
         <div class="panel-wrap">
           <div class="panel">
             <div class="panel-head">
-              <h3>مسیر شنود بین عامل و مدل (<code>/v1</code> Listener) — بدون دستکاری پارامترهای عامل</h3>
+              <h3>مسیر شنود بین عامل و مدل (<code>/v1</code>) و اتصال به سندباکس</h3>
               <button class="btn primary" onclick="ABSettingsPage.saveTap()">ذخیره مسیر</button>
             </div>
-            <p class="fg-1" style="margin:0 0 12px;">
-              تنظیمات مدل، دما و پنجره کانتکست کاملاً در اختیار خودِ عامل باقی می‌ماند. این برنامه صرفاً ترافیک ارسالی به <code>http://127.0.0.1:${state.bridge_port}/v1</code> را بدون دستکاری به سرور مدل مقصد فوروارد کرده، توکن و کش را به نام همان مدل می‌شمارد و نثر پاسخ را به فارسی ترجمه می‌کند.
-            </p>
             <div class="field-grid">
               <div class="fld">
-                <label>آدرس سرور مدل مقصد (Upstream Model Server)</label>
+                <label>آدرس سرور مدل مقصد (مثلاً <code>llama-server</code> روی سیستم اصلی)</label>
                 <input id="sUpstream" class="mono ltr" value="${esc(c.tap.upstream_url)}" />
               </div>
               <div class="fld">
-                <label>پوشه کاری پیش‌فرض هنگام ارسال مستقیم پرامپت</label>
+                <label>پوشه کاری پیش‌فرض</label>
                 <input id="sWorkdir" class="mono ltr" value="${esc(c.tap.workdir)}" />
               </div>
               <div class="fld">
-                <label>باینری عامل برای ارسال مستقیم از وب (اختیاری)</label>
+                <label>فرمان اجرای عامل (می‌تواند <code>box pi</code> هم باشد)</label>
                 <input id="sPiBin" class="mono ltr" value="${esc(c.tap.pi_bin)}" />
               </div>
             </div>
           </div>
 
           <div class="panel">
-            <div class="panel-head"><h3>نحوه اتصال عامل‌ها و ترمینال لینوکس خودت (سبک <code>zellij</code>)</h3></div>
-            <p class="fg-1" style="margin:0 0 8px;">۱. در تنظیمات هر عامل دلخواه در ترمینال، آدرس Base URL را روی درگاه شنود بگذار و نام عامل را در کلید مشخص کن:</p>
-            <div class="md-code"><div class="md-code-bar"><span>env / config</span></div><pre>OPENAI_BASE_URL=http://127.0.0.1:${state.bridge_port}/v1
-OPENAI_API_KEY=agent:pi</pre></div>
-            <p class="fg-1" style="margin:10px 0 8px;">۲. برای اتصال دوطرفه ترمینال واقعی لینوکس به همین نشست زنده وب:</p>
-            <div class="md-code"><div class="md-code-bar"><span>bash / fish</span></div><pre>python3 cli.py --url http://127.0.0.1:${state.bridge_port}</pre></div>
+            <div class="panel-head"><h3>راهنمای اتصال به <code>pi</code> داخل سندباکس (بدون بردن پروژه به داخل سندباکس!)</h3></div>
+            <p class="fg-1" style="margin:0 0 8px;">
+              <strong>روش ۱ (اتصال دوطرفه زنده از داخل سندباکس):</strong> برنامه <code>bridge.py</code> روی سیستم عادی می‌ماند؛ داخل ترمینال سندباکس (<code>box</code> / <code>dev agent</code>) روی پوشه پروژه‌ات این دستور را بزن تا <code>pi</code> داخل سندباکس اجرا شود و به وب وصل گردد:
+            </p>
+            <div class="md-code"><div class="md-code-bar"><span>inside sandbox</span></div><pre>python3 ~/path/to/agent-bridge/cli.py --pi-worker</pre></div>
+            <p class="fg-1" style="margin:10px 0 8px;">
+              <strong>روش ۲ (فقط شنود شفاف <code>/v1</code> برای هر عامل دلخواه):</strong> در تنظیمات عامل داخل سندباکس، آدرس مدل را روی <code>http://127.0.0.1:${state.bridge_port}/v1</code> بگذار.
+            </p>
           </div>
         </div>`;
       return;
@@ -243,12 +263,7 @@ OPENAI_API_KEY=agent:pi</pre></div>
     host.innerHTML = `
       <div class="panel-wrap">
         <div class="panel">
-          <div class="panel-head">
-            <h3>پاکسازی خودکار تاریخچه (Retention Policy)</h3>
-          </div>
-          <p class="fg-1" style="margin:0 0 12px;">
-            انتخاب کن تاریخچه نشست‌ها و آمار توکن‌ها چه مدت در <code>./.data/</code> باقی بمانند:
-          </p>
+          <div class="panel-head"><h3>پاکسازی خودکار تاریخچه (Retention Policy)</h3></div>
           <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px;">
             ${[[1, '۱ روز (1 Day)'], [7, '۱ هفته (1 Week)'], [30, '۱ ماه (1 Month)'], [0, 'همیشگی (Forever)']].map(([d, lbl]) => `
               <button class="btn ${curDays === d ? 'primary' : ''}" onclick="ABSettingsPage.applyRetention(${d})">${lbl}</button>
@@ -259,7 +274,7 @@ OPENAI_API_KEY=agent:pi</pre></div>
 
         <div class="panel">
           <div class="panel-head">
-            <h3>فایل‌های داخل <code>./.data/</code> (ایزوله و خارج از گیت)</h3>
+            <h3>فایل‌های داخل <code>./.data/</code></h3>
             <span class="mono muted">${st.file_count || 0} files · ${st.total_kib || 0} KiB</span>
           </div>
           <table class="grid-table">

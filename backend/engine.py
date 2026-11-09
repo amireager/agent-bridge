@@ -9,6 +9,7 @@ import urllib.request
 from pathlib import Path
 
 PARAM_RE = re.compile(r"(\d+(?:\.\d+)?)\s*[bB]")
+LOOPBACK_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 
 
 def estimate_kv_mb_for_tokens(model_name: str, tokens: int, kv_type: str = "q8_0") -> float:
@@ -37,7 +38,7 @@ def probe_upstream_passive(upstream_url: str) -> dict:
     server_ctx = 0
 
     try:
-        with urllib.request.urlopen(f"{upstream}/v1/models", timeout=1.2) as r:
+        with LOOPBACK_OPENER.open(f"{upstream}/v1/models", timeout=1.2) as r:
             obj = json.loads(r.read().decode("utf-8"))
             online = True
             items = obj.get("data", [])
@@ -48,7 +49,7 @@ def probe_upstream_passive(upstream_url: str) -> dict:
 
     if online:
         try:
-            with urllib.request.urlopen(f"{upstream}/props", timeout=1.0) as r:
+            with LOOPBACK_OPENER.open(f"{upstream}/props", timeout=1.0) as r:
                 props = json.loads(r.read().decode("utf-8"))
                 server_ctx = int(props.get("default_generation_settings", {}).get("n_ctx", 0))
         except Exception:
@@ -57,7 +58,7 @@ def probe_upstream_passive(upstream_url: str) -> dict:
     metrics: dict[str, float] = {}
     if online:
         try:
-            with urllib.request.urlopen(f"{upstream}/metrics", timeout=1.2) as r:
+            with LOOPBACK_OPENER.open(f"{upstream}/metrics", timeout=1.2) as r:
                 raw = r.read().decode("utf-8", errors="replace")
             for line in raw.splitlines():
                 if line.startswith("llamacpp:") and " " in line:

@@ -7,6 +7,7 @@ import json
 import os
 import queue
 import re
+import shlex
 import shutil
 import subprocess
 import threading
@@ -44,6 +45,7 @@ class BridgeHub:
 
         self.pi_proc: subprocess.Popen | None = None
         self.pi_session_bound: str | None = None
+        self.sandbox_worker_seen_ts: float = 0.0
         self.session_state: str = "IDLE"
         self.current_turn: dict | None = None
 
@@ -276,14 +278,19 @@ class BridgeHub:
         self._persist_session(sess)
         self.emit_event("turn_complete", {"turn": turn})
 
-    # ---- Lightweight Prompt Sender (so user doesn't copy-paste English!) ----
+    # ---- Lightweight Prompt Sender (Host cmd, Sandbox cmd like `box pi`, or Sandbox Worker!) ----
     def _ensure_pi_sender(self, model_id: str) -> tuple[bool, str]:
         if self.pi_proc and self.pi_proc.poll() is None:
             return True, "running"
 
-        pi_bin = self.config["tap"]["pi_bin"]
-        if not (Path(pi_bin).exists() or shutil.which(pi_bin)):
-            return False, f"Agent binary '{pi_bin}' not running; use Copy button or point your CLI agent at http://127.0.0.1:{self.bridge_port}/v1"
+        raw_cmd = self.config["tap"]["pi_bin"].strip()
+        cmd_parts = shlex.split(raw_cmd) if raw_cmd else ["pi"]
+        exe = cmd_parts[0]
+        if not (Path(exe).exists() or shutil.which(exe)):
+            return (
+                False,
+                f"باینری '{exe}' روی سیستم اصلی پیدا نشد (چون داخل سندباکس است). یا داخل سندباکس دستور `python3 cli.py --pi-worker` را بزن، یا فرمان اجرا را در تنظیمات به شکل `box pi` بگذار، یا با دکمه COPY_EN متن انگلیسی را در ترمینال سندباکس پیست کن.",
+            )
 
         pi_dir = self.store.pi_agent_dir
         models_json = {
@@ -330,7 +337,7 @@ class BridgeHub:
             env["PATH"] = f"{node_dir}:{env.get('PATH', '')}"
 
         self.pi_proc = subprocess.Popen(
-            [pi_bin, "--mode", "rpc", "--session-dir", str(pi_sess_dir)],
+            [*cmd_parts, "--mode", "rpc", "--session-dir", str(pi_sess_dir)],
             cwd=str(workdir),
             env=env,
             stdin=subprocess.PIPE,
@@ -342,11 +349,101 @@ class BridgeHub:
         threading.Thread(target=self._read_pi_stdout, daemon=True).start()
         return True, "spawned"
 
+    def ingest_pi_rpc_event(self, ev: dict, last_push_ref: list[float]) -> None:
+        etype = ev.get("type", "")
+        turn = self.current_turn
+
+        if etype == "agent_start":
+            self.session_state = "THINKING"
+            self.broadcast_state()
+
+        elif etype == "message_update" and turn is not None:
+            ae = ev.get("assistantMessageEvent", {})
+            atype = ae.get("type", "")
+            if atype == "thinking_delta":
+                self.session_state = "THINKING"
+                delta = ae.get("delta", "")
+                turn["thinking"] += delta
+                self.emit_event("stream_delta", {"field": "thinking", "delta": delta})
+            elif atype == "text_delta":
+                self.session_state = "STREAMING"
+                delta = ae.get("delta", "")
+                turn["reply_en"] += delta
+                self.emit_event("stream_delta", {"field": "reply_en", "delta": delta})
+            now = time.monotonic()
+            if now - last_push_ref[0] > 0.28:
+                last_push_ref[0] = now
+                self.broadcast_state()
+
+        elif etype == "tool_execution_start" and turn is not None:
+            self.session_state = "TOOL_EXEC"
+            turn["tools"].append(
+                {
+                    "id": ev.get("toolCallId", uuid.uuid4().hex[:6]),
+                    "name": ev.get("toolName", "tool"),
+                    "args": ev.get("args", {}),
+                    "output": "",
+                    "status": "running",
+                    "is_error": False,
+                    "started_at": time.time(),
+                    "duration_ms": 0,
+                }
+            )
+            self.broadcast_state()
+
+        elif etype == "tool_execution_end" and turn is not None:
+            tc_id = ev.get("toolCallId")
+            res = ev.get("result", {})
+            txts = [c.get("text", "") for c in res.get("content", []) if isinstance(c, dict)]
+            for tc in turn["tools"]:
+                if tc["id"] == tc_id:
+                    tc["output"] = "\n".join(txts)
+                    tc["is_error"] = bool(ev.get("isError", False))
+                    tc["status"] = "error" if tc["is_error"] else "done"
+                    tc["duration_ms"] = int((time.time() - tc.get("started_at", time.time())) * 1000)
+                    break
+            self.session_state = "STREAMING"
+            self.broadcast_state()
+
+        elif etype == "agent_end":
+            if turn is not None:
+                if not turn["reply_en"].strip():
+                    for m in reversed(ev.get("messages", [])):
+                        if m.get("role") == "assistant":
+                            c = m.get("content", "")
+                            if isinstance(c, list):
+                                turn["reply_en"] = "".join(
+                                    blk.get("text", "") for blk in c if blk.get("type") == "text"
+                                )
+                            elif isinstance(c, str):
+                                turn["reply_en"] = c
+                            break
+
+                turn["elapsed_s"] = round(time.time() - turn["started_ts"], 1)
+                if turn["reply_en"].strip():
+                    self.session_state = "TRANSLATING_OUT"
+                    self.broadcast_state()
+                    tr_res = translate_prose(
+                        turn["reply_en"], "fa", self.config["translation"], self.glossary
+                    )
+                    turn["reply_fa"] = tr_res.get("translation", "")
+                    turn["tr_engine"] = tr_res.get("engine", "")
+
+                turn["status"] = "done"
+                sess = self.sessions_by_agent.get(turn["agent"], {}).get(turn["session_id"])
+                if sess:
+                    self._persist_session(sess)
+                self.emit_event("turn_complete", {"turn": turn})
+
+            self.current_turn = None
+            self.session_state = "IDLE"
+            self.broadcast_state()
+
     def _read_pi_stdout(self) -> None:
         proc = self.pi_proc
         if not proc or not proc.stdout:
             return
-        last_push = 0.0
+        last_push_ref = [0.0]
         for raw in iter(proc.stdout.readline, b""):
             line = raw.decode("utf-8", errors="replace").strip()
             if not line.startswith("{"):
@@ -355,95 +452,7 @@ class BridgeHub:
                 ev = json.loads(line)
             except json.JSONDecodeError:
                 continue
-
-            etype = ev.get("type", "")
-            turn = self.current_turn
-
-            if etype == "agent_start":
-                self.session_state = "THINKING"
-                self.broadcast_state()
-
-            elif etype == "message_update" and turn is not None:
-                ae = ev.get("assistantMessageEvent", {})
-                atype = ae.get("type", "")
-                if atype == "thinking_delta":
-                    self.session_state = "THINKING"
-                    delta = ae.get("delta", "")
-                    turn["thinking"] += delta
-                    self.emit_event("stream_delta", {"field": "thinking", "delta": delta})
-                elif atype == "text_delta":
-                    self.session_state = "STREAMING"
-                    delta = ae.get("delta", "")
-                    turn["reply_en"] += delta
-                    self.emit_event("stream_delta", {"field": "reply_en", "delta": delta})
-                now = time.monotonic()
-                if now - last_push > 0.28:
-                    last_push = now
-                    self.broadcast_state()
-
-            elif etype == "tool_execution_start" and turn is not None:
-                self.session_state = "TOOL_EXEC"
-                turn["tools"].append(
-                    {
-                        "id": ev.get("toolCallId", uuid.uuid4().hex[:6]),
-                        "name": ev.get("toolName", "tool"),
-                        "args": ev.get("args", {}),
-                        "output": "",
-                        "status": "running",
-                        "is_error": False,
-                        "started_at": time.time(),
-                        "duration_ms": 0,
-                    }
-                )
-                self.broadcast_state()
-
-            elif etype == "tool_execution_end" and turn is not None:
-                tc_id = ev.get("toolCallId")
-                res = ev.get("result", {})
-                txts = [c.get("text", "") for c in res.get("content", []) if isinstance(c, dict)]
-                for tc in turn["tools"]:
-                    if tc["id"] == tc_id:
-                        tc["output"] = "\n".join(txts)
-                        tc["is_error"] = bool(ev.get("isError", False))
-                        tc["status"] = "error" if tc["is_error"] else "done"
-                        tc["duration_ms"] = int((time.time() - tc.get("started_at", time.time())) * 1000)
-                        break
-                self.session_state = "STREAMING"
-                self.broadcast_state()
-
-            elif etype == "agent_end":
-                if turn is not None:
-                    if not turn["reply_en"].strip():
-                        for m in reversed(ev.get("messages", [])):
-                            if m.get("role") == "assistant":
-                                c = m.get("content", "")
-                                if isinstance(c, list):
-                                    turn["reply_en"] = "".join(
-                                        blk.get("text", "") for blk in c if blk.get("type") == "text"
-                                    )
-                                elif isinstance(c, str):
-                                    turn["reply_en"] = c
-                                break
-
-                    turn["elapsed_s"] = round(time.time() - turn["started_ts"], 1)
-                    if turn["reply_en"].strip():
-                        self.session_state = "TRANSLATING_OUT"
-                        self.broadcast_state()
-                        tr_res = translate_prose(
-                            turn["reply_en"], "fa", self.config["translation"], self.glossary
-                        )
-                        turn["reply_fa"] = tr_res.get("translation", "")
-                        turn["tr_engine"] = tr_res.get("engine", "")
-
-                    turn["status"] = "done"
-                    sess = self.sessions_by_agent["pi"].get(turn["session_id"])
-                    if sess:
-                        self._persist_session(sess)
-                    self.emit_event("turn_complete", {"turn": turn})
-
-                self.current_turn = None
-                self.session_state = "IDLE"
-                self.broadcast_state()
+            self.ingest_pi_rpc_event(ev, last_push_ref)
 
     def submit_prompt(
         self,
@@ -461,14 +470,16 @@ class BridgeHub:
         up = probe_upstream_passive(self.config["tap"]["upstream_url"])
         model_id = up["detected_model"] if up["online"] else "local-model"
 
-        ok, msg = self._ensure_pi_sender(model_id)
-        if not ok or not self.pi_proc or not self.pi_proc.stdin:
-            raise RuntimeError(msg)
+        worker_alive = (time.time() - self.sandbox_worker_seen_ts) < 25.0
+        if not worker_alive:
+            ok, msg = self._ensure_pi_sender(model_id)
+            if not ok or not self.pi_proc or not self.pi_proc.stdin:
+                raise RuntimeError(msg)
 
-        if self.pi_session_bound != sid:
-            self.pi_proc.stdin.write((json.dumps({"type": "new_session"}) + "\n").encode("utf-8"))
-            self.pi_proc.stdin.flush()
-            self.pi_session_bound = sid
+            if self.pi_session_bound != sid:
+                self.pi_proc.stdin.write((json.dumps({"type": "new_session"}) + "\n").encode("utf-8"))
+                self.pi_proc.stdin.flush()
+                self.pi_session_bound = sid
 
         if len(sess["turns"]) == 0:
             short = user_raw.strip().replace("\n", " ")[:28]
@@ -504,8 +515,15 @@ class BridgeHub:
             cmd["streamingBehavior"] = "followUp"
 
         self.emit_event("turn_started", {"turn": turn})
-        self.pi_proc.stdin.write((json.dumps(cmd, ensure_ascii=False) + "\n").encode("utf-8"))
-        self.pi_proc.stdin.flush()
+        if worker_alive:
+            self.session_state = "THINKING"
+            self.emit_event(
+                "worker_prompt",
+                {"turn_id": turn["id"], "message": prompt_sent, "model": model_id},
+            )
+        else:
+            self.pi_proc.stdin.write((json.dumps(cmd, ensure_ascii=False) + "\n").encode("utf-8"))
+            self.pi_proc.stdin.flush()
         self.broadcast_state()
         return turn
 

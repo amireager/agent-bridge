@@ -158,11 +158,13 @@ class DataStore:
                 "show_wire_en": True,
             },
             "translation": {
-                "engine": "online",           # online (Step 0 default) | bergamot | plamo
+                "engine": "builtin-online",   # builtin-online (0 external servers) | bergamot | plamo | offline-openai
+                "proxy": "",                  # Optional proxy e.g. socks5h://127.0.0.1:1080 or http://127.0.0.1:10808
+                "openai_model": "hy-mt2-1.8b",
                 "endpoints": {
-                    "online": "http://127.0.0.1:18091",
                     "bergamot": "http://127.0.0.1:18092",
                     "plamo": "http://127.0.0.1:18093",
+                    "openai": "http://127.0.0.1:18093",
                 },
             },
             "tap": {

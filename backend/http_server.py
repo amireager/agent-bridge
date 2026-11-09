@@ -14,7 +14,7 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 from .agents import BridgeHub
-from .translator import translate_prose
+from .translator import LOOPBACK_OPENER, translate_prose
 
 FRONTEND_DIR = Path(__file__).resolve().parent.parent / "frontend"
 
@@ -148,6 +148,17 @@ def make_handler(hub: BridgeHub):
 
             if path == "/api/abort":
                 hub.abort_agent()
+                hub.emit_event("worker_abort", {})
+                return self._send_json({"ok": True})
+
+            if path == "/api/worker/heartbeat":
+                hub.sandbox_worker_seen_ts = time.time()
+                return self._send_json({"ok": True})
+
+            if path == "/api/worker/rpc-event":
+                hub.sandbox_worker_seen_ts = time.time()
+                ev = self._read_json()
+                hub.ingest_pi_rpc_event(ev, [0.0])
                 return self._send_json({"ok": True})
 
             if path == "/api/session/new":
@@ -249,7 +260,7 @@ def make_handler(hub: BridgeHub):
         def _proxy_v1_get(self, path: str) -> None:
             upstream = hub.config["tap"]["upstream_url"].rstrip("/") + path
             try:
-                with urllib.request.urlopen(upstream, timeout=10) as r:
+                with LOOPBACK_OPENER.open(upstream, timeout=10) as r:
                     data = r.read()
                     self.send_response(r.status)
                     self.send_header("Content-Type", r.headers.get("Content-Type", "application/json"))
@@ -305,7 +316,7 @@ def make_handler(hub: BridgeHub):
             )
             t0 = time.perf_counter()
             try:
-                resp = urllib.request.urlopen(req, timeout=300)
+                resp = LOOPBACK_OPENER.open(req, timeout=300)
             except urllib.error.HTTPError as err:
                 eb = err.read()
                 self.send_response(err.code)

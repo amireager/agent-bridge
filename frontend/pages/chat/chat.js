@@ -142,6 +142,13 @@ window.ABChatPage = (() => {
     document.getElementById('trMetaTag').textContent = 'translating...';
 
     const res = await api('/api/translate', { text: raw, to: 'en' });
+    if (res.error) {
+      document.getElementById('trMetaTag').textContent = 'ERR';
+      const errEl = document.getElementById('sendErrBanner');
+      errEl.textContent = `خطای مترجم: ${res.error} (اگر فیلترشکن داری در تنظیمات مترجم آدرس پروکسی مثل socks5h://127.0.0.1:1080 را وارد کن یا حالت آفلاین را انتخاب کن)`;
+      errEl.style.display = 'block';
+      return;
+    }
     wireEl.value = res.translation || raw;
     lastTranslatedDraft = raw;
     document.getElementById('staleNotice').classList.remove('show');
