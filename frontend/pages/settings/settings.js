@@ -4,44 +4,92 @@ window.ABSettingsPage = (() => {
   const $ = id => document.getElementById(id);
   const cfg = () => window.ABApp.getState().config;
 
-  async function saveTranslation() {
-    const selectedEngine = $('sEngine').value;
-    const isOnline = selectedEngine !== 'custom-offline';
-    await api('/api/config', { translation: {
-      enabled: $('sEnabled').checked,
-      engine: selectedEngine,
-      proxy: isOnline ? $('sProxy').value.trim() : '',
-      offline_protocol: $('sProtocol').value,
-      offline_url: $('sOfflineUrl').value.trim(),
-      offline_model: $('sOfflineModel').value.trim()
-    }});
+  function translationMode() { return $('sMode')?.value || 'online'; }
+  function selectedTranslationEngine() {
+    return translationMode() === 'online' ? ($('sEngine')?.value || 'builtin-online') : 'custom-offline';
   }
-
-  async function testConnection() {
-    const out = $('sTestResult'); out.textContent = 'در حال تست...';
-    const selectedEngine = $('sEngine').value;
-    const online = selectedEngine !== 'custom-offline';
-    const res = await api('/api/translate/ping', {
-      engine: selectedEngine,
+  function currentTranslationConfig() {
+    const online = translationMode() === 'online';
+    return {
+      engine: selectedTranslationEngine(),
       proxy: online ? $('sProxy').value.trim() : '',
       offline_protocol: $('sProtocol').value,
       offline_url: $('sOfflineUrl').value.trim(),
       offline_model: $('sOfflineModel').value.trim()
-    });
-    out.textContent = res.ok ? `اتصال موفق · ${res.latency_ms} ms · ${res.engine}${res.sample ? ` · ${res.sample}` : ''}` : `خطا · ${res.error}`;
-    out.style.color = res.ok ? 'var(--phosphor)' : 'var(--red)';
+    };
   }
 
-  async function testHardTranslation() {
-    const out = $('sHardResult');
-    const selectedEngine = $('sEngine').value;
-    const online = selectedEngine !== 'custom-offline';
-    const text = 'ترجمه‌ی این پیام را دقیق انجام بده؛ مسیرها و گزینه‌ها نباید تغییر کنند.\n\nبرای بررسی، فایل `~/agent-team/README.md` را بخوان و مطمئن شو گزینه‌ی `--fa on` در دستور حفظ می‌شود.\n\n```fish\ncd ~/agent-team && python3 check.py --fa on --port 18095\n```\n\nنام ابزارها و کد را ترجمه نکن.';
-    out.textContent = 'در حال اجرای آزمون دشوار ترجمه…';
+  async function saveTranslation() {
     try {
-      const res = await api('/api/translate', { text, to:'en', engine_mode: online ? selectedEngine : 'offline', proxy: online ? $('sProxy').value.trim() : '', offline_protocol: online ? 'openai' : $('sProtocol').value, offline_url: $('sOfflineUrl').value.trim(), offline_model: $('sOfflineModel').value.trim() });
-      out.innerHTML = res.error ? `<span style="color:var(--red)">${esc(res.error)}</span>` : window.ABMarkdown.render(res.translation || 'بدون خروجی');
-    } catch (e) { out.textContent = `خطا: ${e.message}`; }
+      await api('/api/config', { translation: {
+        enabled: $('sEnabled').checked,
+        ...currentTranslationConfig()
+      }});
+      setTranslationStatus('تنظیمات ذخیره شد.', true);
+    } catch (e) { setTranslationStatus(`ذخیره ناموفق · ${e.message}`, false); }
+  }
+
+  function setTranslationStatus(message, ok) {
+    const out = $('sTestResult');
+    out.textContent = message;
+    out.style.color = ok ? 'var(--phosphor)' : 'var(--red)';
+  }
+
+  async function testConnection() {
+    setTranslationStatus('در حال آزمودن اتصال و اجرای نمونه…', true);
+    try {
+      const res = await api('/api/translate/ping', currentTranslationConfig());
+      setTranslationStatus(res.ok
+        ? `اتصال و ترجمه موفق · ${res.latency_ms} ms · ${res.engine}\nنمونه: ${res.sample || 'پاسخ دریافت شد'}`
+        : `آزمون ناموفق · ${res.error || 'پاسخی دریافت نشد'}`, !!res.ok);
+    } catch (e) { setTranslationStatus(`خطا در آزمون اتصال · ${e.message}`, false); }
+  }
+
+  async function translateSettingsSample() {
+    const source = $('sSampleInput').value.trim();
+    if (!source) { $('sSampleOutput').textContent = 'ابتدا متن نمونه را وارد کن.'; return; }
+    const output = $('sSampleOutput');
+    output.textContent = 'در حال ترجمه…';
+    const online = translationMode() === 'online';
+    try {
+      const res = await api('/api/translate', {
+        text: source,
+        to: $('sSampleTarget').value,
+        engine_mode: online ? $('sEngine').value : 'offline',
+        ...currentTranslationConfig()
+      });
+      output.innerHTML = res.error
+        ? `<span class="translator-error">${esc(res.error)}</span>`
+        : window.ABMarkdown.render(res.translation || 'ترجمه‌ای برنگشت.');
+      $('sSampleMeta').textContent = res.error ? 'آزمون ترجمه ناموفق بود.' : `موتور: ${res.engine || 'نامشخص'} · ${res.elapsed_ms || 0} ms`;
+    } catch (e) {
+      output.textContent = `خطا در ترجمه · ${e.message}`;
+      $('sSampleMeta').textContent = 'آزمون ترجمه ناموفق بود.';
+    }
+  }
+
+  function addGlossaryRow(fa = '', en = '') {
+    const list = $('glossaryRows');
+    if (!list) return;
+    const row = document.createElement('div');
+    row.className = 'translator-glossary-row';
+    row.innerHTML = `<input data-glossary-fa aria-label="اصطلاح فارسی" placeholder="اصطلاح فارسی" value="${esc(fa)}"><span aria-hidden="true">↔</span><input data-glossary-en aria-label="معادل انگلیسی" placeholder="معادل انگلیسی" value="${esc(en)}"><button class="btn ghost" type="button" aria-label="حذف اصطلاح" title="حذف" onclick="this.closest('.translator-glossary-row').remove()">×</button>`;
+    list.appendChild(row);
+  }
+
+  async function saveGlossary() {
+    const glossary = [...$('glossaryRows').querySelectorAll('.translator-glossary-row')]
+      .map(row => ({ fa: row.querySelector('[data-glossary-fa]').value.trim(), en: row.querySelector('[data-glossary-en]').value.trim() }))
+      .filter(item => item.fa && item.en);
+    const status = $('glossaryStatus');
+    try {
+      await api('/api/glossary', { glossary });
+      status.textContent = `واژه‌نامه ذخیره شد · ${glossary.length} جفت اصطلاح`;
+      status.style.color = 'var(--phosphor)';
+    } catch (e) {
+      status.textContent = `ذخیره ناموفق · ${e.message}`;
+      status.style.color = 'var(--red)';
+    }
   }
 
   async function saveUI() {
@@ -107,24 +155,74 @@ window.ABSettingsPage = (() => {
 
   function toggleHelp(id) { $(id).classList.toggle('open'); }
   function syncConditional() {
-    const online = $('sEngine').value !== 'custom-offline';
+    const online = translationMode() === 'online';
     $('onlineFields').hidden = !online;
     $('offlineFields').hidden = online;
+    $('sProxy').disabled = !online;
+    $('sEngine').disabled = !online;
   }
 
   function render(host, state, route) {
     const c = state.config, tr = c.translation, ui = c.ui, tap = c.tap;
     if (route === 'set-translate') {
-      host.innerHTML = `<div class="panel-wrap">
-        <div class="panel rtl"><div class="panel-head"><h3>مترجم همه‌فن‌حریف · اتصال قابل‌تغییر</h3></div>
-          <div class="os-row"><div class="os-row-top"><div class="os-title-wrap">ترجمه خودکار روشن باشد</div><label class="ui-switch"><input id="sEnabled" type="checkbox" ${tr.enabled !== false ? 'checked' : ''} onchange="ABSettingsPage.saveTranslation()"><span class="ui-slider"></span></label></div>
-            <div class="os-help-drawer open" id="hEnabled">اگر خاموش باشد، Agent Bridge در مسیر OpenAI pass-through عمل می‌کند و متن را ترجمه نمی‌کند.</div></div>
-          <div class="fld" style="margin-top:18px"><label>حالت ترجمه</label><select id="sEngine" onchange="ABSettingsPage.syncConditional()"><option value="builtin-online" ${tr.engine === 'builtin-online' ? 'selected' : ''}>آنلاین خودکار · ۳ مسیر جایگزین</option><option value="online-google" ${tr.engine === 'online-google' ? 'selected' : ''}>Google Chrome endpoint</option><option value="online-google-gtx" ${tr.engine === 'online-google-gtx' ? 'selected' : ''}>Google GTX endpoint</option><option value="online-mymemory" ${tr.engine === 'online-mymemory' ? 'selected' : ''}>MyMemory endpoint</option><option value="custom-offline" ${tr.engine === 'custom-offline' ? 'selected' : ''}>آفلاین دلخواه من</option></select></div>
-          <div id="onlineFields" class="os-card" style="margin-top:14px" ${tr.engine === 'custom-offline' ? 'hidden' : ''}><div class="os-card-head"><h3>اتصال آنلاین</h3></div><div class="os-row"><div class="fld"><label>Proxy (خالی = اتصال مستقیم)</label><input id="sProxy" value="${esc(tr.proxy || '')}" placeholder="socks5h://127.0.0.1:1080"></div><button class="btn" style="margin-top:12px" onclick="ABSettingsPage.testConnection()">تست اتصال و پروکسی</button></div></div>
-          <div id="offlineFields" class="os-card" style="margin-top:14px" ${tr.engine !== 'custom-offline' ? 'hidden' : ''}><div class="os-card-head"><h3>API آفلاین دلخواه کاربر</h3></div><div class="os-row"><div class="field-grid"><div class="fld"><label>قرارداد API</label><select id="sProtocol"><option value="openai" ${(tr.offline_protocol || 'openai') === 'openai' ? 'selected' : ''}>OpenAI-compatible Chat Completions</option><option value="rest" ${tr.offline_protocol === 'rest' ? 'selected' : ''}>JSON REST · POST /translate</option></select></div><div class="fld"><label>URL پایه (پورت آزاد)</label><input id="sOfflineUrl" value="${esc(tr.offline_url || 'http://127.0.0.1:18095')}"></div><div class="fld"><label>نام مدل (برای OpenAI API)</label><input id="sOfflineModel" value="${esc(tr.offline_model || 'local-translator')}"></div></div><div class="os-help-drawer open">قرارداد OpenAI: <code>POST /v1/chat/completions</code> با <code>messages</code>؛ REST: <code>POST /translate</code> و JSON برابر <code>{"text":"...","from":"fa","to":"en"}</code>، پاسخ <code>{"translation":"..."}</code>. آدرس و پورت را خودت انتخاب کن.</div><button class="btn" style="margin-top:12px" onclick="ABSettingsPage.testConnection()">تست endpoint</button></div></div>
-          <div id="sTestResult" class="mono" style="margin-top:14px"></div><button class="btn" style="margin-top:12px" onclick="ABSettingsPage.testHardTranslation()">آزمون ترجمه‌ی سخت (حفظ مسیر، فلگ و کد)</button><div id="sHardResult" class="md-body" style="margin-top:12px"></div><button class="btn primary" style="margin-top:14px" onclick="ABSettingsPage.saveTranslation()">ذخیره تنظیمات مترجم</button>
-        </div>
-        <div class="panel rtl"><div class="panel-head"><h3>واژه‌نامه</h3></div><p class="muted">مدیریت واژه‌نامه‌ی موجود در بخش قبلی به‌زودی به این پنل سبک منتقل می‌شود؛ فایل داده در <code>.data/glossary.json</code> می‌ماند.</p></div>
+      const online = tr.engine !== 'custom-offline';
+      const engines = [
+        ['builtin-online', 'آنلاین خودکار · Google و MyMemory به‌عنوان مسیرهای جایگزین'],
+        ['online-google', 'Google · Chrome endpoint'],
+        ['online-google-gtx', 'Google · GTX endpoint'],
+        ['online-mymemory', 'MyMemory']
+      ];
+      const glossary = Array.isArray(state.glossary) ? state.glossary : [];
+      host.innerHTML = `<div class="panel-wrap translator-settings">
+        <section class="panel rtl">
+          <div class="panel-head"><div><h3>مترجم و اتصال‌ها</h3><p class="muted">موتور ترجمه فقط برای متن‌های Bridge استفاده می‌شود؛ کد و بلوک‌های کد دست‌نخورده می‌مانند.</p></div></div>
+          <div class="os-row"><div class="os-row-top"><div class="os-title-wrap">ترجمه خودکار روشن باشد</div><label class="ui-switch"><input id="sEnabled" type="checkbox" ${tr.enabled !== false ? 'checked' : ''} onchange="ABSettingsPage.saveTranslation()"><span class="ui-slider"></span></label></div><div class="os-help-drawer open">اگر خاموش باشد، متن بدون ترجمه از Bridge عبور می‌کند.</div></div>
+
+          <div class="fld translator-mode-field"><label for="sMode">نوع اتصال</label><select id="sMode" onchange="ABSettingsPage.syncConditional()"><option value="online" ${online ? 'selected' : ''}>آنلاین</option><option value="offline" ${!online ? 'selected' : ''}>آفلاین · API دلخواه</option></select><small>ابتدا نوع اتصال را انتخاب کن؛ تنظیمات همان حالت در پنل پایین نمایش داده می‌شود.</small></div>
+
+          <div id="onlineFields" class="os-card translator-engine-panel" ${!online ? 'hidden' : ''}>
+            <div class="os-card-head"><div><h3>موتور آنلاین</h3><p>یک موتور مشخص کن یا حالت خودکار را برای امتحان مسیرهای جایگزین انتخاب کن.</p></div></div>
+            <div class="fld"><label for="sEngine">موتور ترجمه</label><select id="sEngine">${engines.map(([id,label]) => `<option value="${id}" ${tr.engine === id || (id === 'builtin-online' && !engines.some(([candidate]) => candidate === tr.engine)) ? 'selected' : ''}>${label}</option>`).join('')}</select></div>
+            <div class="fld translator-proxy-field"><label for="sProxy">پروکسی (اختیاری)</label><input id="sProxy" value="${esc(tr.proxy || '')}" placeholder="http://127.0.0.1:8080"><small>خالی بگذار تا اتصال مستقیم استفاده شود.</small></div>
+            <button class="btn" type="button" onclick="ABSettingsPage.testConnection()">تست موتور آنلاین</button>
+          </div>
+
+          <div id="offlineFields" class="os-card translator-engine-panel" ${online ? 'hidden' : ''}>
+            <div class="os-card-head"><div><h3>اتصال موتور آفلاین</h3><p>Bridge به یک API محلی یا شبکهٔ خصوصی وصل می‌شود؛ خودش مدل یا کلید API نصب و ذخیره نمی‌کند.</p></div></div>
+            <div class="field-grid"><div class="fld"><label for="sProtocol">قرارداد API</label><select id="sProtocol"><option value="openai" ${(tr.offline_protocol || 'openai') === 'openai' ? 'selected' : ''}>OpenAI-compatible · Chat Completions</option><option value="rest" ${tr.offline_protocol === 'rest' ? 'selected' : ''}>REST ساده · /translate</option></select></div><div class="fld"><label for="sOfflineUrl">URL پایه</label><input id="sOfflineUrl" value="${esc(tr.offline_url || 'http://127.0.0.1:18095')}" placeholder="http://127.0.0.1:18095"></div><div class="fld"><label for="sOfflineModel">نام مدل (OpenAI-compatible)</label><input id="sOfflineModel" value="${esc(tr.offline_model || 'local-translator')}" placeholder="نام مدل"></div></div>
+            <details class="translator-api-guide"><summary>راهنمای اتصال و نمونهٔ اجرا</summary><div class="translator-guide-body">
+              <h4>OpenAI-compatible</h4><p>برای سروری که مسیر Chat Completions را پیاده کرده (مثل سرویس محلی خودت)، URL پایه را وارد کن؛ Bridge درخواست را به <code>/v1/chat/completions</code> می‌فرستد. مسیر درخواست باید متن ترجمه را در پیام user دریافت کند و ترجمه را در <code>choices[0].message.content</code> برگرداند.</p>
+              <pre><code>POST /v1/chat/completions
+Content-Type: application/json
+
+{"model":"local-translator","messages":[{"role":"user","content":"Translate to Persian: Hello"}],"temperature":0.1}</code></pre>
+              <h4>REST ساده</h4><p>برای API کوچک اختصاصی، endpoint برابر <code>POST /translate</code> است و پاسخ باید JSON با کلید <code>translation</code> داشته باشد.</p>
+              <pre><code>curl http://127.0.0.1:18095/translate \
+  -H 'Content-Type: application/json' \
+  -d '{"text":"Hello","from":"en","to":"fa"}'
+
+# response
+{"translation":"سلام"}</code></pre>
+              <p class="muted">آدرس loopback را برای مدل روی همان دستگاه نگه دار. API key در تنظیمات این Bridge پشتیبانی یا ذخیره نمی‌شود.</p>
+            </div></details>
+            <button class="btn" type="button" onclick="ABSettingsPage.testConnection()">تست API آفلاین</button>
+          </div>
+
+          <div id="sTestResult" class="translator-test-status" role="status" aria-live="polite"></div>
+          <div class="translator-sample-wrap">
+            <div class="translator-sample-head"><div><h3>آزمون ترجمه</h3><p>متن نمونه را ترجمه کن و ورودی و خروجی را کنار هم بررسی کن.</p></div><div class="fld"><label for="sSampleTarget">ترجمه به</label><select id="sSampleTarget"><option value="en">English</option><option value="fa">فارسی</option></select></div></div>
+            <div class="translator-pair"><div class="translator-sample-pane"><label for="sSampleInput">متن ورودی</label><textarea id="sSampleInput" dir="rtl" rows="6">لطفاً وضعیت سرویس را بررسی کن؛ اگر فایل پیکربندی وجود ندارد، آن را نساز و فقط مسیر دقیق فایل موردنیاز را گزارش بده.</textarea></div><div class="translator-sample-pane"><label>ترجمهٔ خروجی</label><div id="sSampleOutput" class="translator-sample-output" dir="auto">خروجی ترجمه اینجا نمایش داده می‌شود.</div></div></div>
+            <div class="translator-sample-actions"><span id="sSampleMeta" class="muted">نمونهٔ فارسی → انگلیسی · مسیرها و کد را هم می‌توانی امتحان کنی.</span><button class="btn primary" type="button" onclick="ABSettingsPage.translateSettingsSample()">ترجمهٔ نمونه</button></div>
+          </div>
+          <div class="translator-save-row"><button class="btn primary" type="button" onclick="ABSettingsPage.saveTranslation()">ذخیره تنظیمات مترجم</button></div>
+        </section>
+
+        <section class="panel rtl translator-glossary-panel">
+          <div class="panel-head"><div><h3>واژه‌نامهٔ ترجمه</h3><p class="muted">برای ثابت ماندن معادل اصطلاحات پرتکرار فنی.</p></div></div>
+          <div class="os-help-drawer open">وقتی پرامپت فارسی به انگلیسی ترجمه می‌شود، واژه‌نامه کمک می‌کند یک اصطلاح خاص همیشه با معادل انتخابی تو بیاید؛ مثلاً «حافظهٔ نهان» → <code>cache</code>. این کار برای نام محصول، اصطلاح داخلی یا عبارتی که مترجم معمولاً اشتباه می‌گیرد مفید است. واژه‌نامه جایگزین کد و backtick نیست و پاسخ مدل را خودکار تغییر نمی‌دهد.</div>
+          <div id="glossaryRows" class="translator-glossary-rows">${glossary.map(item => `<div class="translator-glossary-row"><input data-glossary-fa aria-label="اصطلاح فارسی" placeholder="اصطلاح فارسی" value="${esc(item.fa || '')}"><span aria-hidden="true">↔</span><input data-glossary-en aria-label="معادل انگلیسی" placeholder="معادل انگلیسی" value="${esc(item.en || '')}"><button class="btn ghost" type="button" aria-label="حذف اصطلاح" title="حذف" onclick="this.closest('.translator-glossary-row').remove()">×</button></div>`).join('')}</div>
+          <div class="translator-glossary-actions"><button class="btn" type="button" onclick="ABSettingsPage.addGlossaryRow()">افزودن واژه</button><button class="btn primary" type="button" onclick="ABSettingsPage.saveGlossary()">ذخیره واژه‌نامه</button></div><div id="glossaryStatus" class="muted" role="status"></div>
+        </section>
       </div>`;
     } else if (route === 'set-hud') {
       host.innerHTML = `<div class="panel-wrap"><div class="panel rtl"><div class="panel-head"><h3>ظاهر و نمایش</h3></div>
@@ -143,5 +241,5 @@ window.ABSettingsPage = (() => {
         <details style="margin-top:16px"><summary>فهرست فایل‌های داده</summary><pre class="acc-body">${esc((state.storage?.files || []).map(f => `${f.path} · ${f.bytes} B`).join('\n'))}</pre></details></div></div>`;
     }
   }
-  return { render, saveTranslation, testConnection, testHardTranslation, saveUI, saveModel, testModelConnection, clearData, previewCleanup, runSelectedCleanup, toggleHelp, syncConditional };
+  return { render, saveTranslation, testConnection, translateSettingsSample, addGlossaryRow, saveGlossary, saveUI, saveModel, testModelConnection, clearData, previewCleanup, runSelectedCleanup, toggleHelp, syncConditional };
 })();

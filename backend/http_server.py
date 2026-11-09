@@ -102,7 +102,7 @@ def make_handler(hub: BridgeHub):
                 engine_mode = body.get("engine_mode")
                 if engine_mode in hub.tested_translator_configs:
                     tr_cfg.update(hub.tested_translator_configs[engine_mode])
-                if engine_mode == "online":
+                if engine_mode in ("online", "builtin-online"):
                     tr_cfg["engine"] = "builtin-online"
                 elif engine_mode in ("online-google", "online-google-gtx", "online-mymemory"):
                     tr_cfg["engine"] = engine_mode

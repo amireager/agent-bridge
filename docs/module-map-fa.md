@@ -22,6 +22,7 @@
 | نشست‌های Lab و mirror، tool cycle و status | `backend/agents.py` | `tests/test_mirror_history.py` |
 | ذخیره‌سازی و retention/cleanup | `backend/store.py` | routeها در `backend/http_server.py`، UI در settings |
 | نمایش چت، Think، ترجمهٔ انتخابی، tool card | `frontend/pages/chat/chat.js` | استایل در `frontend/pages/chat/chat.css` |
+| تنظیمات مترجم، API guide، آزمون دوپنجره‌ای و واژه‌نامه | `frontend/pages/settings/settings.js` | استایل در `frontend/styles/components.css`، آزمون markup در `tests/test_settings_render.js` |
 | تنظیمات و cleanup dialogs | `frontend/pages/settings/settings.js` | API cleanup در `backend/http_server.py` و `backend/store.py` |
 | نمودارها و usage | `frontend/pages/usage/usage.js` | داده از `backend/agents.py` و `backend/store.py` |
 | launcher و سیگنال‌های CLI | `bridge.py`, `cli.py` | راهنمای NixOS در `README.fa.md` |
@@ -42,4 +43,5 @@ python3 -m unittest discover -s tests -v
 python3 -m py_compile backend/*.py
 node --check frontend/pages/chat/chat.js
 node --check frontend/pages/settings/settings.js
+node tests/test_settings_render.js
 ```

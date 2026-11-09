@@ -483,3 +483,48 @@ table.grid-table td.m { font-family: var(--mono); font-size: 12.6px; direction: 
   outline: none;
 }
 .fld input:focus, .fld select:focus, .fld textarea:focus { border-color: var(--cyan); }
+
+/* Translator settings: connection modes, side-by-side test, and glossary editor */
+.translator-settings { gap: 18px; }
+.translator-settings .panel { min-width: 0; }
+.translator-mode-field { margin-top: 18px; max-width: 460px; }
+.translator-mode-field small, .translator-proxy-field small { color: var(--fg-3); line-height: 1.6; }
+.translator-engine-panel { margin-top: 14px; display: grid; gap: 14px; }
+.translator-engine-panel[hidden] { display: none; }
+.translator-engine-panel .os-card-head p, .translator-sample-head p, .translator-settings .panel-head p { margin: 5px 0 0; font-size: 12.5px; color: var(--fg-3); line-height: 1.7; }
+.translator-engine-panel .fld { max-width: 680px; }
+.translator-test-status { white-space: pre-wrap; min-height: 22px; margin: 12px 0; font: 12.5px/1.7 var(--mono); }
+.translator-sample-wrap { margin-top: 12px; padding: 16px; border: 1px solid var(--line); border-radius: 14px; background: var(--bg-1); }
+.translator-sample-head, .translator-sample-actions, .translator-glossary-actions { display: flex; align-items: end; justify-content: space-between; gap: 12px; }
+.translator-sample-head h3 { margin: 0; font-size: 16px; }
+.translator-sample-head .fld { min-width: 160px; }
+.translator-pair { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 12px; margin-top: 14px; direction: ltr; }
+.translator-sample-pane { display: flex; flex-direction: column; gap: 7px; min-width: 0; direction: rtl; }
+.translator-sample-pane > label { font-size: 12px; color: var(--fg-2); }
+.translator-sample-pane textarea, .translator-sample-output { width: 100%; box-sizing: border-box; min-height: 150px; padding: 12px; border: 1px solid var(--line); border-radius: 10px; color: var(--fg-0); background: var(--bg-0); font: 13px/1.8 var(--sans); }
+.translator-sample-pane textarea { resize: vertical; }
+.translator-sample-output { overflow: auto; direction: auto; }
+.translator-sample-actions { margin-top: 12px; align-items: center; }
+.translator-sample-actions .muted { font-size: 11.5px; }
+.translator-error { color: var(--red); white-space: pre-wrap; }
+.translator-save-row { margin-top: 14px; display: flex; justify-content: flex-start; }
+.translator-api-guide { border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; background: var(--bg-0); }
+.translator-api-guide summary { cursor: pointer; color: var(--cyan); font-size: 13px; font-weight: 600; }
+.translator-guide-body { padding-top: 10px; color: var(--fg-2); font-size: 12.5px; line-height: 1.8; }
+.translator-guide-body h4 { color: var(--fg-0); margin: 12px 0 4px; }
+.translator-guide-body p { margin: 5px 0; }
+.translator-guide-body pre { direction: ltr; text-align: left; white-space: pre-wrap; overflow-wrap: anywhere; padding: 12px; background: var(--bg-1); border: 1px solid var(--line); border-radius: 8px; color: var(--fg-1); }
+.translator-glossary-panel { margin-top: 0; }
+.translator-glossary-rows { display: grid; gap: 8px; margin-top: 14px; }
+.translator-glossary-row { display: grid; grid-template-columns: minmax(0,1fr) auto minmax(0,1fr) 38px; gap: 8px; align-items: center; direction: ltr; }
+.translator-glossary-row input { min-width: 0; padding: 9px 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--bg-0); color: var(--fg-0); font: 13px var(--sans); }
+.translator-glossary-row span { color: var(--cyan); }
+.translator-glossary-row button { min-width: 34px; padding: 5px; color: var(--red); }
+.translator-glossary-actions { justify-content: flex-start; flex-wrap: wrap; margin-top: 12px; }
+#glossaryStatus { margin-top: 9px; font-size: 12px; }
+@media (max-width: 720px) {
+  .translator-pair { grid-template-columns: 1fr; }
+  .translator-sample-head, .translator-sample-actions { align-items: stretch; flex-direction: column; }
+  .translator-sample-head .fld { max-width: none; }
+  .translator-glossary-row { grid-template-columns: minmax(0,1fr) 20px minmax(0,1fr) 34px; gap: 5px; }
+}
