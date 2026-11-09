@@ -528,3 +528,30 @@ table.grid-table td.m { font-family: var(--mono); font-size: 12.6px; direction: 
   .translator-sample-head .fld { max-width: none; }
   .translator-glossary-row { grid-template-columns: minmax(0,1fr) 20px minmax(0,1fr) 34px; gap: 5px; }
 }
+
+/* Multi-provider model settings and optional encrypted account vault */
+.models-two-cards { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:16px; }
+.models-two-cards .panel { min-width:0; }
+.model-settings-actions { display:flex; flex-wrap:wrap; gap:9px; margin-top:12px; }
+.model-account-form { display:grid; gap:10px; margin-top:12px; }
+.model-account-form .field-grid { grid-template-columns:repeat(auto-fit,minmax(200px,1fr)); }
+.model-account-row { display:flex; align-items:center; justify-content:space-between; gap:10px; padding:8px 10px; border:1px solid var(--line); border-radius:9px; margin-top:7px; font-size:12px; }
+.model-account-row span { overflow-wrap:anywhere; }
+.model-model-select { margin-top:10px; }
+.model-vault-gate { position:fixed; inset:0; z-index:10000; display:grid; place-items:center; padding:20px; background:rgba(5,8,12,.92); backdrop-filter:blur(10px); }
+.model-vault-card { width:min(420px,100%); padding:26px; border:1px solid var(--line-strong); border-radius:18px; background:var(--bg-1); box-shadow:0 30px 100px #0009; text-align:center; }
+.model-vault-card h2 { margin:8px 0; }
+.model-vault-card p { color:var(--fg-3); font-size:13px; line-height:1.7; }
+.model-vault-card form { display:flex; gap:8px; margin-top:18px; }
+.model-vault-card input { flex:1; min-width:0; padding:10px; border:1px solid var(--line); border-radius:8px; background:var(--bg-0); color:var(--fg-0); }
+#modelVaultError { min-height:20px; margin-top:10px; color:var(--red); font-size:12px; }
+@media(max-width:800px){.models-two-cards{grid-template-columns:1fr;}}
+.model-availability-alert { display:flex; align-items:center; flex-wrap:wrap; gap:10px; padding:10px 14px; border:1px solid color-mix(in srgb,var(--red) 60%,transparent); border-radius:10px; margin:10px 14px; color:var(--red); background:color-mix(in srgb,var(--red) 9%,var(--bg-1)); }
+.model-availability-alert small { color:var(--fg-2); }
+.model-availability-alert .btn { margin-inline-start:auto; }
+.model-save-row { display:flex; align-items:center; gap:12px; margin-top:12px; }
+.model-help { margin-top:12px; }
+.model-help summary { cursor:pointer; color:var(--cyan); }
+.model-help pre { direction:ltr; text-align:left; padding:8px; background:var(--bg-0); border-radius:8px; }
+.model-provider-docs { display:inline-block; margin-top:6px; color:var(--cyan); font-size:12px; }
+.model-availability-alert.fallback-ready { color:var(--amber); border-color:color-mix(in srgb,var(--amber) 55%,transparent); background:color-mix(in srgb,var(--amber) 8%,var(--bg-1)); }

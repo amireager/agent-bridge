@@ -3,6 +3,7 @@ window.ABSettingsPage = (() => {
   const { esc, api } = window.ABUtils;
   const $ = id => document.getElementById(id);
   const cfg = () => window.ABApp.getState().config;
+  let modelAccountsCache = [];
 
   function translationMode() { return $('sMode')?.value || 'online'; }
   function selectedTranslationEngine() {
@@ -107,15 +108,30 @@ window.ABSettingsPage = (() => {
   }
 
   async function testModelConnection() {
-    const out = $('modelTestResult'); out.textContent = 'در حال بررسی upstream محلی…';
-    const t0 = performance.now();
+    const out = $('modelTestResult'); out.textContent = 'در حال خواندن فهرست مدل‌های محلی…';
     try {
-      const result = await api('/api/state');
-      const ms = Math.round(performance.now() - t0);
-      const up = result.upstream || {};
-      out.textContent = up.online ? `متصل · ${up.detected_model} · context ${up.server_ctx || '?'} · ${ms}ms` : `وصل نیست · ${result.config.tap.upstream_url} · ${ms}ms`;
-      out.style.color = up.online ? 'var(--phosphor)' : 'var(--red)';
-    } catch (e) { out.textContent = `خطا: ${e.message}`; out.style.color = 'var(--red)'; }
+      const result = await api('/api/models/local');
+      if (result.error) throw new Error(result.error);
+      const selector = $('sLocalModel');
+      const previous = selector.value || cfg().models?.default_model || '';
+      selector.innerHTML = result.models.length
+        ? result.models.map(m => `<option value="${esc(m.id)}">${esc(m.name || m.id)} · ${esc(m.id)} · ${esc(m.status || 'available')}</option>`).join('')
+        : '<option value="">سرور مدلی گزارش نکرد</option>';
+      if (result.models.some(m => m.id === previous)) selector.value = previous;
+      out.textContent = result.models.length ? `${result.models.length} مدل پیدا شد · ${result.models.map(m => m.id).join('، ')}` : 'اتصال برقرار است ولی مدلی در /v1/models پیدا نشد.';
+      out.style.color = result.models.length ? 'var(--phosphor)' : 'var(--red)';
+    } catch (e) { out.textContent = `اتصال/کشف مدل ناموفق · ${e.message}`; out.style.color = 'var(--red)'; }
+  }
+
+  async function testSelectedModel(mode) {
+    const online = mode === 'online';
+    const output = $(online ? 'onlineModelTest' : 'modelTestResult');
+    output.textContent = 'در حال اجرای درخواست واقعی کوتاه…';
+    try {
+      const result = await api('/api/models/test', { mode, account_id: $('sOnlineAccount')?.value, model: online ? $('sOnlineModel').value : $('sLocalModel').value });
+      output.textContent = result.ok ? `تست موفق · ${result.model} · ${result.elapsed_ms} ms\n${result.sample}` : `تست ناموفق · ${result.error}`;
+      output.style.color = result.ok ? 'var(--phosphor)' : 'var(--red)';
+    } catch (e) { output.textContent = `تست ناموفق · ${e.message}`; output.style.color = 'var(--red)'; }
   }
 
   async function saveModel() {
@@ -123,7 +139,101 @@ window.ABSettingsPage = (() => {
       upstream_url: $('sUpstream').value.trim(),
       lab_enable_tools: $('sLabTools').checked,
       lab_system_prompt: $('sLabPrompt').value
+    }, models: {
+      default_mode: $('sDefaultMode').value,
+      default_model: $('sLocalModel').value,
+      online_fallback: $('sOnlineFallback').checked,
+      active_account_id: $('sOnlineAccount').value,
+      online_model: $('sOnlineModel').value
     }});
+    $('modelSaveStatus').textContent = 'اتصال و انتخاب پیش‌فرض ذخیره شد.';
+  }
+
+  async function refreshProviderAccounts() {
+    const result = await api('/api/models/providers');
+    const providerSelect = $('sProvider');
+    if (providerSelect) providerSelect.innerHTML = Object.entries(result.providers).map(([id,p]) => `<option value="${esc(id)}">${esc(p.name)}</option>`).join('');
+    modelAccountsCache = result.accounts || [];
+    const accountSelect = $('sOnlineAccount');
+    if (accountSelect) {
+      accountSelect.innerHTML = (result.accounts || []).filter(a => a.enabled).map(a => `<option value="${esc(a.id)}">${esc(a.label)} · ${esc(result.providers[a.provider]?.name || a.provider)}</option>`).join('') || '<option value="">حسابی اضافه نشده</option>';
+      if (cfg().models?.active_account_id) accountSelect.value = cfg().models.active_account_id;
+    }
+    const list = $('modelAccountsList');
+    if (list) list.innerHTML = result.locked ? '<p class="muted">خزانه قفل است؛ برای دیدن/تغییر حساب‌ها بازش کن.</p>' : (result.accounts || []).map(a => `<div class="model-account-row"><span>${esc(a.label)} · ${esc(result.providers[a.provider]?.name || a.provider)} ${a.has_key ? '· کلید ذخیره است' : '· بدون کلید'}</span><button class="btn ghost" onclick="ABSettingsPage.editModelAccount('${esc(a.id)}')">ویرایش</button><button class="btn ghost" onclick="ABSettingsPage.deleteModelAccount('${esc(a.id)}')">حذف</button></div>`).join('') || '<p class="muted">حسابی ذخیره نشده است.</p>';
+    const enc = $('sEncryptAccounts');
+    if (enc) { enc.checked = result.encryption_enabled; enc.disabled = result.locked; }
+    const lock = $('modelVaultStatus');
+    if (lock) lock.textContent = result.locked ? 'خزانهٔ کلیدها قفل است؛ برای این اجرا رمز اصلی را وارد کن.' : result.encryption_enabled ? 'خزانه باز است؛ کلیدها فقط تا پایان این اجرا در حافظه هستند.' : 'رمزگذاری خاموش است؛ کلیدها فقط در .data با دسترسی محدود ذخیره می‌شوند.';
+  }
+
+  function applyProviderDefaults() {
+    const provider = ABApp.getState()?.model_providers?.[$('sProvider').value] || {};
+    $('sAccountBaseUrl').value = provider.base_url || '';
+    $('sAccountModelsUrl').value = provider.models_url || '';
+    const link = $('modelProviderDocs');
+    if (link) { link.href = provider.docs || '#'; link.hidden = !provider.docs; }
+  }
+
+  function editModelAccount(id) {
+    const account = modelAccountsCache.find(item => item.id === id);
+    if (!account) return;
+    $('sAccountId').value = account.id;
+    $('sProvider').value = account.provider;
+    applyProviderDefaults();
+    $('sAccountLabel').value = account.label || '';
+    $('sAccountBaseUrl').value = account.base_url || '';
+    $('sAccountModelsUrl').value = account.models_url || '';
+    $('sAccountKey').value = '';
+    $('sAccountProxy').value = '';
+    $('modelAccountSaveStatus').textContent = account.has_key ? 'ویرایش حساب؛ کلید خالی بماند تا کلید ذخیره‌شده حفظ شود.' : 'ویرایش حساب بدون کلید.';
+  }
+
+  async function saveModelAccount() {
+    const provider = $('sProvider').value;
+    const p = cfg().models?.providers?.[provider] || {};
+    const account = { id: $('sAccountId').value, provider, label: $('sAccountLabel').value.trim() || $('sProvider').selectedOptions[0].text, base_url: $('sAccountBaseUrl').value.trim() || p.base_url || '', models_url: $('sAccountModelsUrl').value.trim(), api_key: $('sAccountKey').value, proxy: $('sAccountProxy').value.trim() };
+    const res = await api('/api/models/account/save', { account });
+    $('sAccountKey').value = '';
+    $('sAccountId').value = '';
+    $('modelAccountSaveStatus').textContent = res.locked ? 'خزانه قفل است.' : 'حساب ذخیره شد؛ کلید از صفحه پاک شد.';
+    await refreshProviderAccounts();
+    if (res.saved?.id) $('sOnlineAccount').value = res.saved.id;
+  }
+
+  async function discoverOnlineModels() {
+    const accountId = $('sOnlineAccount').value;
+    const out = $('onlineModelTest'); out.textContent = 'در حال دریافت فهرست زنده…';
+    try {
+      const result = await api(`/api/models/catalog?account_id=${encodeURIComponent(accountId)}`);
+      if (result.error) throw new Error(result.error);
+      const currentModel = cfg().models?.online_model || $('sOnlineModel').value;
+      $('sOnlineModel').innerHTML = result.models.map(m => `<option value="${esc(m.id)}">${m.free === true ? 'رایگان · ' : ''}${esc(m.name)} · ${esc(m.id)}${m.context_length ? ` · ${m.context_length} ctx` : ''}</option>`).join('') || '<option value="">مدلی در catalog نیست</option>';
+      if (result.models.some(m => m.id === currentModel)) $('sOnlineModel').value = currentModel;
+      out.textContent = `${result.models.length} مدل از حساب دریافت شد. انتخاب را ذخیره کن تا مدل پیش‌فرض شود.`;
+      out.style.color = result.models.length ? 'var(--phosphor)' : 'var(--red)';
+    } catch (e) { out.textContent = `گرفتن فهرست ناموفق · ${e.message}`; out.style.color = 'var(--red)'; }
+  }
+
+  async function deleteModelAccount(id) {
+    if (!confirm('این حساب و کلید ذخیره‌شده‌اش حذف شود؟')) return;
+    await api('/api/models/account/delete', { id });
+    await refreshProviderAccounts();
+  }
+
+  async function changeModelEncryption() {
+    const enable = $('sEncryptAccounts').checked;
+    const passphrase = prompt(enable ? 'رمز اصلی برای رمزگذاری کلیدها را وارد کن:' : 'برای برداشتن رمزگذاری، رمز فعلی را وارد کن:');
+    if (passphrase === null) { $('sEncryptAccounts').checked = !enable; return; }
+    const confirmPass = enable ? prompt('رمز اصلی را دوباره وارد کن:') : passphrase;
+    if (confirmPass === null) { $('sEncryptAccounts').checked = !enable; return; }
+    try {
+      await api('/api/models/encryption', { enabled: enable, passphrase, confirm: confirmPass });
+      await refreshProviderAccounts();
+    } catch (e) {
+      alert(`تغییر رمزگذاری انجام نشد: ${e.message}`);
+      $('sEncryptAccounts').checked = !enable;
+    }
   }
 
   async function clearData(kind) {
@@ -230,7 +340,41 @@ Content-Type: application/json
         <div class="os-card" style="margin-top:18px">${[['sThink','نمایش Think',ui.show_think],['sTranslateThink','ترجمه Think',ui.translate_thinking],['sTools','نمایش ابزارها',ui.show_tools],['sTokens','نمایش آمار توکن',ui.show_inline_tokens],['sCost','نمایش هزینه سایه‌ای',ui.show_shadow_cost]].map(([id,label,val])=>`<div class="os-row"><div class="os-row-top"><div class="os-title-wrap">${label}<button class="help-pill" onclick="ABSettingsPage.toggleHelp('help-${id}')">؟ توضیح</button></div><label class="ui-switch"><input id="${id}" type="checkbox" ${val ? 'checked' : ''}><span class="ui-slider"></span></label></div><div class="os-help-drawer" id="help-${id}">این گزینه فقط نحوه نمایش/ترجمه در رابط را کنترل می‌کند و موتور مدل را تغییر نمی‌دهد.</div></div>`).join('')}</div><div class="field-grid" style="margin-top:16px"><div class="fld"><label>تعداد درخواست‌های اخیر در Usage</label><input id="sRecentLimit" type="number" min="1" max="100" value="${ui.recent_requests_limit || 10}"></div><div class="fld"><label>سقف قاب‌های X-Ray در حافظه</label><input id="sXrayLimit" type="number" min="1" max="200" value="${ui.xray_limit || 40}"></div></div><button class="btn primary" style="margin-top:16px" onclick="ABSettingsPage.saveUI()">ذخیره</button></div></div>`;
       $('sTheme').value = ui.theme || 'openwebui-dark'; $('sFont').value = ui.font_scale || 'large'; $('sSide').value = ui.sidebar_side || 'left';
     } else if (route === 'set-tap') {
-      host.innerHTML = `<div class="panel-wrap"><div class="panel rtl"><div class="panel-head"><h3>مدل محلی و چت آزمایشی</h3></div><div class="fld"><label>llama-server upstream محلی</label><input id="sUpstream" value="${esc(tap.upstream_url)}" placeholder="http://127.0.0.1:8080"></div><div class="fld" style="margin-top:12px"><label>Workspace ایزوله‌ی Lab</label><input value="agent-team/ (فقط همین پوشه)" readonly></div><div class="os-row"><div class="os-row-top"><div class="os-title-wrap">فعال‌کردن ابزارهای فقط‌خواندنی agent-team</div><label class="ui-switch"><input id="sLabTools" type="checkbox" ${tap.lab_enable_tools ? 'checked' : ''}><span class="ui-slider"></span></label></div><div class="os-help-drawer open">Lab در پوشه‌ی جداگانه‌ی agent-team کار می‌کند. فعلاً ابزارها فقط فهرست‌کردن و خواندن فایل‌های همان پوشه‌اند؛ shell، نوشتن فایل و دسترسی به ریشه‌ی ریپو عمداً غیرفعال است.</div></div><div class="fld" style="margin-top:12px"><label>System Prompt برای Lab</label><textarea id="sLabPrompt" rows="4">${esc(tap.lab_system_prompt || '')}</textarea></div><div class="field-grid" style="margin-top:15px"><button class="btn" onclick="ABSettingsPage.testModelConnection()">تست اتصال مدل محلی</button><button class="btn primary" onclick="ABSettingsPage.saveModel()">ذخیره اتصال</button></div><div id="modelTestResult" class="mono" style="margin-top:10px"></div></div></div>`;
+      const models = c.models || {};
+      const vault = state.model_vault || { locked: false, encryption_enabled: false, accounts: [] };
+      const localDefault = models.default_mode === 'local';
+      host.innerHTML = `<div class="panel-wrap model-settings">
+        <div class="panel rtl"><div class="panel-head"><div><h3>اتصال مدل و پیش‌فرض Agent</h3><p class="muted">لوکال پیش‌فرض است. اتصال آنلاین یا fallback فقط با انتخاب و تأیید خودت فعال می‌شود.</p></div></div>
+          <div class="fld"><label for="sDefaultMode">منبع پیش‌فرض Agent</label><select id="sDefaultMode"><option value="local" ${localDefault ? 'selected' : ''}>لوکال · llama.cpp / llama-server</option><option value="online" ${!localDefault ? 'selected' : ''}>آنلاین · حساب انتخاب‌شده</option></select></div>
+          <div class="os-row" style="margin-top:12px"><div class="os-row-top"><div class="os-title-wrap">اگر مدل لوکال در دسترس نبود، اجازهٔ ارسال درخواست به حساب آنلاین را بده</div><label class="ui-switch"><input id="sOnlineFallback" type="checkbox" ${models.online_fallback ? 'checked' : ''}><span class="ui-slider"></span></label></div><div class="os-help-drawer open">در fallback، متن درخواست و تاریخچه به سرویس بیرونی می‌رود. تا وقتی این گزینه خاموش است هیچ fallback ابری انجام نمی‌شود.</div></div>
+          <div class="model-save-row"><button class="btn primary" onclick="ABSettingsPage.saveModel()">ذخیره پیش‌فرض‌ها</button><span id="modelSaveStatus" class="muted"></span></div>
+        </div>
+        <div class="models-two-cards">
+          <section class="panel rtl">
+            <div class="panel-head"><div><h3>مدل لوکال · مسیر اصلی</h3><p>برای llama.cpp یک پورت را وارد کن. سرور تک‌مدلی معمولاً فقط مدل فعال خود را در فهرست می‌دهد؛ router می‌تواند چند شناسه را پشت همان پورت ارائه کند.</p></div></div>
+            <div class="fld"><label for="sUpstream">Base URL مدل محلی</label><input id="sUpstream" value="${esc(tap.upstream_url)}" placeholder="http://127.0.0.1:8080"></div>
+            <div class="field-grid" style="margin-top:10px"><div class="fld"><label>مدل پیش‌فرض لوکال</label><select id="sLocalModel"><option value="${esc(models.default_model || '')}">${esc(models.default_model || 'ابتدا فهرست مدل‌ها را بخوان')}</option></select></div><div class="fld" style="justify-content:end"><button class="btn" onclick="ABSettingsPage.testModelConnection()">بررسی اتصال و فهرست مدل‌ها</button></div></div>
+            <button class="btn" type="button" onclick="ABSettingsPage.testSelectedModel('local')">تست تولید با مدل لوکال انتخاب‌شده</button><div id="modelTestResult" class="mono" role="status" style="margin-top:10px"></div>
+            <details class="model-help"><summary>راهنمای llama.cpp و چندمدلی پشت یک پورت</summary><div class="os-help-drawer open">اگر llama-server را با یک فایل مدل و <code>-m</code> اجرا کنی، فهرست <code>/v1/models</code> معمولاً همان مدل فعال را برمی‌گرداند. چند مدل روی یک پورت فقط وقتی ممکن است که router/preset در خود llama.cpp یا یک تجمیع‌گر مثل llama-swap آن‌ها را سرو کند؛ دو فرایند مستقل نمی‌توانند یک پورت را هم‌زمان bind کنند. Bridge فقط فهرست را می‌خواند؛ مدل را دانلود یا بارگذاری نمی‌کند.<pre><code>curl http://127.0.0.1:8080/v1/models</code></pre>برای اجرای محلی نمونهٔ MiniCPM مطابق تنظیم خودت: <code>ai-serve ~/models/minicpm5-2b-heretic-q5_k_m.gguf -fa on -ctk q8_0 -ctv q4_0 -c 98304 -ub 256</code>. مقدار <code>-np 3</code> استفاده نمی‌شود.</div></details>
+          </section>
+          <section class="panel rtl">
+            <div class="panel-head"><div><h3>حساب‌های API آنلاین</h3><p>OpenCode Zen، OpenRouter، Groq، Gemini، NVIDIA NIM یا aggregator سازگار با OpenAI. مدل‌ها زنده از endpoint هر حساب خوانده می‌شوند؛ فهرست رایگان/سهمیه تضمین دائمی نیست.</p></div></div>
+            <div class="field-grid"><div class="fld"><label for="sOnlineAccount">حساب پیش‌فرض آنلاین</label><select id="sOnlineAccount">${vault.accounts.map(a=>`<option value="${esc(a.id)}" ${a.id === models.active_account_id ? 'selected' : ''}>${esc(a.label)} · ${esc(state.model_providers?.[a.provider]?.name || a.provider)}</option>`).join('') || '<option value="">حسابی تعریف نشده</option>'}</select></div><div class="fld"><label for="sOnlineModel">مدل آنلاین پیش‌فرض</label><select id="sOnlineModel"><option value="${esc(models.online_model || '')}">${esc(models.online_model || 'فهرست را از حساب بخوان')}</option></select></div></div>
+            <div class="model-settings-actions"><button class="btn" onclick="ABSettingsPage.discoverOnlineModels()">دریافت فهرست مدل‌های حساب</button><button class="btn" onclick="ABSettingsPage.testSelectedModel('online')">تست تولید با مدل آنلاین انتخاب‌شده</button><button class="btn" onclick="ABSettingsPage.saveModel()">ثبت مدل انتخاب‌شده به‌عنوان پیش‌فرض</button></div><div id="onlineModelTest" class="muted" role="status"></div>
+            <div class="fld" style="margin-top:14px"><label for="sProvider">افزودن / به‌روزرسانی حساب</label><select id="sProvider" onchange="ABSettingsPage.applyProviderDefaults()">${Object.entries(state.model_providers || {}).map(([id,p])=>`<option value="${esc(id)}">${esc(p.name)} · ${esc(p.free_note || '')}</option>`).join('')}</select><a id="modelProviderDocs" class="model-provider-docs" target="_blank" rel="noopener noreferrer">راهنمای رسمی provider</a></div>
+            <div class="model-account-form"><input id="sAccountId" type="hidden" value=""><div class="field-grid"><div class="fld"><label for="sAccountLabel">نام دلخواه حساب</label><input id="sAccountLabel" placeholder="مثلاً Groq شخصی"></div><div class="fld"><label for="sAccountKey">API key تازه</label><input id="sAccountKey" type="password" autocomplete="new-password" placeholder="برای ویرایش خالی بگذار تا کلید قبلی حفظ شود"></div></div>
+              <div class="field-grid"><div class="fld"><label for="sAccountBaseUrl">Base URL</label><input id="sAccountBaseUrl" placeholder="https://.../v1"></div><div class="fld"><label for="sAccountModelsUrl">Models URL (اختیاری)</label><input id="sAccountModelsUrl" placeholder="خودکار از Base URL گرفته می‌شود"></div><div class="fld"><label for="sAccountProxy">پروکسی این حساب (اختیاری)</label><input id="sAccountProxy" placeholder="http://127.0.0.1:8080"></div></div>
+              <button class="btn" onclick="ABSettingsPage.saveModelAccount()">ذخیرهٔ حساب</button><div id="modelAccountSaveStatus" class="muted"></div></div>
+            <div id="modelAccountsList" class="model-accounts-list">${vault.locked ? 'خزانه قفل است.' : vault.accounts.map(a=>`<div class="model-account-row"><span>${esc(a.label)} · ${esc(state.model_providers?.[a.provider]?.name || a.provider)} ${a.has_key ? '· کلید ذخیره است' : '· بدون کلید'}</span><button class="btn ghost" onclick="ABSettingsPage.editModelAccount('${esc(a.id)}')">ویرایش</button><button class="btn ghost" onclick="ABSettingsPage.deleteModelAccount('${esc(a.id)}')">حذف</button></div>`).join('') || '<p class="muted">حسابی ذخیره نشده است.</p>'}</div>
+            <div class="os-row" style="margin-top:12px"><div class="os-row-top"><div class="os-title-wrap">رمزگذاری کلیدهای حساب‌ها با رمز اصلی</div><label class="ui-switch"><input id="sEncryptAccounts" type="checkbox" ${vault.encryption_enabled ? 'checked' : ''} ${vault.locked ? 'disabled' : ''} onchange="ABSettingsPage.changeModelEncryption()"><span class="ui-slider"></span></label></div><div id="modelVaultStatus" class="os-help-drawer open">${vault.locked ? 'خزانه قفل است.' : vault.encryption_enabled ? 'رمزگذاری فعال؛ کلیدها هنگام هر شروع برنامه قفل می‌شوند.' : 'خاموش: کلیدها در .data/model_accounts.json با دسترسی فایل محدود ذخیره می‌شوند. اگر رمزگذاری را روشن کنی، رمز را فراموش نکن؛ بدون آن بازیابی کلیدها ممکن نیست.'}</div></div>
+          </section>
+        </div>
+        <div class="panel rtl"><div class="panel-head"><h3>ابزارهای فقط‌خواندنی Lab</h3></div><div class="os-row"><div class="os-row-top"><div class="os-title-wrap">فعال‌کردن ابزارهای فقط‌خواندنی agent-team</div><label class="ui-switch"><input id="sLabTools" type="checkbox" ${tap.lab_enable_tools ? 'checked' : ''}><span class="ui-slider"></span></label></div><div class="os-help-drawer open">Lab در پوشهٔ جداگانهٔ agent-team می‌ماند؛ shell و نوشتن فایل غیرفعال است.</div></div><div class="fld" style="margin-top:12px"><label>System Prompt برای Lab</label><textarea id="sLabPrompt" rows="4">${esc(tap.lab_system_prompt || '')}</textarea></div></div>
+      </div>`;
+      refreshProviderAccounts().catch(e => { const out = $('modelAccountSaveStatus'); if (out) out.textContent = e.message; });
+      if (models.default_model) testModelConnection();
+      if (models.default_mode === 'online' && models.active_account_id) $('sOnlineAccount').value = models.active_account_id;
+      applyProviderDefaults();
     } else {
       host.innerHTML = `<div class="panel-wrap"><div class="panel rtl"><div class="panel-head"><h3>نگهداری و پاکسازی انتخابی داده</h3></div>
         <p>داده‌های runtime در <code>.data/</code> هستند. حجم فعلی: <strong>${state.storage?.total_kib || 0} KiB</strong> · ${state.storage?.file_count || 0} فایل.</p>
@@ -241,5 +385,5 @@ Content-Type: application/json
         <details style="margin-top:16px"><summary>فهرست فایل‌های داده</summary><pre class="acc-body">${esc((state.storage?.files || []).map(f => `${f.path} · ${f.bytes} B`).join('\n'))}</pre></details></div></div>`;
     }
   }
-  return { render, saveTranslation, testConnection, translateSettingsSample, addGlossaryRow, saveGlossary, saveUI, saveModel, testModelConnection, clearData, previewCleanup, runSelectedCleanup, toggleHelp, syncConditional };
+  return { render, saveTranslation, testConnection, translateSettingsSample, addGlossaryRow, saveGlossary, saveUI, saveModel, testModelConnection, refreshProviderAccounts, applyProviderDefaults, saveModelAccount, editModelAccount, discoverOnlineModels, deleteModelAccount, changeModelEncryption, clearData, previewCleanup, runSelectedCleanup, toggleHelp, syncConditional };
 })();

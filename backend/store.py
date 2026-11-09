@@ -146,6 +146,15 @@ class DataStore:
                 "offline_url": "http://127.0.0.1:18095",
                 "offline_model": "local-translator",
             },
+            "models": {
+                "default_mode": "local",
+                "default_model": "",
+                "active_account_id": "",
+                "online_fallback": False,
+                "fallback_account_id": "",
+                "fallback_model": "",
+                "account_encryption": False,
+            },
             "tap": {
                 "upstream_url": os.environ.get("LLAMA_UPSTREAM", "http://127.0.0.1:8080"),
                 "pi_bin": detect_pi_binary(),

@@ -1,0 +1,2 @@
+# Optional: required only when enabling passphrase-encrypted model API credentials.
+cryptography>=44.0

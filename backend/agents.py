@@ -24,6 +24,7 @@ from pathlib import Path
 
 from .engine import estimate_kv_mb_for_tokens, probe_upstream_passive
 from .store import DataStore
+from .model_accounts import ModelAccountVault, PROVIDERS
 from .translator import (
     LOOPBACK_OPENER,
     estimate_persian_token_savings,
@@ -69,6 +70,7 @@ class BridgeHub:
         self.bridge_port = bridge_port
         self.config = self.store.load_config()
         self.glossary = self.store.load_glossary()
+        self.model_vault = ModelAccountVault(self.store.data_dir)
         self.shutting_down = False
 
         if self.config.get("retention", {}).get("auto_prune_on_boot", True):
@@ -116,6 +118,7 @@ class BridgeHub:
         """Wakes all SSE streams and stops cleanly on Ctrl+C with zero tracebacks."""
         self.shutting_down = True
         self.lab_abort_flag = True
+        self.model_vault.lock()
         with self._lock:
             for q in self._sse_clients:
                 try:
@@ -1100,6 +1103,16 @@ class BridgeHub:
         if self.view_kind == "mirror":
             visible_session_state = self.agent_activity.get(self.view_id, {}).get("status", "IDLE") if self.view_id else "IDLE"
 
+        model_cfg = self.config.get("models", {})
+        online_account_ready = bool(
+            not self.model_vault.locked
+            and model_cfg.get("online_model")
+            and any(x.get("id") == model_cfg.get("active_account_id") and x.get("enabled", True) for x in self.model_vault.accounts)
+        )
+        model_alert = (not bool(up.get("online")) and not (model_cfg.get("online_fallback") and online_account_ready))
+        if model_cfg.get("default_mode") == "online":
+            model_alert = not online_account_ready
+
         return {
             "config": self.config,
             "glossary": self.glossary,
@@ -1112,6 +1125,14 @@ class BridgeHub:
             "active_conversation": active_conv,
             "upstream": up,
             "translator_online": tr_ok,
+            "model_vault": self.model_vault.public_state(),
+            "model_providers": PROVIDERS,
+            "model_status": {
+                "mode": self.config.get("models", {}).get("default_mode", "local"),
+                "local_online": bool(up.get("online")),
+                "fallback_enabled": bool(model_cfg.get("online_fallback")),
+                "alert": model_alert,
+            },
             "tested_translators": list(self.tested_translators),
             "bridge_port": self.bridge_port,
             "usage": usage,

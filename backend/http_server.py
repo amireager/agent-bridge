@@ -8,12 +8,14 @@ import mimetypes
 import queue
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlparse
 
 from .agents import BridgeHub
+from .model_accounts import PROVIDERS, discover_models, test_model
 from .translator import LOOPBACK_OPENER, test_translator_connection, translate_prose
 
 FRONTEND_DIR = Path(__file__).resolve().parent.parent / "frontend"
@@ -85,6 +87,42 @@ def make_handler(hub: BridgeHub):
                 return self._serve_static("index.html")
             if path.startswith("/static/"):
                 return self._serve_static(path[len("/static/"):])
+            if path == "/api/models/providers":
+                return self._send_json({"providers": PROVIDERS, **hub.model_vault.public_state()})
+            if path == "/api/models/local":
+                base = hub.config["tap"]["upstream_url"].rstrip("/")
+                try:
+                    req = urllib.request.Request(base + "/v1/models", headers={"Accept": "application/json"})
+                    with LOOPBACK_OPENER.open(req, timeout=3) as response:
+                        payload = json.loads(response.read().decode("utf-8"))
+                    raw_models = payload.get("data", payload.get("models", []))
+                    models = [{"id": x.get("id") or x.get("name", ""), "name": x.get("name") or x.get("id", ""), "status": "loaded"}
+                              for x in raw_models if isinstance(x, dict) and (x.get("id") or x.get("name"))]
+                    # llama.cpp router may expose its registered/inactive models separately from OpenAI's loaded list.
+                    try:
+                        with LOOPBACK_OPENER.open(base + "/models", timeout=3) as response:
+                            router_payload = json.loads(response.read().decode("utf-8"))
+                        for item in router_payload.get("models", []):
+                            model_id = item.get("model_alias") or item.get("model") or item.get("id") or item.get("name", "")
+                            if model_id and not any(x["id"] == model_id for x in models):
+                                models.append({"id": model_id, "name": item.get("name") or model_id, "status": item.get("status", "available")})
+                    except Exception:
+                        pass
+                    return self._send_json({"models": models, "upstream": base})
+                except Exception as exc:
+                    return self._send_json({"error": str(exc), "models": [], "upstream": base}, 502)
+            if path == "/api/models/catalog":
+                if hub.model_vault.locked:
+                    return self._send_json({"error": "خزانه قفل است؛ ابتدا بازش کن."}, 423)
+                query = urllib.parse.parse_qs(urlparse(self.path).query)
+                account_id = (query.get("account_id") or [""])[0]
+                account = next((x for x in hub.model_vault.accounts if x.get("id") == account_id), None)
+                if not account:
+                    return self._send_json({"error": "حساب پیدا نشد."}, 404)
+                try:
+                    return self._send_json({"models": discover_models(account)})
+                except Exception as exc:
+                    return self._send_json({"error": str(exc)}, 502)
             if path == "/api/state":
                 return self._send_json(hub.build_state_snapshot())
             if path == "/api/events":
@@ -96,7 +134,58 @@ def make_handler(hub: BridgeHub):
         def do_POST(self) -> None:
             path = urlparse(self.path).path
 
+            if path.startswith("/api/models/"):
+                body = self._read_json()
+                vault = hub.model_vault
+                saved_account = None
+                try:
+                    if path == "/api/models/unlock":
+                        vault.unlock(str(body.get("passphrase", "")))
+                    elif path == "/api/models/lock":
+                        vault.lock()
+                    elif path == "/api/models/encryption":
+                        if body.get("enabled"):
+                            if body.get("passphrase") != body.get("confirm"):
+                                raise ValueError("رمز و تکرار آن یکسان نیستند.")
+                            vault.enable_encryption(str(body.get("passphrase", "")))
+                        else:
+                            vault.disable_encryption(str(body.get("passphrase", "")))
+                            hub.config.setdefault("models", {})["account_encryption"] = False
+                            hub.store.save_config(hub.config)
+                    elif path == "/api/models/test":
+                        mode = body.get("mode", "local")
+                        model_id = str(body.get("model", ""))
+                        if not model_id:
+                            raise ValueError("ابتدا یک مدل انتخاب کن.")
+                        if mode == "local":
+                            account = {"provider": "custom-openai", "base_url": hub.config["tap"]["upstream_url"], "api_key": "", "proxy": ""}
+                        else:
+                            if vault.locked:
+                                raise PermissionError("خزانهٔ کلیدها قفل است.")
+                            account = next((x for x in vault.accounts if x.get("id") == body.get("account_id")), None)
+                            if not account:
+                                raise ValueError("حساب پیدا نشد.")
+                        return self._send_json(test_model(account, model_id))
+                    elif path == "/api/models/account/save":
+                        saved_account = vault.save_account(body.get("account", {}))
+                    elif path == "/api/models/account/delete":
+                        deleted_id = str(body.get("id", ""))
+                        vault.delete_account(deleted_id)
+                        if hub.config.get("models", {}).get("active_account_id") == deleted_id:
+                            hub.config["models"]["active_account_id"] = ""
+                            hub.store.save_config(hub.config)
+                    else:
+                        return self._send_json({"error": f"Unknown route: {path}"}, 404)
+                    if path == "/api/models/encryption":
+                        hub.config.setdefault("models", {})["account_encryption"] = vault.encryption_enabled
+                        hub.store.save_config(hub.config)
+                    hub.broadcast_state()
+                    return self._send_json({"ok": True, "saved": saved_account, **vault.public_state()})
+                except Exception as exc:
+                    return self._send_json({"error": str(exc)}, 400)
+
             if path == "/api/translate":
+
                 body = self._read_json()
                 tr_cfg = {**hub.config["translation"], "enabled": True}
                 engine_mode = body.get("engine_mode")
@@ -300,9 +389,21 @@ def make_handler(hub: BridgeHub):
                 hub.unsubscribe_sse(q)
 
         def _proxy_v1_get(self, path: str) -> None:
-            upstream = hub.config["tap"]["upstream_url"].rstrip("/") + path
+            models_cfg = hub.config.get("models", {})
+            opener = LOOPBACK_OPENER
             try:
-                with LOOPBACK_OPENER.open(upstream, timeout=10) as r:
+                if models_cfg.get("default_mode") == "online":
+                    account, _ = self._selected_online_account()
+                    base = str(account.get("base_url", "")).rstrip("/")
+                    upstream = base + path[3:] if path.startswith("/v1/") and base.endswith("/v1") else base + path
+                    headers = {"Authorization": f"Bearer {account['api_key']}"} if account.get("api_key") else {}
+                    req = urllib.request.Request(upstream, headers=headers)
+                    proxy = str(account.get("proxy", "")).strip()
+                    opener = urllib.request.build_opener(urllib.request.ProxyHandler({"http": proxy, "https": proxy})) if proxy else urllib.request.build_opener()
+                else:
+                    upstream = hub.config["tap"]["upstream_url"].rstrip("/") + path
+                    req = urllib.request.Request(upstream)
+                with opener.open(req, timeout=10) as r:
                     data = r.read()
                     self.send_response(r.status)
                     self.send_header("Content-Type", r.headers.get("Content-Type", "application/json"))
@@ -311,6 +412,39 @@ def make_handler(hub: BridgeHub):
                     self.wfile.write(data)
             except Exception as exc:
                 self._send_json({"error": f"Upstream unreachable: {exc}"}, 502)
+
+        def _selected_online_account(self) -> tuple[dict, str]:
+            models_cfg = hub.config.get("models", {})
+            if hub.model_vault.locked:
+                raise PermissionError("خزانهٔ API قفل است؛ برای آنلاین‌رفتن بازش کن.")
+            account_id = models_cfg.get("active_account_id", "")
+            account = next((x for x in hub.model_vault.accounts if x.get("id") == account_id and x.get("enabled", True)), None)
+            if not account:
+                raise RuntimeError("حساب آنلاین پیش‌فرضی انتخاب نشده است.")
+            provider = PROVIDERS.get(account.get("provider"), {})
+            if provider.get("format") != "openai":
+                raise RuntimeError("این endpoint در حال حاضر با /v1 سازگار نیست؛ برای generation از OpenAI-compatible استفاده کن.")
+            model = models_cfg.get("online_model", "")
+            if not model:
+                raise RuntimeError("مدل آنلاین پیش‌فرضی انتخاب نشده است.")
+            return account, model
+
+        def _make_remote_request(self, payload: dict, path: str) -> tuple[urllib.request.Request, urllib.request.OpenerDirector, str]:
+            account, model = self._selected_online_account()
+            base = str(account.get("base_url", "")).rstrip("/")
+            if path.startswith("/v1/") and base.endswith("/v1"):
+                endpoint = base + path[3:]
+            else:
+                endpoint = base + path
+            remote_payload = dict(payload)
+            remote_payload["model"] = model
+            headers = {"Content-Type": "application/json"}
+            if account.get("api_key"):
+                headers["Authorization"] = f"Bearer {account['api_key']}"
+            req = urllib.request.Request(endpoint, data=json.dumps(remote_payload, ensure_ascii=False).encode("utf-8"), headers=headers, method="POST")
+            proxy = str(account.get("proxy", "")).strip()
+            opener = urllib.request.build_opener(urllib.request.ProxyHandler({"http": proxy, "https": proxy})) if proxy else urllib.request.build_opener()
+            return req, opener, model
 
         def _detect_agent_tag(self, payload: dict) -> str:
             x_ag = self.headers.get("X-Agent-Name", "").strip()
@@ -353,30 +487,53 @@ def make_handler(hub: BridgeHub):
                     else:
                         preview_txt = str(c)
 
-            upstream_url = hub.config["tap"]["upstream_url"].rstrip("/") + path
-            req = urllib.request.Request(
-                upstream_url,
-                data=forward_bytes,
-                headers={"Content-Type": "application/json"},
-                method="POST",
-            )
+            models_cfg = hub.config.get("models", {})
+            remote_active = models_cfg.get("default_mode", "local") == "online"
+            remote_model = ""
+            if remote_active:
+                try:
+                    req, request_opener, remote_model = self._make_remote_request(payload, path)
+                    payload["model"] = remote_model
+                except Exception as exc:
+                    hub.wire_request_failed(agent_name)
+                    self._send_json({"error": str(exc)}, 503)
+                    return
+            else:
+                local_default = models_cfg.get("default_model", "")
+                if local_default:
+                    payload["model"] = local_default
+                forward_bytes = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+                upstream_url = hub.config["tap"]["upstream_url"].rstrip("/") + path
+                req = urllib.request.Request(upstream_url, data=forward_bytes, headers={"Content-Type": "application/json"}, method="POST")
+                request_opener = LOOPBACK_OPENER
             t0 = time.perf_counter()
             hub.wire_request_started(agent_name)
             try:
-                resp = LOOPBACK_OPENER.open(req, timeout=300)
-            except urllib.error.HTTPError as err:
-                hub.wire_request_failed(agent_name)
-                eb = err.read()
-                self.send_response(err.code)
-                self.send_header("Content-Type", "application/json")
-                self.send_header("Content-Length", str(len(eb)))
-                self.end_headers()
-                self.wfile.write(eb)
-                return
-            except Exception as exc:
-                hub.wire_request_failed(agent_name)
-                self._send_json({"error": str(exc)}, 502)
-                return
+                resp = request_opener.open(req, timeout=300)
+            except (urllib.error.HTTPError, Exception) as err:
+                # Online fallback is explicit opt-in; never send local prompts to a provider silently.
+                if not remote_active and models_cfg.get("online_fallback"):
+                    try:
+                        req, request_opener, remote_model = self._make_remote_request(payload, path)
+                        resp = request_opener.open(req, timeout=300)
+                        remote_active = True
+                        payload["model"] = remote_model
+                    except Exception as fallback_error:
+                        hub.wire_request_failed(agent_name)
+                        self._send_json({"error": f"Local model failed ({err}); online fallback failed ({fallback_error})"}, 502)
+                        return
+                else:
+                    hub.wire_request_failed(agent_name)
+                    if isinstance(err, urllib.error.HTTPError):
+                        eb = err.read()
+                        self.send_response(err.code)
+                        self.send_header("Content-Type", "application/json")
+                        self.send_header("Content-Length", str(len(eb)))
+                        self.end_headers()
+                        self.wfile.write(eb)
+                    else:
+                        self._send_json({"error": str(err)}, 502)
+                    return
 
             timings: dict = {}
             usage_obj: dict = {}

@@ -169,7 +169,7 @@ window.ABApp = (() => {
       mkRoot('settings', ICONS.sliders, 'تنظیمات',
         mkLeaf('set-translate', 'مترجم، پروکسی و API آفلاین', trOn ? 'ON' : 'OFF', trOn ? 'on' : '') +
         mkLeaf('set-hud', 'تم، فونت و کلیدهای نمایش') +
-        mkLeaf('set-tap', 'اتصال محلی و دستورات اجرا') +
+        mkLeaf('set-tap', 'مدل محلی، API آنلاین و پیش‌فرض Agent') +
         mkLeaf('set-retention', 'نگهداری تاریخچه و پاکسازی', `${state.config.retention.days || '∞'}d`)
       )
     ].join('');
@@ -231,10 +231,52 @@ window.ABApp = (() => {
     } else if (route.startsWith('set-')) {
       window.ABSettingsPage.render(host, state, route);
     }
+    const alertId = 'modelAvailabilityAlert';
+    host.querySelector(`#${alertId}`)?.remove();
+    if (route === 'chat' && (state.model_status?.alert || (!state.model_status?.local_online && state.model_status?.fallback_enabled))) {
+      const fallback = !state.model_status.alert && state.model_status.fallback_enabled;
+      const banner = document.createElement('div');
+      banner.id = alertId;
+      banner.className = `model-availability-alert ${fallback ? 'fallback-ready' : ''}`;
+      banner.innerHTML = fallback
+        ? `<span>مدل لوکال در دسترس نیست؛ fallback آنلاین روشن است.</span><small>اگر درخواست به ابر برود، متن و تاریخچه به ارائه‌دهندهٔ آنلاین ارسال می‌شود.</small><button class="btn" onclick="ABApp.navigate('set-tap')">تنظیم fallback</button>`
+        : `<span>مدل لوکال پیدا نشد یا در دسترس نیست.</span><small>آدرس ${esc(state.config.tap.upstream_url)} را بررسی کن، یا در تنظیمات مدل فهرست را بخوان و مدل را انتخاب کن.</small><button class="btn" onclick="ABApp.navigate('set-tap')">بازکردن تنظیمات مدل</button>`;
+      host.prepend(banner);
+    }
+  }
+
+  function renderVaultGate() {
+    const locked = !!state?.model_vault?.locked;
+    let gate = document.getElementById('modelVaultGate');
+    if (!locked) { gate?.remove(); return; }
+    if (!gate) {
+      gate = document.createElement('div');
+      gate.id = 'modelVaultGate';
+      gate.className = 'model-vault-gate';
+      document.body.appendChild(gate);
+    }
+    gate.innerHTML = `<section class="model-vault-card" dir="rtl"><div class="vault-lock-icon">🔐</div><h2>بازکردن خزانهٔ API</h2><p>کلیدهای حساب‌های آنلاین رمزگذاری شده‌اند. برای بازشدن این اجرا رمز اصلی را وارد کن.</p><form onsubmit="ABApp.unlockModelVault(event)"><input id="modelVaultPassphrase" type="password" autocomplete="current-password" placeholder="رمز اصلی" required><button class="btn primary" type="submit">بازکردن</button></form><div id="modelVaultError" role="status"></div></section>`;
+  }
+
+  async function unlockModelVault(event) {
+    event?.preventDefault();
+    const input = document.getElementById('modelVaultPassphrase');
+    const error = document.getElementById('modelVaultError');
+    try {
+      await api('/api/models/unlock', { passphrase: input.value });
+      input.value = '';
+      const fresh = await api('/api/state');
+      applyState(fresh, false);
+    } catch (e) {
+      input.value = '';
+      error.textContent = `بازکردن ناموفق · ${e.message}`;
+      input.focus();
+    }
   }
 
   function applyState(nextState, isFirst = false) {
     state = nextState;
+    renderVaultGate();
     renderHudBar();
     renderTree();
     renderMainPage(isFirst);
@@ -259,6 +301,6 @@ window.ABApp = (() => {
     getState, getRoute, navigate, toggleBranch,
     selectMirror, selectLab, createLabSession, renameLabSession, deleteLabSession, deleteMirror,
     filterByObservedModel, toggleSidebarSide, toggleProxyMode,
-    toggleSidebarCollapse, boot
+    toggleSidebarCollapse, unlockModelVault, boot
   };
 })();
