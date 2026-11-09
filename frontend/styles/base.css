@@ -1,37 +1,71 @@
-/* Arena.ai-Inspired Smooth Dark Design System */
+/* Open-WebUI Inspired Lightweight Design System + Readable Font Scaling */
 :root,
-[data-theme="hacker-dark"],
+[data-theme="openwebui-dark"],
 [data-theme="arena-dark"] {
-  --bg-0: #0f1117;
-  --bg-1: #161922;
-  --bg-2: #1d222e;
-  --bg-3: #262c3c;
-  --line: rgba(255, 255, 255, 0.075);
-  --line-strong: rgba(255, 255, 255, 0.14);
-  --fg-0: #eef0f6;
-  --fg-1: #b4bcd0;
-  --fg-2: #778199;
+  --bg-0: #111318;
+  --bg-1: #181b23;
+  --bg-2: #212632;
+  --bg-3: #2b3242;
+  --line: rgba(255, 255, 255, 0.08);
+  --line-strong: rgba(255, 255, 255, 0.16);
+  --fg-0: #f2f4f8;
+  --fg-1: #c2c8d6;
+  --fg-2: #80899e;
   --phosphor: #34d399;
-  --phosphor-dim: rgba(52, 211, 153, 0.12);
+  --phosphor-dim: rgba(52, 211, 153, 0.13);
   --cyan: #60a5fa;
-  --cyan-dim: rgba(96, 165, 250, 0.12);
+  --cyan-dim: rgba(96, 165, 250, 0.13);
   --violet: #a78bfa;
-  --violet-dim: rgba(167, 139, 250, 0.12);
+  --violet-dim: rgba(167, 139, 250, 0.13);
   --amber: #fbbf24;
-  --amber-dim: rgba(251, 191, 36, 0.12);
+  --amber-dim: rgba(251, 191, 36, 0.13);
   --red: #f87171;
-  --red-dim: rgba(248, 113, 113, 0.12);
-  --radius-sm: 8px;
-  --radius-md: 12px;
-  --radius-lg: 16px;
-  --shadow-soft: 0 8px 28px rgba(0, 0, 0, 0.26);
+  --red-dim: rgba(248, 113, 113, 0.13);
+  --radius-sm: 9px;
+  --radius-md: 13px;
+  --radius-lg: 18px;
+  --shadow-soft: 0 8px 28px rgba(0, 0, 0, 0.25);
   --mono: "JetBrains Mono", "Iosevka", "Fira Code", ui-monospace, SFMono-Regular, Consolas, monospace;
-  --sans: "Inter", "Vazirmatn", system-ui, -apple-system, "Segoe UI", Roboto, Tahoma, sans-serif;
+  --sans: "Vazirmatn", "Inter", system-ui, -apple-system, "Segoe UI", Roboto, Tahoma, sans-serif;
 }
 
-* {
-  box-sizing: border-box;
+[data-theme="mocha-dark"] {
+  --bg-0: #181825;
+  --bg-1: #1e1e2e;
+  --bg-2: #28283d;
+  --bg-3: #353552;
+  --fg-0: #cdd6f4;
+  --fg-1: #bac2de;
+  --fg-2: #7f849c;
+  --phosphor: #a6e3a1;
+  --phosphor-dim: rgba(166, 227, 161, 0.14);
 }
+
+[data-theme="zed-dark"] {
+  --bg-0: #0d1014;
+  --bg-1: #13171d;
+  --bg-2: #1a2028;
+  --bg-3: #242c37;
+  --fg-0: #e6edf3;
+  --fg-1: #adbac7;
+  --phosphor: #38bdf8;
+  --phosphor-dim: rgba(56, 189, 248, 0.14);
+}
+
+[data-theme="lobechat-dark"] {
+  --bg-0: #0b0d13;
+  --bg-1: #141824;
+  --bg-2: #1e2436;
+  --bg-3: #2b334d;
+  --phosphor: #818cf8;
+  --phosphor-dim: rgba(129, 140, 248, 0.15);
+}
+
+html[data-font="normal"] { --base-fs: 14px; --prose-fs: 14.5px; }
+html[data-font="large"], :root { --base-fs: 15px; --prose-fs: 15.8px; }
+html[data-font="xlarge"] { --base-fs: 16.5px; --prose-fs: 17.4px; }
+
+* { box-sizing: border-box; }
 
 html, body {
   margin: 0;
@@ -41,28 +75,17 @@ html, body {
   background: var(--bg-0);
   color: var(--fg-0);
   font-family: var(--sans);
-  font-size: 13.8px;
-  line-height: 1.6;
+  font-size: var(--base-fs);
+  line-height: 1.7;
   overflow: hidden;
   -webkit-font-smoothing: antialiased;
 }
 
-::-webkit-scrollbar {
-  width: 7px;
-  height: 7px;
-}
-::-webkit-scrollbar-track {
-  background: transparent;
-}
-::-webkit-scrollbar-thumb {
-  background: rgba(255, 255, 255, 0.15);
-  border-radius: 999px;
-}
-::-webkit-scrollbar-thumb:hover {
-  background: rgba(255, 255, 255, 0.28);
-}
+::-webkit-scrollbar { width: 8px; height: 8px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: rgba(255, 255, 255, 0.16); border-radius: 999px; }
+::-webkit-scrollbar-thumb:hover { background: rgba(255, 255, 255, 0.3); }
 
-/* Outer shell defaults to LTR so Sidebar sits on the LEFT */
 .shell {
   display: flex;
   flex-direction: row;
@@ -83,8 +106,8 @@ html, body {
 
 code {
   font-family: var(--mono);
-  font-size: 12.2px;
-  background: rgba(255, 255, 255, 0.06);
+  font-size: 0.88em;
+  background: rgba(255, 255, 255, 0.07);
   border: 1px solid var(--line);
   padding: 1.5px 6px;
   border-radius: 6px;

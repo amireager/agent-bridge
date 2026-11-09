@@ -1,23 +1,30 @@
 #!/usr/bin/env python3
-"""Multi-Agent Session Tree, Passive Streaming /v1 Extractor, and PTY/RPC Dispatch."""
+"""
+Dual-Channel Hub:
+1) Wire-Driven Live Terminal Mirrors (`pi`, `pi-2`, `hermes`, ...) — zero fake web sessions;
+   100% synchronized with whatever session is active in each open terminal!
+2) Built-in Direct Model & Tool Lab (`lab`) — web-native multi-turn model/translation/KV-slot
+   tester & extensible local tool workbench (foundation for `agent-team`).
+"""
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import queue
 import re
-import shlex
-import shutil
 import subprocess
 import threading
 import time
+import urllib.request
 import uuid
 from pathlib import Path
 
 from .engine import estimate_kv_mb_for_tokens, probe_upstream_passive
 from .store import DataStore
 from .translator import (
+    LOOPBACK_OPENER,
     estimate_persian_token_savings,
     probe_translator_health,
     split_markdown_into_blocks,
@@ -27,14 +34,23 @@ from .translator import (
 THINK_TAG_RE = re.compile(r"<think>([\s\S]*?)</think>", re.IGNORECASE)
 
 
-class BridgeHub:
-    """Listens between Agent and Model, translates paragraph-by-paragraph, and tracks KV cache."""
+def _extract_msg_text(content) -> str:
+    if isinstance(content, list):
+        return "\n".join(
+            str(x.get("text", ""))
+            for x in content
+            if isinstance(x, dict) and x.get("type") == "text"
+        )
+    return str(content or "")
 
+
+class BridgeHub:
     def __init__(self, store: DataStore, bridge_port: int) -> None:
         self.store = store
         self.bridge_port = bridge_port
         self.config = self.store.load_config()
         self.glossary = self.store.load_glossary()
+        self.shutting_down = False
 
         if self.config.get("retention", {}).get("auto_prune_on_boot", True):
             self.store.prune_expired()
@@ -43,139 +59,178 @@ class BridgeHub:
         self._sse_clients: list[queue.Queue] = []
         self._inspector_ring: list[dict] = []
 
-        self.sessions_by_agent: dict[str, dict[str, dict]] = {}
-        self.active_agent: str = "pi"
-        self.active_session_by_agent: dict[str, str] = {}
+        # 1. Live Terminal Mirrors (keyed by agent_id: 'pi', 'pi-2', 'hermes', ...)
+        self.mirrors: dict[str, dict] = {}
+        self.pty_heartbeats: dict[str, float] = {}
+        self.pending_fa_by_agent: dict[str, dict] = {}
+        self.pending_saved_by_agent: dict[str, int] = {}
 
-        self.pi_proc: subprocess.Popen | None = None
-        self.pi_session_bound: str | None = None
-        self.sandbox_worker_seen_ts: float = 0.0
-        self.pty_wrapper_seen_ts: float = 0.0
-        self.pending_fa_draft: dict | None = None  # Pairs Web FA draft with PTY-injected prompt!
-        self.pending_saved_tokens: int = 0
+        # 2. Built-in Direct Model & Tool Lab sessions
+        self.lab_sessions: dict[str, dict] = {}
+        self.lab_abort_flag = False
 
+        # Active view target: ("mirror", "pi") or ("lab", "<session_id>")
+        self.view_kind: str = "mirror"
+        self.view_id: str = "pi"
         self.session_state: str = "IDLE"
-        self.current_turn: dict | None = None
 
         self.usage_window_hours: int = 24
         self.usage_model_filter: str = "all"
         self.usage_agent_filter: str = "all"
 
-        self._load_all_sessions()
+        self._load_state()
 
-    def _agent_sess_dir(self, agent_id: str) -> Path:
-        safe = re.sub(r"[^a-zA-Z0-9_.-]", "-", agent_id) or "agent"
-        p = self.store.sessions_dir / safe
-        p.mkdir(parents=True, exist_ok=True)
-        return p
-
-    def _ensure_agent_bucket(self, agent_id: str) -> None:
-        if agent_id not in self.sessions_by_agent:
-            self.sessions_by_agent[agent_id] = {}
-        if not self.sessions_by_agent[agent_id]:
-            s = self._make_session_obj(agent_id, f"{agent_id} · #1")
-            self.sessions_by_agent[agent_id][s["id"]] = s
-            self._persist_session(s)
-        if agent_id not in self.active_session_by_agent:
-            latest = max(
-                self.sessions_by_agent[agent_id].values(),
-                key=lambda x: x.get("updated_at", 0),
-            )
-            self.active_session_by_agent[agent_id] = latest["id"]
-
-    def _load_all_sessions(self) -> None:
-        for sub in sorted(self.store.sessions_dir.iterdir()):
-            if not sub.is_dir() or sub.name in ("pi-native", "native-jsonl"):
-                continue
-            aid = sub.name
-            self.sessions_by_agent.setdefault(aid, {})
-            for p in sorted(sub.glob("*.json")):
+    def shutdown(self) -> None:
+        """Wakes all SSE streams and stops cleanly on Ctrl+C with zero tracebacks."""
+        self.shutting_down = True
+        self.lab_abort_flag = True
+        with self._lock:
+            for q in self._sse_clients:
                 try:
-                    data = json.loads(p.read_text(encoding="utf-8"))
-                    data["agent_id"] = aid
-                    # Backfill blocks if older session turn lacked blocks
-                    for t in data.get("turns", []):
-                        if "blocks" not in t and t.get("reply_en"):
-                            blks = split_markdown_into_blocks(t["reply_en"])
-                            if t.get("reply_fa") and len(blks) == 1 and blks[0]["type"] == "prose":
-                                blks[0]["fa"] = t["reply_fa"]
-                            t["blocks"] = blks
-                    self.sessions_by_agent[aid][data["id"]] = data
-                except Exception:
+                    q.put_nowait(None)
+                except queue.Full:
                     pass
-            if self.sessions_by_agent[aid]:
-                latest = max(
-                    self.sessions_by_agent[aid].values(),
-                    key=lambda x: x.get("updated_at", 0),
-                )
-                self.active_session_by_agent[aid] = latest["id"]
+            self._sse_clients.clear()
 
-        self._ensure_agent_bucket("pi")
-        if self.active_agent not in self.sessions_by_agent:
-            self.active_agent = "pi"
+    def _load_state(self) -> None:
+        for p in sorted(self.store.mirrors_dir.glob("*.json")):
+            try:
+                m = json.loads(p.read_text(encoding="utf-8"))
+                if m.get("agent_id"):
+                    self.mirrors[m["agent_id"]] = m
+            except Exception:
+                pass
 
-    def _make_session_obj(self, agent_id: str, title: str) -> dict:
+        if "pi" not in self.mirrors:
+            self.mirrors["pi"] = self._new_mirror_obj("pi")
+
+        lab_dir = self.store.sessions_dir / "lab"
+        lab_dir.mkdir(parents=True, exist_ok=True)
+        for p in sorted(lab_dir.glob("*.json")):
+            try:
+                s = json.loads(p.read_text(encoding="utf-8"))
+                if s.get("id"):
+                    self.lab_sessions[s["id"]] = s
+            except Exception:
+                pass
+
+        if not self.lab_sessions:
+            s = self._make_lab_session("تست مستقیم مدل #1")
+            self.lab_sessions[s["id"]] = s
+            self._persist_lab_session(s)
+
+    def _new_mirror_obj(self, agent_id: str) -> dict:
+        return {
+            "agent_id": agent_id,
+            "title": "در انتظار اولین پیام ترمینال...",
+            "conv_fp": "",
+            "updated_at": time.time(),
+            "turns": [],
+        }
+
+    def _persist_mirror(self, mirror: dict) -> None:
+        mirror["updated_at"] = time.time()
+        safe = re.sub(r"[^a-zA-Z0-9_.-]", "-", mirror["agent_id"]) or "agent"
+        p = self.store.mirrors_dir / f"{safe}.json"
+        p.write_text(json.dumps(mirror, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    def _make_lab_session(self, title: str) -> dict:
         sid = time.strftime("%m%d-%H%M-") + uuid.uuid4().hex[:4]
         now = time.time()
         return {
             "id": sid,
-            "agent_id": agent_id,
             "title": title,
             "created_at": now,
             "updated_at": now,
             "turns": [],
         }
 
-    def _persist_session(self, sess: dict) -> None:
+    def _persist_lab_session(self, sess: dict) -> None:
         sess["updated_at"] = time.time()
-        aid = sess.get("agent_id", "pi")
-        p = self._agent_sess_dir(aid) / f"{sess['id']}.json"
-        p.write_text(json.dumps(sess, ensure_ascii=False, indent=2), encoding="utf-8")
+        lab_dir = self.store.sessions_dir / "lab"
+        lab_dir.mkdir(parents=True, exist_ok=True)
+        (lab_dir / f"{sess['id']}.json").write_text(
+            json.dumps(sess, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
 
-    def create_session(self, agent_id: str | None = None, title: str | None = None) -> dict:
-        aid = agent_id or self.active_agent
-        self._ensure_agent_bucket(aid)
-        idx = len(self.sessions_by_agent[aid]) + 1
-        sess = self._make_session_obj(aid, title or f"{aid} · #{idx}")
-        self.sessions_by_agent[aid][sess["id"]] = sess
-        self.active_agent = aid
-        self.active_session_by_agent[aid] = sess["id"]
-        self._persist_session(sess)
+    # ---- PTY Multi-Terminal Registration ----
+    def register_pty(self, desired_base: str = "pi", explicit_name: str = "") -> str:
+        now = time.time()
+        if explicit_name:
+            chosen = re.sub(r"[^a-zA-Z0-9_.-]", "-", explicit_name)
+        else:
+            base = re.sub(r"[^a-zA-Z0-9_.-]", "-", desired_base) or "pi"
+            if (now - self.pty_heartbeats.get(base, 0.0)) > 20.0:
+                chosen = base
+            else:
+                idx = 2
+                while (now - self.pty_heartbeats.get(f"{base}-{idx}", 0.0)) <= 20.0:
+                    idx += 1
+                chosen = f"{base}-{idx}"
 
-        if aid == "pi" and self.pi_proc and self.pi_proc.poll() is None and self.pi_proc.stdin:
-            try:
-                self.pi_proc.stdin.write((json.dumps({"type": "new_session"}) + "\n").encode("utf-8"))
-                self.pi_proc.stdin.flush()
-                self.pi_session_bound = sess["id"]
-            except OSError:
-                pass
-
+        self.pty_heartbeats[chosen] = now
+        if chosen not in self.mirrors:
+            self.mirrors[chosen] = self._new_mirror_obj(chosen)
+            self._persist_mirror(self.mirrors[chosen])
+        self.view_kind = "mirror"
+        self.view_id = chosen
         self.broadcast_state()
-        return sess
+        return chosen
 
-    def select_agent_session(self, agent_id: str, session_id: str | None = None) -> dict | None:
-        self._ensure_agent_bucket(agent_id)
-        self.active_agent = agent_id
-        if session_id and session_id in self.sessions_by_agent[agent_id]:
-            self.active_session_by_agent[agent_id] = session_id
-        sid = self.active_session_by_agent[agent_id]
+    def heartbeat_pty(self, agent_id: str) -> None:
+        self.pty_heartbeats[agent_id] = time.time()
+        if agent_id not in self.mirrors:
+            self.mirrors[agent_id] = self._new_mirror_obj(agent_id)
+
+    def unregister_pty(self, agent_id: str) -> None:
+        self.pty_heartbeats.pop(agent_id, None)
         self.broadcast_state()
-        return self.sessions_by_agent[agent_id].get(sid)
 
-    def delete_session(self, agent_id: str, session_id: str) -> bool:
-        bucket = self.sessions_by_agent.get(agent_id, {})
-        if session_id not in bucket:
+    # ---- View & Lab Session Controls ----
+    def select_view(self, kind: str, target_id: str) -> None:
+        if kind == "mirror":
+            if target_id not in self.mirrors:
+                self.mirrors[target_id] = self._new_mirror_obj(target_id)
+            self.view_kind = "mirror"
+            self.view_id = target_id
+        elif kind == "lab" and target_id in self.lab_sessions:
+            self.view_kind = "lab"
+            self.view_id = target_id
+        self.broadcast_state()
+
+    def clear_mirror_view(self, agent_id: str) -> None:
+        if agent_id in self.mirrors:
+            self.mirrors[agent_id] = self._new_mirror_obj(agent_id)
+            self._persist_mirror(self.mirrors[agent_id])
+            self.broadcast_state()
+
+    def create_lab_session(self, title: str | None = None) -> dict:
+        idx = len(self.lab_sessions) + 1
+        s = self._make_lab_session(title or f"تست مستقیم #{idx}")
+        self.lab_sessions[s["id"]] = s
+        self._persist_lab_session(s)
+        self.view_kind = "lab"
+        self.view_id = s["id"]
+        self.broadcast_state()
+        return s
+
+    def delete_lab_session(self, session_id: str) -> bool:
+        if session_id not in self.lab_sessions:
             return False
-        del bucket[session_id]
-        f = self._agent_sess_dir(agent_id) / f"{session_id}.json"
+        del self.lab_sessions[session_id]
+        f = self.store.sessions_dir / "lab" / f"{session_id}.json"
         if f.exists():
             f.unlink()
-        self._ensure_agent_bucket(agent_id)
-        if self.active_session_by_agent.get(agent_id) == session_id:
-            self.active_session_by_agent[agent_id] = next(iter(self.sessions_by_agent[agent_id].keys()))
+        if not self.lab_sessions:
+            s = self._make_lab_session("تست مستقیم #1")
+            self.lab_sessions[s["id"]] = s
+            self._persist_lab_session(s)
+        if self.view_kind == "lab" and self.view_id == session_id:
+            self.view_id = next(iter(self.lab_sessions.keys()))
         self.broadcast_state()
         return True
 
+    # ---- SSE Pub/Sub ----
     def subscribe_sse(self) -> queue.Queue:
         q: queue.Queue = queue.Queue(maxsize=256)
         with self._lock:
@@ -188,6 +243,8 @@ class BridgeHub:
                 self._sse_clients.remove(q)
 
     def emit_event(self, kind: str, payload: dict) -> None:
+        if self.shutting_down:
+            return
         msg = json.dumps({"kind": kind, **payload}, ensure_ascii=False)
         with self._lock:
             dead = []
@@ -202,30 +259,64 @@ class BridgeHub:
     def push_inspector(self, item: dict) -> None:
         with self._lock:
             self._inspector_ring.append(item)
-            if len(self._inspector_ring) > 40:
-                self._inspector_ring = self._inspector_ring[-40:]
+            if len(self._inspector_ring) > 45:
+                self._inspector_ring = self._inspector_ring[-45:]
 
-    def consume_pending_saved_tokens(self) -> int:
-        val = self.pending_saved_tokens
-        self.pending_saved_tokens = 0
-        return val
+    def consume_saved_tokens(self, agent_name: str) -> int:
+        return self.pending_saved_by_agent.pop(agent_name, 0)
 
-    def _translate_turn_blocks(self, turn: dict) -> None:
+    def _translate_turn_fields(self, turn: dict) -> None:
+        tr_on = self.config["translation"].get("enabled", True)
         raw_en = turn.get("reply_en", "").strip()
-        if not raw_en:
-            turn["blocks"] = []
-            return
-        if not self.config["translation"].get("enabled", True):
-            turn["blocks"] = split_markdown_into_blocks(raw_en)
-            turn["tr_engine"] = "proxy-only"
-            return
+        if raw_en:
+            if tr_on:
+                tr_res = translate_prose(raw_en, "fa", self.config["translation"], self.glossary)
+                turn["reply_fa"] = tr_res.get("translation", "")
+                turn["blocks"] = tr_res.get("blocks") or split_markdown_into_blocks(raw_en)
+                turn["tr_engine"] = tr_res.get("engine", "")
+            else:
+                turn["blocks"] = split_markdown_into_blocks(raw_en)
+                turn["tr_engine"] = "proxy-only"
 
-        tr_res = translate_prose(raw_en, "fa", self.config["translation"], self.glossary)
-        turn["reply_fa"] = tr_res.get("translation", "")
-        turn["blocks"] = tr_res.get("blocks") or split_markdown_into_blocks(raw_en)
-        turn["tr_engine"] = tr_res.get("engine", "")
+        raw_think = turn.get("thinking", "").strip()
+        if raw_think and tr_on and self.config["ui"].get("translate_thinking", True):
+            th_res = translate_prose(raw_think, "fa", self.config["translation"], self.glossary)
+            turn["think_blocks"] = th_res.get("blocks") or split_markdown_into_blocks(raw_think)
+            turn["thinking_fa"] = th_res.get("translation", "")
+        elif raw_think:
+            turn["think_blocks"] = split_markdown_into_blocks(raw_think)
 
-    # ---- Full Passive /v1 Extractor (Works with real standalone `pi` TUI in Terminal!) ----
+    def retranslate_turn(self, turn_id: str) -> bool:
+        turns = self._active_turns_list()
+        for t in turns:
+            if t["id"] == turn_id:
+                forced_cfg = {**self.config["translation"], "enabled": True}
+                if t.get("reply_en"):
+                    r = translate_prose(t["reply_en"], "fa", forced_cfg, self.glossary)
+                    t["reply_fa"] = r.get("translation", "")
+                    t["blocks"] = r.get("blocks", [])
+                    t["tr_engine"] = r.get("engine", "")
+                if t.get("thinking"):
+                    rt = translate_prose(t["thinking"], "fa", forced_cfg, self.glossary)
+                    t["thinking_fa"] = rt.get("translation", "")
+                    t["think_blocks"] = rt.get("blocks", [])
+                self._persist_active_container()
+                self.broadcast_state()
+                return True
+        return False
+
+    def _active_turns_list(self) -> list[dict]:
+        if self.view_kind == "lab":
+            return self.lab_sessions.get(self.view_id, {}).get("turns", [])
+        return self.mirrors.get(self.view_id, {}).get("turns", [])
+
+    def _persist_active_container(self) -> None:
+        if self.view_kind == "lab" and self.view_id in self.lab_sessions:
+            self._persist_lab_session(self.lab_sessions[self.view_id])
+        elif self.view_kind == "mirror" and self.view_id in self.mirrors:
+            self._persist_mirror(self.mirrors[self.view_id])
+
+    # ---- Wire-Driven Live Terminal Mirror Sync ----
     def record_passive_wire_turn(
         self,
         *,
@@ -239,29 +330,25 @@ class BridgeHub:
         kv_status: str,
         elapsed_s: float,
     ) -> None:
-        if agent_name == "pi" and self.current_turn is not None:
-            self.current_turn["model"] = model_name
-            self.current_turn["kv_status"] = kv_status
+        # Internal Direct Lab manages its own turns directly
+        if agent_name.startswith("lab-"):
             return
 
-        # Extract latest user prompt and any tool results present in messages
+        first_user_txt = ""
         last_user_txt = ""
         tool_outputs_by_id: dict[str, str] = {}
+
         for m in messages:
             role = m.get("role")
-            c = m.get("content", "")
-            if isinstance(c, list):
-                c_str = "\n".join(
-                    x.get("text", "") for x in c if isinstance(x, dict) and x.get("type") == "text"
-                )
-            else:
-                c_str = str(c or "")
-            if role == "user" and c_str.strip():
-                last_user_txt = c_str.strip()
+            c_str = _extract_msg_text(m.get("content", "")).strip()
+            if role == "user" and c_str:
+                if not first_user_txt:
+                    first_user_txt = c_str
+                last_user_txt = c_str
             elif role == "tool":
                 tcid = m.get("tool_call_id", "")
                 if tcid:
-                    tool_outputs_by_id[tcid] = c_str
+                    tool_outputs_by_id[tcid] = _extract_msg_text(m.get("content", ""))
 
         clean_reply = raw_reply
         extracted_think = reasoning_text or ""
@@ -273,22 +360,25 @@ class BridgeHub:
         if not clean_reply.strip() and not tool_calls and not extracted_think.strip():
             return
 
-        self._ensure_agent_bucket(agent_name)
-        self.active_agent = agent_name
-        sid = self.active_session_by_agent[agent_name]
-        sess = self.sessions_by_agent[agent_name][sid]
+        mirror = self.mirrors.setdefault(agent_name, self._new_mirror_obj(agent_name))
 
-        # Check if this /v1 call is a multi-step continuation of the last turn (e.g., after tool execution!)
-        existing_turn = sess["turns"][-1] if sess["turns"] else None
+        # Auto-detect terminal session switch (/new or /resume inside terminal `pi`!)
+        conv_fp = hashlib.sha1(first_user_txt.encode("utf-8")).hexdigest()[:12] if first_user_txt else "init"
+        if mirror.get("conv_fp") and mirror["conv_fp"] != conv_fp:
+            mirror["turns"] = []
+        mirror["conv_fp"] = conv_fp
+        if first_user_txt:
+            mirror["title"] = first_user_txt.replace("\n", " ")[:36]
+
+        # Stitch multi-step agent loop (assistant -> tool -> assistant) onto the same turn
+        existing_turn = mirror["turns"][-1] if mirror["turns"] else None
         is_continuation = (
             existing_turn is not None
-            and existing_turn.get("source") in ("tap", "pty")
             and last_user_txt
             and existing_turn.get("prompt_sent", "").strip() == last_user_txt
         )
 
         if is_continuation and existing_turn is not None:
-            # Attach tool outputs from messages onto previous tool calls
             for tl in existing_turn.get("tools", []):
                 if tl["id"] in tool_outputs_by_id and not tl.get("output"):
                     tl["output"] = tool_outputs_by_id[tl["id"]]
@@ -297,7 +387,9 @@ class BridgeHub:
                 existing_turn["tools"].append(new_tc)
             if extracted_think:
                 existing_turn["thinking"] = (
-                    (existing_turn.get("thinking", "") + "\n" + extracted_think).strip()
+                    (existing_turn.get("thinking", "") + "\n\n" + extracted_think).strip()
+                    if existing_turn.get("thinking")
+                    else extracted_think
                 )
             if clean_reply.strip():
                 existing_turn["reply_en"] = (
@@ -305,47 +397,42 @@ class BridgeHub:
                     if existing_turn.get("reply_en")
                     else clean_reply
                 )
-                self._translate_turn_blocks(existing_turn)
+            self._translate_turn_fields(existing_turn)
 
             em = existing_turn.setdefault("metrics", {"uncached_in": 0, "cached_in": 0, "out_tok": 0, "tg_tps": 0.0})
             em["uncached_in"] += metrics.get("uncached_in", 0)
-            em["cached_in"] += metrics.get("cached_in", 0)
+            em["cached_in"] = max(em.get("cached_in", 0), metrics.get("cached_in", 0))
             em["out_tok"] += metrics.get("out_tok", 0)
             if metrics.get("tg_tps"):
                 em["tg_tps"] = metrics["tg_tps"]
             existing_turn["kv_status"] = kv_status
             existing_turn["elapsed_s"] = round(existing_turn.get("elapsed_s", 0.0) + elapsed_s, 1)
-            self._persist_session(sess)
-            self.emit_event("turn_complete", {"turn": existing_turn})
+            self._persist_mirror(mirror)
             return
 
-        # Check if user submitted Persian draft via PTY injection seconds ago
+        # Pair Persian draft if injected from Web UI moments ago
         user_display = last_user_txt
-        src_label = "tap"
         saved_tok = 0
-        if self.pending_fa_draft and (time.time() - self.pending_fa_draft["ts"] < 30.0):
-            if self.pending_fa_draft["en"].strip() in last_user_txt:
-                user_display = self.pending_fa_draft["fa"]
-                saved_tok = self.pending_fa_draft["saved"]
-                src_label = "pty"
-                self.pending_fa_draft = None
-
-        if len(sess["turns"]) == 0 and user_display.strip():
-            sess["title"] = user_display.strip().replace("\n", " ")[:28]
+        pend = self.pending_fa_by_agent.get(agent_name)
+        if pend and (time.time() - pend["ts"] < 45.0):
+            if pend["en"].strip()[:40] in last_user_txt:
+                user_display = pend["fa"]
+                saved_tok = pend["saved"]
+                self.pending_fa_by_agent.pop(agent_name, None)
 
         turn = {
             "id": uuid.uuid4().hex[:8],
-            "session_id": sid,
             "agent": agent_name,
             "model": model_name,
-            "source": src_label,
+            "source": "tty",
             "ts": time.strftime("%H:%M:%S"),
-            "started_ts": time.time() - elapsed_s,
             "user_raw": user_display,
             "prompt_sent": last_user_txt,
             "saved_fa_tokens": saved_tok,
             "kv_status": kv_status,
             "thinking": extracted_think,
+            "thinking_fa": "",
+            "think_blocks": [],
             "tools": tool_calls,
             "reply_en": clean_reply,
             "reply_fa": "",
@@ -355,277 +442,304 @@ class BridgeHub:
             "elapsed_s": round(elapsed_s, 1),
             "metrics": metrics,
         }
-        self._translate_turn_blocks(turn)
-        sess["turns"].append(turn)
-        self._persist_session(sess)
-        self.emit_event("turn_complete", {"turn": turn})
+        self._translate_turn_fields(turn)
+        mirror["turns"].append(turn)
+        self._persist_mirror(mirror)
 
-    # ---- RPC / Sandbox Worker / PTY Dispatch ----
-    def _ensure_pi_sender(self, model_id: str) -> tuple[bool, str]:
-        if self.pi_proc and self.pi_proc.poll() is None:
-            return True, "running"
+        # Auto-focus mirror if user is watching mirrors
+        if self.view_kind == "mirror" and self.view_id not in self.mirrors:
+            self.view_id = agent_name
 
-        raw_cmd = self.config["tap"]["pi_bin"].strip()
-        cmd_parts = shlex.split(raw_cmd) if raw_cmd else ["pi"]
-        exe = cmd_parts[0]
-        if not (Path(exe).exists() or shutil.which(exe)):
-            return (
-                False,
-                "عامل مستقیم به وب وصل نیست؛ داخل ترمینال سندباکس `python3 cli.py --wrap pi` را بزن تا ترمینال تعاملی واقعی pi باز شود و پیام‌ها مستقیم بدون کپی-پیست تایپ شوند (متن انگلیسی در کلیپ‌بوردت هم کپی شد).",
-            )
-
-        pi_dir = self.store.pi_agent_dir
-        models_json = {
-            "providers": {
-                "local-tap": {
-                    "baseUrl": f"http://127.0.0.1:{self.bridge_port}/v1",
-                    "api": "openai-completions",
-                    "apiKey": "agent:pi",
-                    "compat": {
-                        "supportsDeveloperRole": False,
-                        "supportsReasoningEffort": False,
-                        "maxTokensField": "max_tokens",
+    # ---- Built-in Direct Lab & Safe Local Tool Workbench ----
+    def _lab_tools_schema(self) -> list[dict]:
+        return [
+            {
+                "type": "function",
+                "function": {
+                    "name": "list_files",
+                    "description": "List files and directories inside the target path.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"path": {"type": "string", "description": "Relative or absolute directory path"}},
                     },
-                    "models": [
-                        {
-                            "id": model_id,
-                            "name": model_id,
-                            "reasoning": True,
-                            "input": ["text"],
-                            "contextWindow": 16384,
-                            "maxTokens": 2048,
-                            "cost": {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0},
-                        }
-                    ],
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "read_file",
+                    "description": "Read up to 160 lines of a UTF-8 text file.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"path": {"type": "string"}},
+                        "required": ["path"],
+                    },
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "run_shell",
+                    "description": "Run a quick diagnostic shell command in workdir (10s timeout).",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"command": {"type": "string"}},
+                        "required": ["command"],
+                    },
+                },
+            },
+        ]
+
+    def _exec_lab_tool(self, name: str, args: dict) -> tuple[str, bool]:
+        workdir = Path(self.config["tap"].get("workdir") or ".").expanduser().resolve()
+        try:
+            if name == "list_files":
+                rel = str(args.get("path", ".") or ".")
+                target = (workdir / rel).resolve() if not Path(rel).is_absolute() else Path(rel).resolve()
+                entries = sorted(p.name + ("/" if p.is_dir() else "") for p in target.iterdir())[:120]
+                return "\n".join(entries) or "(empty directory)", False
+            if name == "read_file":
+                rel = str(args.get("path", ""))
+                target = (workdir / rel).resolve() if not Path(rel).is_absolute() else Path(rel).resolve()
+                lines = target.read_text(encoding="utf-8", errors="replace").splitlines()[:160]
+                return "\n".join(f"{i+1}: {ln}" for i, ln in enumerate(lines)), False
+            if name == "run_shell":
+                cmd = str(args.get("command", ""))
+                r = subprocess.run(
+                    cmd, shell=True, cwd=str(workdir), capture_output=True, text=True, timeout=10
+                )
+                out = (r.stdout + ("\n" + r.stderr if r.stderr else "")).strip()
+                return (out[:4000] or f"(exit {r.returncode})"), (r.returncode != 0)
+            return f"Unknown tool: {name}", True
+        except Exception as exc:
+            return f"Tool error: {exc}", True
+
+    def _run_lab_turn_thread(self, sess: dict, turn: dict) -> None:
+        self.session_state = "THINKING"
+        self.lab_abort_flag = False
+        self.broadcast_state()
+
+        sys_prompt = self.config["tap"].get("lab_system_prompt", "").strip()
+        use_tools = bool(self.config["tap"].get("lab_enable_tools", True))
+
+        # Build clean OpenAI conversation history so KV prefix stays 100% static across turns!
+        api_msgs: list[dict] = []
+        if sys_prompt:
+            api_msgs.append({"role": "system", "content": sys_prompt})
+        for prev in sess["turns"]:
+            if prev["id"] == turn["id"]:
+                break
+            if prev.get("prompt_sent"):
+                api_msgs.append({"role": "user", "content": prev["prompt_sent"]})
+            if prev.get("reply_en"):
+                api_msgs.append({"role": "assistant", "content": prev["reply_en"]})
+        api_msgs.append({"role": "user", "content": turn["prompt_sent"]})
+
+        agent_tag = f"lab-{sess['id'][-4:]}"
+        t_start = time.perf_counter()
+
+        try:
+            for _step in range(5):
+                if self.lab_abort_flag or self.shutting_down:
+                    break
+                payload: dict = {
+                    "model": turn["model"],
+                    "messages": api_msgs,
+                    "stream": True,
                 }
-            }
-        }
-        (pi_dir / "models.json").write_text(json.dumps(models_json, indent=2), encoding="utf-8")
-        (pi_dir / "settings.json").write_text(
-            json.dumps({"defaultProvider": "local-tap", "defaultModel": model_id}, indent=2),
-            encoding="utf-8",
-        )
+                if use_tools:
+                    payload["tools"] = self._lab_tools_schema()
 
-        workdir = Path(self.config["tap"]["workdir"]).expanduser()
-        workdir.mkdir(parents=True, exist_ok=True)
-        pi_sess_dir = self.store.sessions_dir / "pi-native"
-        pi_sess_dir.mkdir(parents=True, exist_ok=True)
+                req = urllib.request.Request(
+                    f"http://127.0.0.1:{self.bridge_port}/v1/chat/completions",
+                    data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+                    headers={
+                        "Content-Type": "application/json",
+                        "Authorization": f"Bearer agent:{agent_tag}",
+                    },
+                    method="POST",
+                )
 
-        env = os.environ.copy()
-        env["PI_CODING_AGENT_DIR"] = str(pi_dir)
-        env["PI_OFFLINE"] = "1"
-        node_dir = "/var/tmp/lab/node/bin"
-        if Path(node_dir).exists() and node_dir not in env.get("PATH", ""):
-            env["PATH"] = f"{node_dir}:{env.get('PATH', '')}"
+                step_content: list[str] = []
+                step_think: list[str] = []
+                tool_map: dict[int, dict] = {}
+                last_bcast = 0.0
 
-        self.pi_proc = subprocess.Popen(
-            [*cmd_parts, "--mode", "rpc", "--session-dir", str(pi_sess_dir)],
-            cwd=str(workdir),
-            env=env,
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            bufsize=0,
-        )
-        self.pi_session_bound = self.active_session_by_agent.get("pi")
-        threading.Thread(target=self._read_pi_stdout, daemon=True).start()
-        return True, "spawned"
+                with LOOPBACK_OPENER.open(req, timeout=240) as resp:
+                    for raw_ln in resp:
+                        if self.lab_abort_flag or self.shutting_down:
+                            break
+                        ls = raw_ln.decode("utf-8", errors="replace").strip()
+                        if not ls.startswith("data:") or ls[5:].strip() == "[DONE]":
+                            continue
+                        chunk = json.loads(ls[5:].strip())
+                        if chunk.get("timings"):
+                            tm = chunk["timings"]
+                            turn["metrics"] = {
+                                "uncached_in": int(tm.get("prompt_n", 0)),
+                                "cached_in": int(tm.get("cache_n", 0)),
+                                "out_tok": int(tm.get("predicted_n", 0)),
+                                "pp_tps": round(float(tm.get("prompt_per_second", 0.0)), 1),
+                                "tg_tps": round(float(tm.get("predicted_per_second", 0.0)), 1),
+                            }
+                        for ch in chunk.get("choices", []):
+                            d = ch.get("delta", {})
+                            if d.get("reasoning_content"):
+                                step_think.append(d["reasoning_content"])
+                                turn["thinking"] = "".join(step_think)
+                            if d.get("content"):
+                                self.session_state = "STREAMING"
+                                step_content.append(d["content"])
+                                turn["reply_en"] = "".join(step_content)
+                            for tcd in d.get("tool_calls", []) or []:
+                                idx = int(tcd.get("index", 0))
+                                ent = tool_map.setdefault(idx, {"id": "", "name": "", "args": ""})
+                                if tcd.get("id"):
+                                    ent["id"] = tcd["id"]
+                                fn = tcd.get("function", {})
+                                if fn.get("name"):
+                                    ent["name"] += fn["name"]
+                                if fn.get("arguments"):
+                                    ent["args"] += fn["arguments"]
 
-    def ingest_pi_rpc_event(self, ev: dict, last_push_ref: list[float]) -> None:
-        etype = ev.get("type", "")
-        turn = self.current_turn
+                        now_m = time.monotonic()
+                        if now_m - last_bcast > 0.28:
+                            last_bcast = now_m
+                            self.broadcast_state()
 
-        if etype == "agent_start":
-            self.session_state = "THINKING"
-            self.broadcast_state()
+                full_txt = "".join(step_content)
+                m_th = THINK_TAG_RE.search(full_txt)
+                if m_th:
+                    turn["thinking"] = (turn["thinking"] + "\n" + m_th.group(1)).strip()
+                    full_txt = THINK_TAG_RE.sub("", full_txt).strip()
+                    turn["reply_en"] = full_txt
 
-        elif etype == "message_update" and turn is not None:
-            ae = ev.get("assistantMessageEvent", {})
-            atype = ae.get("type", "")
-            if atype == "thinking_delta":
-                self.session_state = "THINKING"
-                delta = ae.get("delta", "")
-                turn["thinking"] += delta
-                self.emit_event("stream_delta", {"field": "thinking", "delta": delta})
-            elif atype == "text_delta":
-                self.session_state = "STREAMING"
-                delta = ae.get("delta", "")
-                turn["reply_en"] += delta
-                self.emit_event("stream_delta", {"field": "reply_en", "delta": delta})
-            now = time.monotonic()
-            if now - last_push_ref[0] > 0.28:
-                last_push_ref[0] = now
+                if not tool_map:
+                    break
+
+                # Execute requested Lab tools & continue loop
+                self.session_state = "TOOL_EXEC"
+                asst_tcs = []
+                tool_msgs = []
+                for idx in sorted(tool_map.keys()):
+                    it = tool_map[idx]
+                    tc_id = it["id"] or f"call_{uuid.uuid4().hex[:6]}"
+                    try:
+                        parsed_a = json.loads(it["args"]) if it["args"] else {}
+                    except Exception:
+                        parsed_a = {"raw": it["args"]}
+                    t_rec = {
+                        "id": tc_id,
+                        "name": it["name"] or "tool",
+                        "args": parsed_a,
+                        "output": "",
+                        "status": "running",
+                        "is_error": False,
+                    }
+                    turn["tools"].append(t_rec)
+                    self.broadcast_state()
+
+                    out_str, is_err = self._exec_lab_tool(t_rec["name"], parsed_a if isinstance(parsed_a, dict) else {})
+                    t_rec["output"] = out_str
+                    t_rec["is_error"] = is_err
+                    t_rec["status"] = "error" if is_err else "done"
+
+                    asst_tcs.append(
+                        {
+                            "id": tc_id,
+                            "type": "function",
+                            "function": {"name": t_rec["name"], "arguments": json.dumps(parsed_a)},
+                        }
+                    )
+                    tool_msgs.append({"role": "tool", "tool_call_id": tc_id, "content": out_str})
+
+                api_msgs.append({"role": "assistant", "content": full_txt or None, "tool_calls": asst_tcs})
+                api_msgs.extend(tool_msgs)
                 self.broadcast_state()
 
-        elif etype == "tool_execution_start" and turn is not None:
-            self.session_state = "TOOL_EXEC"
-            turn["tools"].append(
-                {
-                    "id": ev.get("toolCallId", uuid.uuid4().hex[:6]),
-                    "name": ev.get("toolName", "tool"),
-                    "args": ev.get("args", {}),
-                    "output": "",
-                    "status": "running",
-                    "is_error": False,
-                    "started_at": time.time(),
-                    "duration_ms": 0,
-                }
-            )
+            turn["elapsed_s"] = round(time.perf_counter() - t_start, 1)
+            self.session_state = "TRANSLATING_OUT"
             self.broadcast_state()
-
-        elif etype == "tool_execution_end" and turn is not None:
-            tc_id = ev.get("toolCallId")
-            res = ev.get("result", {})
-            txts = [c.get("text", "") for c in res.get("content", []) if isinstance(c, dict)]
-            for tc in turn["tools"]:
-                if tc["id"] == tc_id:
-                    tc["output"] = "\n".join(txts)
-                    tc["is_error"] = bool(ev.get("isError", False))
-                    tc["status"] = "error" if tc["is_error"] else "done"
-                    tc["duration_ms"] = int((time.time() - tc.get("started_at", time.time())) * 1000)
-                    break
-            self.session_state = "STREAMING"
-            self.broadcast_state()
-
-        elif etype == "agent_end":
-            if turn is not None:
-                if not turn["reply_en"].strip():
-                    for m in reversed(ev.get("messages", [])):
-                        if m.get("role") == "assistant":
-                            c = m.get("content", "")
-                            if isinstance(c, list):
-                                turn["reply_en"] = "".join(
-                                    blk.get("text", "") for blk in c if blk.get("type") == "text"
-                                )
-                            elif isinstance(c, str):
-                                turn["reply_en"] = c
-                            break
-
-                turn["elapsed_s"] = round(time.time() - turn["started_ts"], 1)
-                if turn["reply_en"].strip():
-                    self.session_state = "TRANSLATING_OUT"
-                    self.broadcast_state()
-                    self._translate_turn_blocks(turn)
-
-                turn["status"] = "done"
-                sess = self.sessions_by_agent.get(turn["agent"], {}).get(turn["session_id"])
-                if sess:
-                    self._persist_session(sess)
-                self.emit_event("turn_complete", {"turn": turn})
-
-            self.current_turn = None
+            self._translate_turn_fields(turn)
+            turn["status"] = "done"
+        except Exception as exc:
+            turn["reply_en"] = (turn.get("reply_en", "") + f"\n\n[Lab Error: {exc}]").strip()
+            turn["blocks"] = split_markdown_into_blocks(turn["reply_en"])
+            turn["status"] = "error"
+        finally:
+            self._persist_lab_session(sess)
             self.session_state = "IDLE"
             self.broadcast_state()
 
-    def _read_pi_stdout(self) -> None:
-        proc = self.pi_proc
-        if not proc or not proc.stdout:
-            return
-        last_push_ref = [0.0]
-        for raw in iter(proc.stdout.readline, b""):
-            line = raw.decode("utf-8", errors="replace").strip()
-            if not line.startswith("{"):
-                continue
-            try:
-                ev = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            self.ingest_pi_rpc_event(ev, last_push_ref)
-
-    def submit_prompt(
-        self,
-        user_raw: str,
-        prompt_sent: str,
-        source: str = "web",
-        agent_id: str | None = None,
-    ) -> dict:
+    # ---- Unified Prompt Dispatch ----
+    def submit_prompt(self, user_raw: str, prompt_sent: str) -> dict:
         savings = estimate_persian_token_savings(user_raw, prompt_sent)
-        self.pending_saved_tokens = savings["saved"]
 
-        # Priority 1: Live Transparent PTY Wrapper (`cli.py --wrap pi` running real TUI in terminal!)
-        if (time.time() - self.pty_wrapper_seen_ts) < 25.0:
-            self.pending_fa_draft = {
-                "fa": user_raw,
-                "en": prompt_sent,
-                "saved": savings["saved"],
-                "ts": time.time(),
+        # Case 1: Built-in Direct Model & Tool Lab
+        if self.view_kind == "lab":
+            sess = self.lab_sessions.get(self.view_id)
+            if not sess:
+                sess = self.create_lab_session()
+            up = probe_upstream_passive(self.config["tap"]["upstream_url"])
+            if not up["online"]:
+                raise RuntimeError(
+                    f"سرور مدل روی {self.config['tap']['upstream_url']} روشن نیست؛ ابتدا llama-server را اجرا کن."
+                )
+            if len(sess["turns"]) == 0 and user_raw.strip():
+                sess["title"] = user_raw.strip().replace("\n", " ")[:30]
+
+            agent_tag = f"lab-{sess['id'][-4:]}"
+            self.pending_saved_by_agent[agent_tag] = savings["saved"]
+
+            turn = {
+                "id": uuid.uuid4().hex[:8],
+                "agent": agent_tag,
+                "model": up["detected_model"],
+                "source": "lab",
+                "ts": time.strftime("%H:%M:%S"),
+                "user_raw": user_raw,
+                "prompt_sent": prompt_sent,
+                "saved_fa_tokens": savings["saved"],
+                "kv_status": "warm",
+                "thinking": "",
+                "thinking_fa": "",
+                "think_blocks": [],
+                "tools": [],
+                "reply_en": "",
+                "reply_fa": "",
+                "blocks": [],
+                "tr_engine": "",
+                "status": "streaming",
+                "elapsed_s": 0.0,
+                "metrics": {"uncached_in": 0, "cached_in": 0, "out_tok": 0, "tg_tps": 0.0},
             }
-            self.emit_event("pty_inject", {"message": prompt_sent})
-            return {"dispatched": "pty", "saved_tokens": savings["saved"]}
+            sess["turns"].append(turn)
+            self._persist_lab_session(sess)
+            threading.Thread(target=self._run_lab_turn_thread, args=(sess, turn), daemon=True).start()
+            return {"dispatched": "lab", "turn_id": turn["id"]}
 
-        aid = agent_id or self.active_agent
-        self._ensure_agent_bucket(aid)
-        self.active_agent = aid
-        sid = self.active_session_by_agent[aid]
-        sess = self.sessions_by_agent[aid][sid]
-
-        up = probe_upstream_passive(self.config["tap"]["upstream_url"])
-        model_id = up["detected_model"] if up["online"] else "local-model"
-
-        worker_alive = (time.time() - self.sandbox_worker_seen_ts) < 25.0
-        if not worker_alive:
-            ok, msg = self._ensure_pi_sender(model_id)
-            if not ok or not self.pi_proc or not self.pi_proc.stdin:
-                raise RuntimeError(msg)
-
-            if self.pi_session_bound != sid:
-                self.pi_proc.stdin.write((json.dumps({"type": "new_session"}) + "\n").encode("utf-8"))
-                self.pi_proc.stdin.flush()
-                self.pi_session_bound = sid
-
-        if len(sess["turns"]) == 0:
-            short = user_raw.strip().replace("\n", " ")[:28]
-            if short:
-                sess["title"] = short
-
-        turn = {
-            "id": uuid.uuid4().hex[:8],
-            "session_id": sid,
-            "agent": aid,
-            "model": model_id,
-            "source": source,
-            "ts": time.strftime("%H:%M:%S"),
-            "started_ts": time.time(),
-            "user_raw": user_raw,
-            "prompt_sent": prompt_sent,
-            "saved_fa_tokens": savings["saved"],
-            "kv_status": "warm",
-            "thinking": "",
-            "tools": [],
-            "reply_en": "",
-            "reply_fa": "",
-            "blocks": [],
-            "tr_engine": "",
-            "status": "streaming",
-            "elapsed_s": 0.0,
-            "metrics": {"uncached_in": 0, "cached_in": 0, "out_tok": 0, "tg_tps": 0.0},
-        }
-        sess["turns"].append(turn)
-        self.current_turn = turn
-        self._persist_session(sess)
-
-        is_busy = self.session_state in ("THINKING", "TOOL_EXEC", "STREAMING")
-        cmd: dict = {"id": f"req-{turn['id']}", "type": "prompt", "message": prompt_sent}
-        if is_busy:
-            cmd["streamingBehavior"] = "followUp"
-
-        self.emit_event("turn_started", {"turn": turn})
-        if worker_alive:
-            self.session_state = "THINKING"
-            self.emit_event(
-                "worker_prompt",
-                {"turn_id": turn["id"], "message": prompt_sent, "model": model_id},
+        # Case 2: Live Terminal Mirror (`pi`, `pi-2`, ...)
+        target_agent = self.view_id
+        pty_alive = (time.time() - self.pty_heartbeats.get(target_agent, 0.0)) < 25.0
+        if not pty_alive:
+            raise RuntimeError(
+                f"ترمینال زنده برای «{target_agent}» متصل نیست (متن انگلیسی در کلیپ‌بورد کپی شد). برای تایپ خودکار در ترمینال بزن: python3 cli.py --wrap pi"
             )
-        else:
-            self.pi_proc.stdin.write((json.dumps(cmd, ensure_ascii=False) + "\n").encode("utf-8"))
-            self.pi_proc.stdin.flush()
-        self.broadcast_state()
-        return turn
 
-    def abort_agent(self) -> None:
-        if self.pi_proc and self.pi_proc.poll() is None and self.pi_proc.stdin:
-            self.pi_proc.stdin.write((json.dumps({"type": "abort"}) + "\n").encode("utf-8"))
-            self.pi_proc.stdin.flush()
+        self.pending_saved_by_agent[target_agent] = savings["saved"]
+        self.pending_fa_by_agent[target_agent] = {
+            "fa": user_raw,
+            "en": prompt_sent,
+            "saved": savings["saved"],
+            "ts": time.time(),
+        }
+        self.emit_event("pty_inject", {"agent_id": target_agent, "message": prompt_sent})
+        return {"dispatched": "pty", "agent_id": target_agent, "saved_tokens": savings["saved"]}
+
+    def abort_active(self) -> None:
+        self.lab_abort_flag = True
+        if self.view_kind == "mirror":
+            self.emit_event("pty_abort", {"agent_id": self.view_id})
         self.session_state = "IDLE"
         self.broadcast_state()
 
@@ -644,44 +758,44 @@ class BridgeHub:
                 mrow["model"], mrow.get("peak_ctx", 0), "q8_0"
             )
 
-        agent_tree = []
-        for aid, bucket in sorted(self.sessions_by_agent.items()):
-            s_list = sorted(bucket.values(), key=lambda s: s.get("updated_at", 0), reverse=True)
-            agent_tree.append(
+        now = time.time()
+        mirrors_list = []
+        for aid, m in sorted(self.mirrors.items()):
+            mirrors_list.append(
                 {
-                    "id": aid,
-                    "label": aid,
-                    "active_session_id": self.active_session_by_agent.get(aid),
-                    "sessions": [
-                        {
-                            "id": s["id"],
-                            "title": s["title"],
-                            "turn_count": len(s.get("turns", [])),
-                        }
-                        for s in s_list
-                    ],
+                    "agent_id": aid,
+                    "title": m.get("title") or aid,
+                    "turn_count": len(m.get("turns", [])),
+                    "pty_live": (now - self.pty_heartbeats.get(aid, 0.0)) < 25.0,
                 }
             )
 
-        self._ensure_agent_bucket(self.active_agent)
-        act_sid = self.active_session_by_agent[self.active_agent]
-        active_sess = self.sessions_by_agent[self.active_agent][act_sid]
+        lab_list = [
+            {"id": s["id"], "title": s["title"], "turn_count": len(s.get("turns", []))}
+            for s in sorted(self.lab_sessions.values(), key=lambda x: x.get("updated_at", 0), reverse=True)
+        ]
+
+        if self.view_kind == "lab":
+            if self.view_id not in self.lab_sessions:
+                self.view_id = next(iter(self.lab_sessions.keys()))
+            active_conv = self.lab_sessions[self.view_id]
+        else:
+            if self.view_id not in self.mirrors:
+                self.mirrors[self.view_id] = self._new_mirror_obj(self.view_id)
+            active_conv = self.mirrors[self.view_id]
 
         with self._lock:
             insp = list(self._inspector_ring)
-
-        pty_live = (time.time() - self.pty_wrapper_seen_ts) < 25.0
-        worker_live = (time.time() - self.sandbox_worker_seen_ts) < 25.0
 
         return {
             "config": self.config,
             "glossary": self.glossary,
             "session_state": self.session_state,
-            "pty_connected": pty_live,
-            "worker_connected": worker_live,
-            "active_agent": self.active_agent,
-            "active_session": active_sess,
-            "agent_tree": agent_tree,
+            "view_kind": self.view_kind,
+            "view_id": self.view_id,
+            "mirrors": mirrors_list,
+            "lab_sessions": lab_list,
+            "active_conversation": active_conv,
             "upstream": up,
             "translator_online": tr_ok,
             "bridge_port": self.bridge_port,

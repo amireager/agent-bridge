@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Isolated ./.data/ persistence, KV-Cache Hunter SQLite ledger, and retention manager."""
+"""Isolated ./.data/ persistence, Dynamic Multi-Model Cost Matrix & KV-Cache Ledger."""
 
 from __future__ import annotations
 
@@ -13,34 +13,32 @@ from pathlib import Path
 
 CLOUD_PRICING_PROFILES = {
     "claude-sonnet-4.6": {
-        "label": "Claude Sonnet 4.6 ($3 / $0.30 / $15)",
+        "label": "Claude Sonnet 4.6",
+        "rates": "$3 / $0.30 / $15",
         "input_per_m": 3.00,
         "cached_per_m": 0.30,
         "output_per_m": 15.00,
     },
     "claude-opus-4.6": {
-        "label": "Claude Opus 4.6 ($15 / $1.50 / $75)",
+        "label": "Claude Opus 4.6",
+        "rates": "$15 / $1.50 / $75",
         "input_per_m": 15.00,
         "cached_per_m": 1.50,
         "output_per_m": 75.00,
     },
     "gpt-5.4": {
-        "label": "GPT-5.4 ($2.50 / $0.25 / $10)",
+        "label": "OpenAI GPT-5.4",
+        "rates": "$2.50 / $0.25 / $10",
         "input_per_m": 2.50,
         "cached_per_m": 0.25,
         "output_per_m": 10.00,
     },
     "deepseek-v3": {
-        "label": "DeepSeek V3 ($0.27 / $0.07 / $1.10)",
+        "label": "DeepSeek V3.2",
+        "rates": "$0.27 / $0.07 / $1.10",
         "input_per_m": 0.27,
         "cached_per_m": 0.07,
         "output_per_m": 1.10,
-    },
-    "local-zero": {
-        "label": "Local Hardware ($0.00)",
-        "input_per_m": 0.00,
-        "cached_per_m": 0.00,
-        "output_per_m": 0.00,
     },
 }
 
@@ -61,15 +59,15 @@ class DataStore:
     def __init__(self, data_dir: Path) -> None:
         self.data_dir = data_dir.resolve()
         self.sessions_dir = self.data_dir / "sessions"
+        self.mirrors_dir = self.data_dir / "mirrors"
         self.pi_agent_dir = self.data_dir / "pi-agent"
         self.db_path = self.data_dir / "telemetry.sqlite"
         self.config_path = self.data_dir / "config.json"
         self.glossary_path = self.data_dir / "glossary.json"
         self._db_lock = threading.Lock()
 
-        self.data_dir.mkdir(parents=True, exist_ok=True)
-        self.sessions_dir.mkdir(parents=True, exist_ok=True)
-        self.pi_agent_dir.mkdir(parents=True, exist_ok=True)
+        for d in (self.data_dir, self.sessions_dir, self.mirrors_dir, self.pi_agent_dir):
+            d.mkdir(parents=True, exist_ok=True)
 
         gi = self.data_dir / ".gitignore"
         if not gi.exists():
@@ -119,28 +117,29 @@ class DataStore:
         return {
             "ui": {
                 "sidebar_side": "left",
-                "theme": "arena-dark",
-                "chat_mode": "interleaved",  # interleaved (EN+FA per block) | fa_only | en_only
+                "theme": "openwebui-dark",   # openwebui-dark | mocha-dark | zed-dark | lobechat-dark
+                "font_scale": "large",       # normal (14px) | large (15.5px) | xlarge (17px)
+                "chat_mode": "interleaved",  # interleaved | fa_only | en_only
+                "translate_thinking": False,
                 "show_think": True,
                 "show_tools": True,
                 "show_inline_tokens": True,
                 "show_shadow_cost": True,
             },
             "translation": {
-                "enabled": True,             # False = Pure Mid-Path Proxy / KV Hunter Mode!
-                "engine": "builtin-online",  # builtin-online | bergamot | plamo | offline-openai
+                "enabled": True,
+                "engine": "builtin-online",  # builtin-online | custom-offline
                 "proxy": "",
-                "openai_model": "hy-mt2-1.8b",
-                "endpoints": {
-                    "bergamot": "http://127.0.0.1:18092",
-                    "plamo": "http://127.0.0.1:18093",
-                    "openai": "http://127.0.0.1:18093",
-                },
+                "offline_protocol": "openai",  # openai (/v1/chat/completions) | rest (POST /translate)
+                "offline_url": "http://127.0.0.1:18095",
+                "offline_model": "local-translator",
             },
             "tap": {
                 "upstream_url": os.environ.get("LLAMA_UPSTREAM", "http://127.0.0.1:8080"),
                 "pi_bin": detect_pi_binary(),
                 "workdir": str(Path.cwd()),
+                "lab_enable_tools": True,
+                "lab_system_prompt": "You are a sharp, concise coding and systems assistant. Think clearly and write clean code.",
             },
             "pricing": {
                 "active_profile": "claude-sonnet-4.6",
@@ -166,6 +165,8 @@ class DataStore:
             self.save_config(defaults)
         else:
             merged = self._deep_merge(defaults, self.load_config_raw())
+            if merged["pricing"].get("active_profile") not in CLOUD_PRICING_PROFILES:
+                merged["pricing"]["active_profile"] = "claude-sonnet-4.6"
             self.save_config(merged)
 
         if not self.glossary_path.exists():
@@ -216,6 +217,17 @@ class DataStore:
             + (out_tok / 1_000_000.0) * p["output_per_m"]
         )
 
+    def compute_nocache_cost(
+        self, uncached_in: int, cached_in: int, out_tok: int, profile_key: str
+    ) -> float:
+        p = CLOUD_PRICING_PROFILES.get(
+            profile_key, CLOUD_PRICING_PROFILES["claude-sonnet-4.6"]
+        )
+        return (
+            ((uncached_in + cached_in) / 1_000_000.0) * p["input_per_m"]
+            + (out_tok / 1_000_000.0) * p["output_per_m"]
+        )
+
     def record_llm_request(
         self,
         *,
@@ -239,7 +251,6 @@ class DataStore:
         hit_ratio = (cached_input / tot_in) if tot_in > 0 else 0.0
 
         with self._db_lock, sqlite3.connect(self.db_path) as conn:
-            # Cache-Hunter Diagnostic: detect sudden KV eviction / prompt rewrite!
             prev = conn.execute(
                 """
                 SELECT uncached_input, cached_input, ts
@@ -261,12 +272,7 @@ class DataStore:
                 else:
                     kv_status = "cold"
             else:
-                if hit_ratio >= 0.75:
-                    kv_status = "warm"
-                elif hit_ratio >= 0.25:
-                    kv_status = "partial"
-                else:
-                    kv_status = "cold"
+                kv_status = "warm" if hit_ratio >= 0.75 else ("partial" if hit_ratio >= 0.25 else "cold")
 
             conn.execute(
                 """
@@ -311,13 +317,14 @@ class DataStore:
             deleted_reqs = cur.rowcount or 0
 
         deleted_sess = 0
-        for p in self.sessions_dir.rglob("*.json"):
-            try:
-                if p.stat().st_mtime < cutoff:
-                    p.unlink()
-                    deleted_sess += 1
-            except OSError:
-                pass
+        for folder in (self.sessions_dir, self.mirrors_dir):
+            for p in folder.rglob("*.json"):
+                try:
+                    if p.stat().st_mtime < cutoff:
+                        p.unlink()
+                        deleted_sess += 1
+                except OSError:
+                    pass
         return {
             "deleted_requests": deleted_reqs,
             "deleted_sessions": deleted_sess,
@@ -335,6 +342,8 @@ class DataStore:
         model_filter: str = "all",
         agent_filter: str = "all",
     ) -> dict:
+        if pricing_profile not in CLOUD_PRICING_PROFILES:
+            pricing_profile = "claude-sonnet-4.6"
         now = time.time()
         win_since = 0.0 if window_hours <= 0 else (now - window_hours * 3600.0)
 
@@ -354,15 +363,11 @@ class DataStore:
 
             obs_models = [
                 r["model"]
-                for r in conn.execute(
-                    "SELECT DISTINCT model FROM llm_requests ORDER BY model ASC"
-                ).fetchall()
+                for r in conn.execute("SELECT DISTINCT model FROM llm_requests ORDER BY model ASC").fetchall()
             ]
             obs_agents = [
                 r["agent"]
-                for r in conn.execute(
-                    "SELECT DISTINCT agent FROM llm_requests ORDER BY agent ASC"
-                ).fetchall()
+                for r in conn.execute("SELECT DISTINCT agent FROM llm_requests ORDER BY agent ASC").fetchall()
             ]
 
             def agg_since(since_ts: float) -> dict:
@@ -383,9 +388,7 @@ class DataStore:
                     """,
                     [since_ts, *params_extra],
                 ).fetchone()
-                u_in = int(row["u_in"])
-                c_in = int(row["c_in"])
-                out_t = int(row["out_t"])
+                u_in, c_in, out_t = int(row["u_in"]), int(row["c_in"]), int(row["out_t"])
                 tot_in = u_in + c_in
                 return {
                     "requests": int(row["reqs"]),
@@ -400,64 +403,50 @@ class DataStore:
                     "cache_hit_pct": round((c_in / tot_in * 100.0), 1) if tot_in > 0 else 0.0,
                     "avg_decode_tps": round(float(row["avg_tg"]), 1),
                     "avg_prompt_tps": round(float(row["avg_pp"]), 1),
-                    "shadow_cost_usd": round(
-                        self.compute_shadow_cost(u_in, c_in, out_t, pricing_profile), 5
-                    ),
+                    "shadow_cost_usd": round(self.compute_shadow_cost(u_in, c_in, out_t, pricing_profile), 5),
+                    "nocache_cost_usd": round(self.compute_nocache_cost(u_in, c_in, out_t, pricing_profile), 5),
                 }
 
             by_agent_rows = conn.execute(
                 """
-                SELECT
-                    agent,
-                    COUNT(*) AS reqs,
-                    COALESCE(SUM(uncached_input), 0) AS u_in,
-                    COALESCE(SUM(cached_input), 0) AS c_in,
-                    COALESCE(SUM(output_tokens), 0) AS out_t,
-                    COALESCE(SUM(saved_fa_tokens), 0) AS saved_fa,
-                    COALESCE(SUM(CASE WHEN kv_status = 'flush' THEN 1 ELSE 0 END), 0) AS flushes,
-                    COALESCE(AVG(NULLIF(prompt_tps, 0)), 0) AS avg_pp,
-                    COALESCE(AVG(NULLIF(decode_tps, 0)), 0) AS avg_tg
-                FROM llm_requests
-                WHERE ts >= ?
-                GROUP BY agent
-                ORDER BY (u_in + c_in + out_t) DESC
+                SELECT agent, COUNT(*) AS reqs,
+                       COALESCE(SUM(uncached_input), 0) AS u_in,
+                       COALESCE(SUM(cached_input), 0) AS c_in,
+                       COALESCE(SUM(output_tokens), 0) AS out_t,
+                       COALESCE(SUM(saved_fa_tokens), 0) AS saved_fa,
+                       COALESCE(SUM(CASE WHEN kv_status = 'flush' THEN 1 ELSE 0 END), 0) AS flushes,
+                       COALESCE(AVG(NULLIF(prompt_tps, 0)), 0) AS avg_pp,
+                       COALESCE(AVG(NULLIF(decode_tps, 0)), 0) AS avg_tg
+                FROM llm_requests WHERE ts >= ?
+                GROUP BY agent ORDER BY (u_in + c_in + out_t) DESC
                 """,
                 (win_since,),
             ).fetchall()
 
             by_model_rows = conn.execute(
                 """
-                SELECT
-                    model,
-                    COUNT(*) AS reqs,
-                    COALESCE(SUM(uncached_input), 0) AS u_in,
-                    COALESCE(SUM(cached_input), 0) AS c_in,
-                    COALESCE(SUM(output_tokens), 0) AS out_t,
-                    COALESCE(SUM(CASE WHEN kv_status = 'flush' THEN 1 ELSE 0 END), 0) AS flushes,
-                    COALESCE(MAX(uncached_input + cached_input), 0) AS peak_ctx,
-                    COALESCE(AVG(NULLIF(prompt_tps, 0)), 0) AS avg_pp,
-                    COALESCE(AVG(NULLIF(decode_tps, 0)), 0) AS avg_tg
-                FROM llm_requests
-                WHERE ts >= ?
-                GROUP BY model
-                ORDER BY (u_in + c_in + out_t) DESC
+                SELECT model, COUNT(*) AS reqs,
+                       COALESCE(SUM(uncached_input), 0) AS u_in,
+                       COALESCE(SUM(cached_input), 0) AS c_in,
+                       COALESCE(SUM(output_tokens), 0) AS out_t,
+                       COALESCE(SUM(CASE WHEN kv_status = 'flush' THEN 1 ELSE 0 END), 0) AS flushes,
+                       COALESCE(MAX(uncached_input + cached_input), 0) AS peak_ctx,
+                       COALESCE(AVG(NULLIF(prompt_tps, 0)), 0) AS avg_pp,
+                       COALESCE(AVG(NULLIF(decode_tps, 0)), 0) AS avg_tg
+                FROM llm_requests WHERE ts >= ?
+                GROUP BY model ORDER BY (u_in + c_in + out_t) DESC
                 """,
                 (win_since,),
             ).fetchall()
 
             hourly_rows = conn.execute(
                 f"""
-                SELECT
-                    hour_bucket,
-                    COUNT(*) AS reqs,
-                    COALESCE(SUM(uncached_input), 0) AS u_in,
-                    COALESCE(SUM(cached_input), 0) AS c_in,
-                    COALESCE(SUM(output_tokens), 0) AS out_t
-                FROM llm_requests
-                WHERE ts >= ? {extra_sql}
-                GROUP BY hour_bucket
-                ORDER BY hour_bucket ASC
-                LIMIT 24
+                SELECT hour_bucket, COUNT(*) AS reqs,
+                       COALESCE(SUM(uncached_input), 0) AS u_in,
+                       COALESCE(SUM(cached_input), 0) AS c_in,
+                       COALESCE(SUM(output_tokens), 0) AS out_t
+                FROM llm_requests WHERE ts >= ? {extra_sql}
+                GROUP BY hour_bucket ORDER BY hour_bucket ASC LIMIT 24
                 """,
                 [now - 86400.0, *params_extra],
             ).fetchall()
@@ -466,13 +455,33 @@ class DataStore:
                 f"""
                 SELECT id, ts, agent, session_id, model, uncached_input, cached_input,
                        output_tokens, saved_fa_tokens, kv_status, prompt_tps, decode_tps, preview
-                FROM llm_requests
-                WHERE ts >= ? {extra_sql}
-                ORDER BY id DESC
-                LIMIT 40
+                FROM llm_requests WHERE ts >= ? {extra_sql}
+                ORDER BY id DESC LIMIT 45
                 """,
                 [win_since, *params_extra],
             ).fetchall()
+
+        win_summary = agg_since(win_since)
+
+        # Simultaneous Multi-Model Cost Comparison Matrix (recalculated dynamically!)
+        cost_matrix = []
+        for pk, pinfo in CLOUD_PRICING_PROFILES.items():
+            with_kv = self.compute_shadow_cost(
+                win_summary["uncached_input"], win_summary["cached_input"], win_summary["output_tokens"], pk
+            )
+            no_kv = self.compute_nocache_cost(
+                win_summary["uncached_input"], win_summary["cached_input"], win_summary["output_tokens"], pk
+            )
+            cost_matrix.append(
+                {
+                    "id": pk,
+                    "label": pinfo["label"],
+                    "rates": pinfo["rates"],
+                    "cost_usd": round(with_kv, 4),
+                    "nocache_usd": round(no_kv, 4),
+                    "saved_usd": round(max(0.0, no_kv - with_kv), 4),
+                }
+            )
 
         def pack_group(rows: list, key_name: str) -> list[dict]:
             out = []
@@ -493,9 +502,8 @@ class DataStore:
                     "cache_hit_pct": round((c_in / tot_in * 100.0), 1) if tot_in > 0 else 0.0,
                     "avg_prompt_tps": round(float(r["avg_pp"]), 1) if "avg_pp" in rk else 0.0,
                     "avg_decode_tps": round(float(r["avg_tg"]), 1),
-                    "shadow_cost_usd": round(
-                        self.compute_shadow_cost(u_in, c_in, out_t, pricing_profile), 5
-                    ),
+                    "shadow_cost_usd": round(self.compute_shadow_cost(u_in, c_in, out_t, pricing_profile), 4),
+                    "nocache_cost_usd": round(self.compute_nocache_cost(u_in, c_in, out_t, pricing_profile), 4),
                 }
                 if "peak_ctx" in rk:
                     item["peak_ctx"] = int(r["peak_ctx"])
@@ -515,10 +523,9 @@ class DataStore:
 
         recent = []
         for r in recent_rows:
-            u_in = int(r["uncached_input"])
-            c_in = int(r["cached_input"])
-            out_t = int(r["output_tokens"])
+            u_in, c_in, out_t = int(r["uncached_input"]), int(r["cached_input"]), int(r["output_tokens"])
             tot_in = u_in + c_in
+            pct = round((c_in / tot_in * 100.0), 1) if tot_in > 0 else 0.0
             recent.append(
                 {
                     "id": int(r["id"]),
@@ -529,15 +536,14 @@ class DataStore:
                     "uncached_in": u_in,
                     "cached_in": c_in,
                     "total_in": tot_in,
-                    "hit_pct": round((c_in / tot_in * 100.0), 1) if tot_in > 0 else 0.0,
+                    "cache_pct": pct,
                     "out_tok": out_t,
                     "saved_fa": int(r["saved_fa_tokens"]),
                     "kv_status": r["kv_status"],
                     "prompt_tps": round(float(r["prompt_tps"]), 1),
                     "decode_tps": round(float(r["decode_tps"]), 1),
-                    "cost_usd": round(
-                        self.compute_shadow_cost(u_in, c_in, out_t, pricing_profile), 6
-                    ),
+                    "cost_usd": round(self.compute_shadow_cost(u_in, c_in, out_t, pricing_profile), 5),
+                    "nocache_usd": round(self.compute_nocache_cost(u_in, c_in, out_t, pricing_profile), 5),
                     "preview": r["preview"],
                 }
             )
@@ -550,7 +556,8 @@ class DataStore:
             "observed_agents": obs_agents,
             "pricing_profile": pricing_profile,
             "pricing_profiles": CLOUD_PRICING_PROFILES,
-            "window": agg_since(win_since),
+            "cost_matrix": cost_matrix,
+            "window": win_summary,
             "last_1h": agg_since(now - 3600.0),
             "last_24h": agg_since(now - 86400.0),
             "all_time": agg_since(0.0),
@@ -572,5 +579,5 @@ class DataStore:
             "data_dir": str(self.data_dir),
             "total_kib": round(total_bytes / 1024.0, 1),
             "file_count": len(files),
-            "files": files[:40],
+            "files": files[:45],
         }

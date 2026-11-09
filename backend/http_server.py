@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""HTTP/SSE API router, static server, and streaming /v1 conversation & cache-hunter tap."""
+"""HTTP/SSE Router, Clean Ctrl+C Daemon Server, and Streaming /v1 Tap."""
 
 from __future__ import annotations
 
@@ -14,7 +14,7 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 from .agents import BridgeHub
-from .translator import LOOPBACK_OPENER, translate_prose
+from .translator import LOOPBACK_OPENER, test_translator_connection, translate_prose
 
 FRONTEND_DIR = Path(__file__).resolve().parent.parent / "frontend"
 
@@ -25,6 +25,13 @@ MIME_OVERRIDES = {
     ".svg": "image/svg+xml",
     ".json": "application/json; charset=utf-8",
 }
+
+
+class DaemonThreadingHTTPServer(ThreadingHTTPServer):
+    """Daemonized worker threads + reuse_address so Ctrl+C exits in <10ms without tracebacks."""
+
+    daemon_threads = True
+    allow_reuse_address = True
 
 
 def make_handler(hub: BridgeHub):
@@ -99,6 +106,11 @@ def make_handler(hub: BridgeHub):
                 )
                 return self._send_json(res)
 
+            if path == "/api/translate/ping":
+                body = self._read_json()
+                merged_cfg = {**hub.config["translation"], **body}
+                return self._send_json(test_translator_connection(merged_cfg))
+
             if path == "/api/prompt":
                 body = self._read_json()
                 user_raw = body.get("user_raw", "")
@@ -111,81 +123,69 @@ def make_handler(hub: BridgeHub):
                         {
                             "ok": False,
                             "code": "PERSIAN_DETECTED",
-                            "error": "در متن ارسالی عبارات فارسی وجود دارد؛ ابتدا اصلاح کنید یا تیک تایید را بزنید.",
+                            "error": "در متن ارسالی عبارت فارسی وجود دارد؛ اصلاحش کن یا تیک تایید را بزن.",
                         },
                         400,
                     )
                 try:
-                    res = hub.submit_prompt(
-                        user_raw=user_raw or prompt_sent,
-                        prompt_sent=prompt_sent,
-                        source=body.get("source", "web"),
-                        agent_id=body.get("agent_id"),
-                    )
+                    res = hub.submit_prompt(user_raw=user_raw or prompt_sent, prompt_sent=prompt_sent)
                     return self._send_json({"ok": True, "result": res})
                 except Exception as exc:
                     return self._send_json({"ok": False, "error": str(exc)}, 500)
 
             if path == "/api/turn/translate":
                 body = self._read_json()
-                tid = body.get("turn_id", "")
-                sess = hub.sessions_by_agent[hub.active_agent][hub.active_session_by_agent[hub.active_agent]]
-                for t in sess.get("turns", []):
-                    if t["id"] == tid and t.get("reply_en"):
-                        tr = translate_prose(
-                            t["reply_en"],
-                            "fa",
-                            {**hub.config["translation"], "enabled": True},
-                            hub.glossary,
-                        )
-                        t["reply_fa"] = tr.get("translation", "")
-                        t["blocks"] = tr.get("blocks", [])
-                        t["tr_engine"] = tr.get("engine", "")
-                        hub._persist_session(sess)
-                        hub.broadcast_state()
-                        return self._send_json({"ok": True})
-                return self._send_json({"ok": False, "error": "Turn not found"}, 404)
+                ok = hub.retranslate_turn(body.get("turn_id", ""))
+                return self._send_json({"ok": ok})
 
             if path == "/api/abort":
-                hub.abort_agent()
-                hub.emit_event("worker_abort", {})
-                hub.emit_event("pty_abort", {})
+                hub.abort_active()
                 return self._send_json({"ok": True})
+
+            # PTY Registration & Heartbeat
+            if path == "/api/pty/register":
+                body = self._read_json()
+                aid = hub.register_pty(
+                    desired_base=body.get("desired", "pi"),
+                    explicit_name=body.get("explicit", ""),
+                )
+                return self._send_json({"ok": True, "agent_id": aid})
 
             if path == "/api/pty/heartbeat":
-                hub.pty_wrapper_seen_ts = time.time()
-                return self._send_json({"ok": True})
-
-            if path == "/api/worker/heartbeat":
-                hub.sandbox_worker_seen_ts = time.time()
-                return self._send_json({"ok": True})
-
-            if path == "/api/worker/rpc-event":
-                hub.sandbox_worker_seen_ts = time.time()
-                ev = self._read_json()
-                hub.ingest_pi_rpc_event(ev, [0.0])
-                return self._send_json({"ok": True})
-
-            if path == "/api/session/new":
                 body = self._read_json()
-                s = hub.create_session(body.get("agent_id"), body.get("title"))
+                hub.heartbeat_pty(body.get("agent_id", "pi"))
+                return self._send_json({"ok": True})
+
+            if path == "/api/pty/unregister":
+                body = self._read_json()
+                hub.unregister_pty(body.get("agent_id", "pi"))
+                return self._send_json({"ok": True})
+
+            # View & Lab Session Endpoints
+            if path == "/api/view/select":
+                body = self._read_json()
+                hub.select_view(body.get("kind", "mirror"), body.get("id", "pi"))
+                return self._send_json({"ok": True})
+
+            if path == "/api/mirror/clear":
+                body = self._read_json()
+                hub.clear_mirror_view(body.get("agent_id", hub.view_id))
+                return self._send_json({"ok": True})
+
+            if path == "/api/lab/new":
+                body = self._read_json()
+                s = hub.create_lab_session(body.get("title"))
                 return self._send_json({"ok": True, "session": s})
 
-            if path == "/api/session/select":
+            if path == "/api/lab/delete":
                 body = self._read_json()
-                s = hub.select_agent_session(
-                    body.get("agent_id", hub.active_agent),
-                    body.get("session_id"),
-                )
-                return self._send_json({"ok": s is not None, "session": s})
-
-            if path == "/api/session/delete":
-                body = self._read_json()
-                ok = hub.delete_session(
-                    body.get("agent_id", hub.active_agent),
-                    body.get("session_id", ""),
-                )
+                ok = hub.delete_lab_session(body.get("session_id", ""))
                 return self._send_json({"ok": ok})
+
+            if path == "/api/lab/delete-all":
+                for sid in list(hub.lab_sessions):
+                    hub.delete_lab_session(sid)
+                return self._send_json({"ok": True})
 
             if path == "/api/usage/filter":
                 body = self._read_json()
@@ -249,12 +249,16 @@ def make_handler(hub: BridgeHub):
                 )
                 self.wfile.write(f"data: {init_msg}\n\n".encode("utf-8"))
                 self.wfile.flush()
-                while True:
+                while not hub.shutting_down:
                     try:
-                        payload = q.get(timeout=15.0)
+                        payload = q.get(timeout=12.0)
+                        if payload is None or hub.shutting_down:
+                            break
                         self.wfile.write(f"data: {payload}\n\n".encode("utf-8"))
                         self.wfile.flush()
                     except queue.Empty:
+                        if hub.shutting_down:
+                            break
                         self.wfile.write(b": heartbeat\n\n")
                         self.wfile.flush()
             except (BrokenPipeError, ConnectionResetError, OSError):
@@ -288,7 +292,6 @@ def make_handler(hub: BridgeHub):
             return "pi"
 
         def _handle_v1_tap(self, path: str) -> None:
-            """Transparent mid-path wire tap extracting streaming tools, thinking, replies & KV cache."""
             n = int(self.headers.get("Content-Length", "0"))
             raw_req = self.rfile.read(n)
             try:
@@ -387,7 +390,7 @@ def make_handler(hub: BridgeHub):
                                             entry["args_raw"] += fn["arguments"]
                             except Exception:
                                 pass
-                except (BrokenPipeError, ConnectionResetError):
+                except (BrokenPipeError, ConnectionResetError, OSError):
                     pass
                 finally:
                     resp.close()
@@ -406,7 +409,6 @@ def make_handler(hub: BridgeHub):
                             "output": "",
                             "status": "done",
                             "is_error": False,
-                            "duration_ms": 0,
                         }
                     )
             else:
@@ -438,7 +440,6 @@ def make_handler(hub: BridgeHub):
                                     "output": "",
                                     "status": "done",
                                     "is_error": False,
-                                    "duration_ms": 0,
                                 }
                             )
                 except Exception:
@@ -469,12 +470,11 @@ def make_handler(hub: BridgeHub):
             clean_model = Path(model_used).name or model_used
             prof = hub.config["pricing"]["active_profile"]
             cost_usd = hub.store.compute_shadow_cost(uncached_in, cached_in, out_tok, prof)
-            saved_fa = hub.consume_pending_saved_tokens()
+            saved_fa = hub.consume_saved_tokens(agent_name)
 
-            act_sid = hub.active_session_by_agent.get(agent_name, "default")
             kv_status = hub.store.record_llm_request(
                 agent=agent_name,
-                session_id=act_sid,
+                session_id=agent_name,
                 model=clean_model,
                 uncached_input=uncached_in,
                 cached_input=cached_in,
@@ -495,13 +495,6 @@ def make_handler(hub: BridgeHub):
                 "pp_tps": round(p_tps, 1),
                 "tg_tps": round(d_tps, 1),
             }
-            if agent_name == "pi" and hub.current_turn is not None:
-                m = hub.current_turn["metrics"]
-                m["uncached_in"] += uncached_in
-                m["cached_in"] += cached_in
-                m["out_tok"] += out_tok
-                if d_tps > 0:
-                    m["tg_tps"] = round(d_tps, 1)
 
             hub.record_passive_wire_turn(
                 agent_name=agent_name,
@@ -535,6 +528,5 @@ def make_handler(hub: BridgeHub):
     return BridgeHandler
 
 
-def run_http_server(hub: BridgeHub, host: str, port: int) -> None:
-    srv = ThreadingHTTPServer((host, port), make_handler(hub))
-    srv.serve_forever()
+def run_http_server(hub: BridgeHub, host: str, port: int) -> DaemonThreadingHTTPServer:
+    return DaemonThreadingHTTPServer((host, port), make_handler(hub))

@@ -1,31 +1,27 @@
 #!/usr/bin/env python3
 """
-Transparent Interactive PTY Wrapper (`--wrap pi`) + Sandbox RPC Worker (`--pi-worker`).
-
-Recommended Usage Inside Your Sandbox (`box` / `dev agent`):
-    python3 /path/to/agent-bridge/cli.py --wrap pi
-
-What `--wrap pi` does:
-  1) Opens the 100% REAL, full-color interactive `pi` TUI right in your terminal
-     (all slash commands, menus, diffs, and keyboard shortcuts work natively!).
-  2) Automatically routes `pi`'s LLM requests through `http://127.0.0.1:18080/v1`
-     so `agent-bridge` extracts every reply, tool call, KV-cache stat, and
-     paragraph-by-paragraph Persian translation onto the Web UI automatically!
-  3) Listens for verified English prompts from the Web UI and types them straight
-     into your open `pi` TUI (with Bracketed Paste for multi-line prompts) without copy-pasting!
+Transparent Interactive PTY Wrapper (`cli.py --wrap pi`) for Agent Bridge:
+1) Fixes `~/.pi/agent/models.json` bypass: clones your existing `pi` config/auth into a
+   clean runtime dir while guaranteeing `baseUrl` routes through `http://127.0.0.1:18080/v1`!
+2) Multi-Terminal Auto-Naming: open 2 or 3 terminals (`pi`, `pi-2`, `pi-3`) and each gets
+   its own independent live mirror channel + KV slot automatically!
+3) Clean `Ctrl+C` Exit: single `Ctrl+C` interrupts active generation inside `pi`; pressing
+   `Ctrl+C` twice within 1.4s (or `SIGTERM`/`SIGHUP`) kills the entire child process group,
+   restores terminal state, unregisters from Web UI, and exits 0 with ZERO tracebacks!
 """
 
 from __future__ import annotations
 
 import argparse
+import errno
 import fcntl
 import json
 import os
 import pty
 import select
 import shlex
+import shutil
 import signal
-import subprocess
 import sys
 import tempfile
 import termios
@@ -45,16 +41,17 @@ def post_json(base: str, path: str, obj: dict) -> dict:
         headers={"Content-Type": "application/json"},
         method="POST",
     )
-    with LOOPBACK_OPENER.open(req, timeout=20) as r:
+    with LOOPBACK_OPENER.open(req, timeout=8) as r:
         return json.loads(r.read().decode("utf-8"))
 
 
 def get_json(base: str, path: str) -> dict:
-    with LOOPBACK_OPENER.open(base + path, timeout=10) as r:
+    with LOOPBACK_OPENER.open(base + path, timeout=6) as r:
         return json.loads(r.read().decode("utf-8"))
 
 
-def _prepare_pi_bridge_env(base: str, force_isolated: bool = False) -> dict[str, str]:
+def _build_routed_pi_env(base: str, agent_id: str) -> tuple[dict[str, str], Path]:
+    """Clones user ~/.pi/agent settings if present and forces baseUrl -> :18080/v1."""
     env = os.environ.copy()
     for k in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy"):
         env.pop(k, None)
@@ -62,65 +59,131 @@ def _prepare_pi_bridge_env(base: str, force_isolated: bool = False) -> dict[str,
     try:
         st = get_json(base, "/api/state")
         model_id = st.get("upstream", {}).get("detected_model") or "local-model"
+        srv_ctx = int(st.get("upstream", {}).get("server_ctx") or 32768)
     except Exception:
         model_id = "local-model"
+        srv_ctx = 32768
     if model_id == "listening...":
         model_id = "local-model"
 
-    if force_isolated or ("PI_CODING_AGENT_DIR" not in env and not (Path.home() / ".pi/agent/models.json").exists()):
-        tmp_dir = Path(tempfile.mkdtemp(prefix="ab-pty-pi-"))
-        models_json = {
-            "providers": {
-                "agent-bridge": {
-                    "baseUrl": f"{base}/v1",
-                    "api": "openai-completions",
-                    "apiKey": "agent:pi",
-                    "compat": {
-                        "supportsDeveloperRole": False,
-                        "supportsReasoningEffort": False,
-                        "maxTokensField": "max_tokens",
-                    },
-                    "models": [
-                        {
-                            "id": model_id,
-                            "name": model_id,
-                            "reasoning": True,
-                            "input": ["text"],
-                            "contextWindow": 32768,
-                            "maxTokens": 2048,
-                            "cost": {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0},
-                        }
-                    ],
-                }
+    try:
+        data_root = Path(get_json(base, "/api/state").get("storage", {}).get("data_dir", ""))
+    except Exception:
+        data_root = Path(__file__).resolve().parent / ".data"
+    runtime_root = data_root / "pty-runtime"
+    runtime_root.mkdir(parents=True, exist_ok=True)
+    tmp_dir = Path(tempfile.mkdtemp(prefix=f"{agent_id}-", dir=runtime_root))
+    user_pi_dir = Path(env.get("PI_CODING_AGENT_DIR") or (Path.home() / ".pi/agent"))
+
+    # Copy user extensions / sessions / prompts / keybindings if they exist so user keeps their customizations
+    if user_pi_dir.is_dir():
+        for item in user_pi_dir.iterdir():
+            if item.name in ("models.json", "settings.json"):
+                continue
+            dst = tmp_dir / item.name
+            try:
+                if item.is_dir():
+                    os.symlink(item, dst)
+                elif item.is_file():
+                    shutil.copy2(item, dst)
+            except OSError:
+                pass
+
+    models_json = {
+        "providers": {
+            "agent-bridge": {
+                "baseUrl": f"{base}/v1",
+                "api": "openai-completions",
+                "apiKey": f"agent:{agent_id}",
+                "compat": {
+                    "supportsDeveloperRole": False,
+                    "supportsReasoningEffort": False,
+                    "maxTokensField": "max_tokens",
+                },
+                "models": [
+                    {
+                        "id": model_id,
+                        "name": model_id,
+                        "reasoning": True,
+                        "input": ["text"],
+                        "contextWindow": max(16384, srv_ctx),
+                        "maxTokens": 4096,
+                        "cost": {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0},
+                    }
+                ],
             }
         }
-        (tmp_dir / "models.json").write_text(json.dumps(models_json, indent=2), encoding="utf-8")
-        (tmp_dir / "settings.json").write_text(
-            json.dumps({"defaultProvider": "agent-bridge", "defaultModel": model_id}, indent=2),
-            encoding="utf-8",
-        )
-        env["PI_CODING_AGENT_DIR"] = str(tmp_dir)
+    }
 
+    settings_data: dict = {}
+    if (user_pi_dir / "settings.json").is_file():
+        try:
+            settings_data = json.loads((user_pi_dir / "settings.json").read_text(encoding="utf-8"))
+        except Exception:
+            settings_data = {}
+    settings_data["defaultProvider"] = "agent-bridge"
+    settings_data["defaultModel"] = model_id
+
+    (tmp_dir / "models.json").write_text(json.dumps(models_json, indent=2), encoding="utf-8")
+    (tmp_dir / "settings.json").write_text(json.dumps(settings_data, indent=2), encoding="utf-8")
+
+    env["PI_CODING_AGENT_DIR"] = str(tmp_dir)
     env["OPENAI_BASE_URL"] = f"{base}/v1"
-    env.setdefault("OPENAI_API_KEY", "agent:pi")
+    env["OPENAI_API_KEY"] = f"agent:{agent_id}"
     env["PI_OFFLINE"] = "1"
-    return env
+    return env, tmp_dir
 
 
-def run_transparent_pty_wrap(base: str, wrap_cmd: str) -> int:
-    """Spawns the real interactive TUI in a Linux PTY + injects Web UI prompts seamlessly."""
+def _kill_child_group(pid: int) -> None:
+    for sig in (signal.SIGTERM, signal.SIGKILL):
+        try:
+            os.killpg(pid, sig)
+        except ProcessLookupError:
+            return
+        except OSError:
+            try:
+                os.kill(pid, sig)
+            except OSError:
+                return
+        for _ in range(8):
+            try:
+                wpid, _ = os.waitpid(pid, os.WNOHANG)
+                if wpid == pid:
+                    return
+            except ChildProcessError:
+                return
+            time.sleep(0.04)
+
+
+def run_transparent_pty_wrap(base: str, wrap_cmd: str, explicit_name: str = "") -> int:
     cmd_list = shlex.split(wrap_cmd)
-    child_env = _prepare_pi_bridge_env(base, force_isolated=False)
+    desired_base = Path(cmd_list[0]).name if cmd_list else "pi"
+
+    try:
+        reg = post_json(base, "/api/pty/register", {"desired": desired_base, "explicit": explicit_name})
+        agent_id = reg.get("agent_id", explicit_name or desired_base)
+    except Exception:
+        agent_id = explicit_name or desired_base
+
+    child_env, tmp_dir = _build_routed_pi_env(base, agent_id)
+    print(
+        f"[agent-bridge] Linked as '{agent_id}' -> {base}/v1  (Press Ctrl+C twice quickly to force-quit)\r",
+        flush=True,
+    )
 
     pid, master_fd = pty.fork()
     if pid == 0:
-        os.execvpe(cmd_list[0], cmd_list, child_env)
+        try:
+            os.execvpe(cmd_list[0], cmd_list, child_env)
+        except Exception as exc:
+            sys.stderr.write(f"Failed to launch {cmd_list[0]}: {exc}\n")
         os._exit(1)
 
     def sync_winsize(*_args) -> None:
         try:
-            packed = fcntl.ioctl(sys.stdin.fileno(), termios.TIOCGWINSZ, b"\x00" * 8)
-            fcntl.ioctl(master_fd, termios.TIOCSWINSZ, packed)
+            if sys.stdin.isatty():
+                packed = fcntl.ioctl(sys.stdin.fileno(), termios.TIOCGWINSZ, b"\x00" * 8)
+                fcntl.ioctl(master_fd, termios.TIOCSWINSZ, packed)
         except OSError:
             pass
 
@@ -129,13 +192,21 @@ def run_transparent_pty_wrap(base: str, wrap_cmd: str) -> int:
 
     alive = True
 
+    def _force_terminate(*_args) -> None:
+        nonlocal alive
+        alive = False
+        _kill_child_group(pid)
+
+    signal.signal(signal.SIGTERM, _force_terminate)
+    signal.signal(signal.SIGHUP, _force_terminate)
+
     def heartbeat_loop() -> None:
         while alive:
             try:
-                post_json(base, "/api/pty/heartbeat", {})
+                post_json(base, "/api/pty/heartbeat", {"agent_id": agent_id})
             except Exception:
                 pass
-            time.sleep(8.0)
+            time.sleep(7.0)
 
     def sse_inject_loop() -> None:
         while alive:
@@ -148,7 +219,7 @@ def run_transparent_pty_wrap(base: str, wrap_cmd: str) -> int:
                         if not ls.startswith("data:"):
                             continue
                         ev = json.loads(ls[5:].strip())
-                        if ev.get("kind") == "pty_inject":
+                        if ev.get("kind") == "pty_inject" and ev.get("agent_id") == agent_id:
                             msg = ev.get("message", "").strip()
                             if msg:
                                 if "\n" in msg:
@@ -157,124 +228,95 @@ def run_transparent_pty_wrap(base: str, wrap_cmd: str) -> int:
                                     os.write(master_fd, b"\r")
                                 else:
                                     os.write(master_fd, (msg + "\r").encode("utf-8"))
-                        elif ev.get("kind") == "pty_abort":
+                        elif ev.get("kind") == "pty_abort" and ev.get("agent_id") == agent_id:
                             os.write(master_fd, b"\x03")
             except Exception:
-                time.sleep(2.0)
+                time.sleep(1.8)
 
     threading.Thread(target=heartbeat_loop, daemon=True).start()
     threading.Thread(target=sse_inject_loop, daemon=True).start()
 
     old_tty = None
-    if sys.stdin.isatty():
+    is_tty = sys.stdin.isatty()
+    if is_tty:
         old_tty = termios.tcgetattr(sys.stdin.fileno())
         tty.setraw(sys.stdin.fileno())
 
+    last_ctrl_c_ts = 0.0
+
     try:
-        while True:
-            rlist, _, _ = select.select([sys.stdin.fileno(), master_fd], [], [], 0.5)
+        while alive:
+            try:
+                rlist, _, _ = select.select([sys.stdin.fileno(), master_fd], [], [], 0.3)
+            except InterruptedError:
+                continue
+            except (ValueError, OSError):
+                break
+
             if sys.stdin.fileno() in rlist:
-                data = os.read(sys.stdin.fileno(), 4096)
+                try:
+                    data = os.read(sys.stdin.fileno(), 4096)
+                except OSError:
+                    break
                 if not data:
                     break
-                os.write(master_fd, data)
+                # Double Ctrl+C within 1.4s -> immediate clean exit & kill child process group!
+                if b"\x03" in data:
+                    now = time.monotonic()
+                    if (now - last_ctrl_c_ts) < 1.4:
+                        alive = False
+                        _kill_child_group(pid)
+                        break
+                    last_ctrl_c_ts = now
+                try:
+                    os.write(master_fd, data)
+                except OSError:
+                    break
+
             if master_fd in rlist:
                 try:
                     out = os.read(master_fd, 8192)
                     if not out:
                         break
                     os.write(sys.stdout.fileno(), out)
-                except OSError:
+                except OSError as e:
+                    if e.errno in (errno.EIO, errno.EBADF):
+                        break
                     break
+    except KeyboardInterrupt:
+        pass
     finally:
         alive = False
         if old_tty is not None:
-            termios.tcsetattr(sys.stdin.fileno(), termios.TCSADRAIN, old_tty)
+            try:
+                termios.tcsetattr(sys.stdin.fileno(), termios.TCSADRAIN, old_tty)
+            except OSError:
+                pass
+        _kill_child_group(pid)
         try:
             os.close(master_fd)
         except OSError:
             pass
-        _, status = os.waitpid(pid, 0)
-        return os.waitstatus_to_exitcode(status)
-
-
-def run_headless_pi_worker(base: str, pi_cmd: str = "pi") -> int:
-    """Headless RPC worker mode (kept for backward compatibility)."""
-    env = _prepare_pi_bridge_env(base, force_isolated=True)
-    sess_dir = Path(env["PI_CODING_AGENT_DIR"]) / "sessions"
-    sess_dir.mkdir(parents=True, exist_ok=True)
-    proc = subprocess.Popen(
-        [*shlex.split(pi_cmd), "--mode", "rpc", "--session-dir", str(sess_dir)],
-        env=env,
-        stdin=subprocess.PIPE,
-        stdout=subprocess.PIPE,
-        stderr=sys.stderr,
-        bufsize=0,
-    )
-    print(f"[agent-bridge] Headless pi RPC worker connected to {base} (cwd={os.getcwd()})", flush=True)
-
-    def read_stdout() -> None:
-        assert proc.stdout is not None
-        for raw in iter(proc.stdout.readline, b""):
-            ln = raw.decode("utf-8", errors="replace").strip()
-            if ln.startswith("{"):
-                try:
-                    post_json(base, "/api/worker/rpc-event", json.loads(ln))
-                except Exception:
-                    pass
-
-    def hb_loop() -> None:
-        while proc.poll() is None:
-            try:
-                post_json(base, "/api/worker/heartbeat", {})
-            except Exception:
-                pass
-            time.sleep(8.0)
-
-    threading.Thread(target=read_stdout, daemon=True).start()
-    threading.Thread(target=hb_loop, daemon=True).start()
-
-    while proc.poll() is None:
         try:
-            with LOOPBACK_OPENER.open(base + "/api/events", timeout=86400) as resp:
-                for raw in resp:
-                    ls = raw.decode("utf-8", errors="replace").strip()
-                    if not ls.startswith("data:") or not proc.stdin:
-                        continue
-                    ev = json.loads(ls[5:].strip())
-                    if ev.get("kind") == "worker_prompt":
-                        cmd = {"type": "prompt", "message": ev.get("message", "")}
-                        proc.stdin.write((json.dumps(cmd, ensure_ascii=False) + "\n").encode("utf-8"))
-                        proc.stdin.flush()
-                    elif ev.get("kind") == "worker_abort":
-                        proc.stdin.write(b'{"type":"abort"}\n')
-                        proc.stdin.flush()
-        except KeyboardInterrupt:
-            proc.terminate()
-            break
+            post_json(base, "/api/pty/unregister", {"agent_id": agent_id})
         except Exception:
-            time.sleep(2.0)
-    return proc.returncode or 0
+            pass
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+        sys.stdout.write(f"\r\n[agent-bridge] '{agent_id}' closed cleanly.\r\n")
+        sys.stdout.flush()
+    return 0
 
 
 def main() -> None:
-    ap = argparse.ArgumentParser(description="Transparent PTY Wrapper (`--wrap pi`) & Sandbox Bridge")
+    ap = argparse.ArgumentParser(description="Transparent PTY Wrapper (`--wrap pi`) for Agent Bridge")
     ap.add_argument("--url", default="http://127.0.0.1:18080", help="Agent Bridge URL")
-    ap.add_argument(
-        "--wrap",
-        default="pi",
-        help="Interactive TUI command to run inside PTY (default: 'pi')",
-    )
-    ap.add_argument(
-        "--pi-worker",
-        action="store_true",
-        help="Run headless `pi --mode rpc` worker instead of interactive TUI",
-    )
+    ap.add_argument("--wrap", default="pi", help="Interactive TUI command to wrap (default: 'pi')")
+    ap.add_argument("--name", default="", help="Optional custom channel name (auto-assigns pi, pi-2, ... if omitted)")
     args = ap.parse_args()
-    base = args.url.rstrip("/")
-    if args.pi_worker:
-        sys.exit(run_headless_pi_worker(base, args.wrap))
-    sys.exit(run_transparent_pty_wrap(base, args.wrap))
+    try:
+        sys.exit(run_transparent_pty_wrap(args.url.rstrip("/"), args.wrap, args.name.strip()))
+    except KeyboardInterrupt:
+        sys.exit(0)
 
 
 if __name__ == "__main__":

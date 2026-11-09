@@ -1,4 +1,4 @@
-/* Arena.ai-Inspired Chat Layout — Guaranteed Vertical Scroll + Interleaved Prose + Floating Composer */
+/* Open-WebUI Inspired Chat Stream — Collapsible Messages, Translated Think & Color-Coded Tools */
 .chat-root {
   flex: 1 1 0%;
   min-height: 0;
@@ -10,188 +10,229 @@
 }
 
 .chat-subbar {
-  padding: 8px 20px;
-  background: rgba(15, 17, 23, 0.78);
+  padding: 8px 22px;
+  background: rgba(17, 19, 24, 0.85);
   border-bottom: 1px solid var(--line);
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 10px;
   flex-wrap: wrap;
-  font-size: 11.8px;
+  font-size: 12.5px;
   color: var(--fg-2);
   flex-shrink: 0;
 }
 
-/* Scrollable Feed — Block Flow Inside Flex Child Prevents Flex Item Squishing 100% */
 .chat-feed {
   flex: 1 1 0%;
   min-height: 0;
   overflow-y: auto;
   overflow-x: hidden;
   display: block;
-  padding: 24px 20px 32px;
+  padding: 26px 22px 36px;
   overscroll-behavior: contain;
 }
 
 .chat-feed-inner {
-  max-width: 880px;
+  max-width: 900px;
   width: 100%;
   margin: 0 auto;
   display: block;
 }
 
 .turn-card {
-  margin-bottom: 24px;
+  margin-bottom: 28px;
+  padding-bottom: 22px;
+  border-bottom: 1px solid var(--line);
   display: block;
 }
 .turn-card:last-child {
-  margin-bottom: 6px;
+  border-bottom: none;
+  margin-bottom: 8px;
 }
 
-/* User Prompt Bubble (Soft Arena Pill Card) */
+/* Folded (Collapsed) Message Bar — 1-Click Clean Reading Fold */
+.turn-folded-bar {
+  background: var(--bg-1);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  padding: 10px 16px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  cursor: pointer;
+  direction: rtl;
+  transition: border-color 0.14s ease, background 0.14s ease;
+}
+.turn-folded-bar:hover {
+  border-color: var(--line-strong);
+  background: var(--bg-2);
+}
+
+/* Open-WebUI Soft User Pill */
 .user-bubble-row {
   display: flex;
   justify-content: flex-end;
-  margin-bottom: 12px;
+  margin-bottom: 14px;
 }
 .user-bubble {
   max-width: 86%;
   background: var(--bg-2);
   border: 1px solid var(--line-strong);
-  border-radius: 16px 16px 4px 16px;
-  padding: 11px 16px;
+  border-radius: 20px 20px 5px 20px;
+  padding: 12px 18px;
   direction: rtl;
   text-align: right;
-  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.16);
 }
 .user-bubble-meta {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 10px;
-  margin-top: 6px;
-  padding-top: 5px;
+  margin-top: 7px;
+  padding-top: 6px;
   border-top: 1px solid var(--line);
   font-family: var(--mono);
-  font-size: 10.5px;
+  font-size: 11px;
   color: var(--fg-2);
   direction: ltr;
 }
 
-/* Assistant Response Card */
-.assistant-card {
-  background: var(--bg-1);
-  border: 1px solid var(--line);
-  border-radius: var(--radius-lg);
-  box-shadow: var(--shadow-soft);
-  overflow: visible;
+/* Each assistant turn can be folded independently for clean long-chat reading */
+details.assistant-fold { display:block; }
+details.assistant-fold > summary { list-style:none; cursor:pointer; }
+details.assistant-fold > summary::-webkit-details-marker { display:none; }
+.assistant-fold-head { display:flex; justify-content:space-between; align-items:center; gap:10px; padding:7px 4px; color:var(--fg-2); font-size:12px; }
+.assistant-fold[open] > .assistant-stream { padding-top:9px; }
+
+/* Open-WebUI Borderless Assistant Stream */
+.assistant-stream {
+  padding: 4px 2px;
+  display: flex;
+  flex-direction: column;
+  gap: 13px;
 }
 
-.turn-head {
-  padding: 9px 16px;
-  background: rgba(255, 255, 255, 0.02);
-  border-bottom: 1px solid var(--line);
-  border-radius: var(--radius-lg) var(--radius-lg) 0 0;
+.turn-meta-bar {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 10px;
   flex-wrap: wrap;
   font-family: var(--mono);
-  font-size: 11.2px;
+  font-size: 12px;
   color: var(--fg-2);
+  direction: ltr;
 }
 
-.src-badge {
-  padding: 1px 7px;
-  border-radius: 999px;
-  background: rgba(255, 255, 255, 0.06);
-  color: var(--fg-0);
-  font-size: 10px;
-}
-.src-badge.cli {
-  color: var(--cyan);
-  background: var(--cyan-dim);
-}
-
-.assistant-body {
-  padding: 16px 20px 18px;
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
-}
-
-/* Soft Collapsible Thinking & Tool Pills */
-details.trace-acc {
-  border: 1px solid var(--line);
-  border-radius: 10px;
-  background: rgba(15, 17, 23, 0.55);
+/* Bilingual Collapsible `<think>` Drawer */
+details.think-drawer {
+  border: 1px solid rgba(167, 139, 250, 0.25);
+  border-radius: var(--radius-md);
+  background: rgba(167, 139, 250, 0.05);
   overflow: hidden;
 }
-details.trace-acc > summary {
-  padding: 7px 12px;
+details.think-drawer > summary {
+  padding: 8px 14px;
   cursor: pointer;
   list-style: none;
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 8px;
-  font-family: var(--mono);
-  font-size: 11.5px;
-  color: var(--fg-1);
+  gap: 10px;
+  font-size: 13px;
+  color: var(--violet);
+  font-weight: 600;
+  direction: rtl;
   user-select: none;
-  transition: background 0.14s ease;
 }
-details.trace-acc > summary::-webkit-details-marker { display: none; }
-details.trace-acc > summary:hover {
-  color: var(--fg-0);
-  background: rgba(255, 255, 255, 0.035);
-}
-details.trace-acc[open] > summary {
-  border-bottom: 1px solid var(--line);
+details.think-drawer > summary::-webkit-details-marker { display: none; }
+details.think-drawer[open] > summary { border-bottom: 1px solid rgba(167, 139, 250, 0.2); }
+.think-body {
+  padding: 13px 16px;
+  max-height: 360px;
+  overflow-y: auto;
 }
 
-.acc-tag {
-  padding: 1px 7px;
-  border-radius: 999px;
-  font-size: 10px;
-  background: rgba(255, 255, 255, 0.06);
+/* Color-Coded Categorized Tool Cards (Shell = Amber, File Read = Cyan, Edit/Write = Emerald) */
+details.tool-pill {
+  border: 1px solid var(--line);
+  border-radius: 11px;
+  background: var(--bg-1);
+  overflow: hidden;
 }
-.acc-tag.ok { color: var(--phosphor); background: var(--phosphor-dim); }
-.acc-tag.run { color: var(--amber); background: var(--amber-dim); }
-.acc-tag.err { color: var(--red); background: var(--red-dim); }
+details.tool-pill.kind-shell { border-left: 3.5px solid var(--amber); }
+details.tool-pill.kind-read { border-left: 3.5px solid var(--cyan); }
+details.tool-pill.kind-edit { border-left: 3.5px solid var(--phosphor); }
+details.tool-pill.kind-other { border-left: 3.5px solid var(--violet); }
+
+details.tool-pill > summary {
+  padding: 8px 14px;
+  cursor: pointer;
+  list-style: none;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  font-family: var(--mono);
+  font-size: 12.4px;
+  direction: ltr;
+  user-select: none;
+}
+details.tool-pill > summary::-webkit-details-marker { display: none; }
+details.tool-pill > summary:hover { background: rgba(255, 255, 255, 0.035); }
+details.tool-pill[open] > summary { border-bottom: 1px solid var(--line); }
+
+.tool-badge {
+  padding: 1.5px 8px;
+  border-radius: 6px;
+  font-weight: 700;
+  font-size: 11px;
+  flex-shrink: 0;
+}
+.kind-shell .tool-badge { color: var(--amber); background: var(--amber-dim); }
+.kind-read .tool-badge { color: var(--cyan); background: var(--cyan-dim); }
+.kind-edit .tool-badge { color: var(--phosphor); background: var(--phosphor-dim); }
+.kind-other .tool-badge { color: var(--violet); background: var(--violet-dim); }
+
+.tool-cmd-preview {
+  color: var(--fg-0);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 1;
+  text-align: left;
+}
 
 .acc-body {
-  padding: 11px 14px;
+  padding: 12px 15px;
   font-family: var(--mono);
-  font-size: 11.8px;
-  line-height: 1.6;
+  font-size: 12.5px;
+  line-height: 1.62;
   color: var(--fg-1);
   white-space: pre-wrap;
-  max-height: 280px;
+  max-height: 300px;
   overflow-y: auto;
   direction: ltr;
   text-align: left;
+  background: #0b0d12;
 }
 
 .turn-foot-actions {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding-top: 8px;
-  margin-top: 4px;
-  border-top: 1px solid var(--line);
+  padding-top: 6px;
   font-family: var(--mono);
-  font-size: 10.8px;
+  font-size: 11.5px;
   color: var(--fg-2);
   direction: ltr;
 }
 
-/* Floating Jump-to-Bottom Button */
 .jump-bottom-btn {
   position: absolute;
-  bottom: 112px;
+  bottom: 116px;
   left: 50%;
   transform: translateX(-50%);
   z-index: 20;
@@ -199,49 +240,45 @@ details.trace-acc[open] > summary {
   color: var(--fg-0);
   border: 1px solid var(--line-strong);
   border-radius: 999px;
-  padding: 6px 15px;
-  font-size: 12px;
+  padding: 7px 16px;
+  font-size: 12.8px;
   font-family: var(--sans);
   cursor: pointer;
   box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
   display: none;
-  align-items: center;
-  gap: 6px;
 }
-.jump-bottom-btn.show {
-  display: inline-flex;
-}
+.jump-bottom-btn.show { display: inline-flex; }
 
-/* Arena-Smooth Centered Composer Dock */
+/* Open-WebUI Floating Capsule Composer */
 .chat-composer-dock {
   flex-shrink: 0;
-  padding: 10px 20px 16px;
-  background: linear-gradient(180deg, rgba(15, 17, 23, 0) 0%, var(--bg-0) 24%);
+  padding: 10px 22px 18px;
+  background: linear-gradient(180deg, rgba(17, 19, 24, 0) 0%, var(--bg-0) 26%);
 }
 .chat-composer {
-  max-width: 880px;
+  max-width: 900px;
   margin: 0 auto;
   background: var(--bg-1);
   border: 1px solid var(--line-strong);
-  border-radius: var(--radius-lg);
-  padding: 11px 14px;
+  border-radius: 22px;
+  padding: 12px 16px;
   box-shadow: var(--shadow-soft);
   display: flex;
   flex-direction: column;
-  gap: 9px;
+  gap: 10px;
 }
 
 .tr-chat-bubble {
   display: none;
   border: 1px solid var(--line-strong);
-  border-radius: var(--radius-md);
+  border-radius: 14px;
   background: var(--bg-0);
   overflow: hidden;
 }
 .tr-chat-bubble.open { display: block; }
 
 .tr-bubble-head {
-  padding: 7px 12px;
+  padding: 8px 14px;
   background: var(--bg-2);
   border-bottom: 1px solid var(--line);
   display: flex;
@@ -249,91 +286,63 @@ details.trace-acc[open] > summary {
   justify-content: space-between;
   gap: 8px;
   flex-wrap: wrap;
-  font-size: 12px;
+  font-size: 13px;
   direction: rtl;
 }
 
 .tr-editor {
   width: 100%;
-  min-height: 64px;
-  max-height: 180px;
-  padding: 10px 13px;
+  min-height: 66px;
+  max-height: 185px;
+  padding: 11px 14px;
   background: transparent;
   color: var(--fg-0);
   border: none;
   outline: none;
   font-family: var(--mono);
-  font-size: 12.6px;
-  line-height: 1.6;
+  font-size: 13.6px;
+  line-height: 1.62;
   direction: ltr;
   text-align: left;
   resize: vertical;
 }
 
-.tr-md-preview {
-  display: none;
-  padding: 10px 13px;
-  direction: ltr;
-  text-align: left;
-  border-top: 1px dashed var(--line);
-  background: var(--bg-1);
-}
-.tr-md-preview.open { display: block; }
-
 .stale-notice {
   display: none;
-  padding: 6px 12px;
+  padding: 7px 14px;
   background: var(--amber-dim);
   border-top: 1px solid rgba(251, 191, 36, 0.35);
   color: var(--amber);
-  font-size: 11.8px;
+  font-size: 12.5px;
   direction: rtl;
 }
 .stale-notice.show { display: flex; justify-content: space-between; align-items: center; }
 
 .persian-guard {
   display: none;
-  padding: 8px 13px;
+  padding: 9px 14px;
   background: var(--red-dim);
   border-top: 1px solid rgba(248, 113, 113, 0.4);
   color: #fecaca;
-  font-size: 12.2px;
+  font-size: 13px;
   direction: rtl;
   flex-direction: column;
   gap: 6px;
 }
 .persian-guard.show { display: flex; }
-.persian-guard.shake { animation: guardFlash 0.28s ease 2; }
-@keyframes guardFlash {
-  0%, 100% { background: var(--red-dim); }
-  50% { background: rgba(248, 113, 113, 0.28); }
-}
 
-.guard-check-lbl {
-  display: inline-flex;
-  align-items: center;
-  gap: 7px;
-  cursor: pointer;
-  color: var(--fg-0);
-  font-weight: 600;
-}
-
-.composer-bar {
-  display: flex;
-  gap: 9px;
-  align-items: flex-end;
-}
+.composer-bar { display: flex; gap: 10px; align-items: flex-end; }
 .composer-raw {
   flex: 1;
   min-height: 44px;
-  max-height: 150px;
+  max-height: 160px;
   background: transparent;
   color: var(--fg-0);
   border: none;
   padding: 6px 8px;
   font-family: var(--sans);
-  font-size: 13.8px;
-  line-height: 1.65;
+  font-size: var(--prose-fs);
+  line-height: 1.68;
   direction: rtl;
   resize: vertical;
   outline: none;

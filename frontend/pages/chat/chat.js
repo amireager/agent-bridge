@@ -372,8 +372,8 @@ window.ABChatPage = (() => {
 
     const feed = document.getElementById('chatFeed');
     const feedInner = document.getElementById('chatFeedInner');
-    const sessId = state.active_session?.id || '';
-    const turns = state.active_session?.turns || [];
+    const sessId = `${state.view_kind || 'mirror'}:${state.view_id || ''}`;
+    const turns = state.active_conversation?.turns || [];
 
     // Capture open <details> IDs & scroll position BEFORE updating DOM
     const prevScrollTop = feed.scrollTop;
@@ -424,12 +424,9 @@ window.ABChatPage = (() => {
       const thinkId = `${t.id}-think`;
       const autoOpenThink = (t.status === 'streaming' && !t.reply_en) || openDetailsIds.has(thinkId);
       const thinkAcc = (ui.show_think && t.thinking) ? `
-        <details class="trace-acc" data-acc-id="${esc(thinkId)}" ${autoOpenThink ? 'open' : ''}>
-          <summary>
-            <span>Reasoning / Think</span>
-            <span class="acc-tag">${t.thinking.length} ch</span>
-          </summary>
-          <div class="acc-body">${esc(t.thinking)}</div>
+        <details class="think-drawer" data-acc-id="${esc(thinkId)}" ${autoOpenThink ? 'open' : ''}>
+          <summary><span>تفکر مدل · Think</span><span>${t.thinking.length} chars · باز/بسته</span></summary>
+          <div class="think-body">${window.ABMarkdown.renderBlocks(t.think_blocks || [], t.thinking, t.thinking_fa || '', chatMode)}</div>
         </details>` : '';
 
       const toolsAcc = ui.show_tools ? (t.tools || []).map((tl, tIdx) => {
@@ -437,12 +434,11 @@ window.ABChatPage = (() => {
         const stTxt = tl.status === 'running' ? 'RUN' : (tl.is_error ? 'ERR' : 'OK');
         const detId = `${t.id}-tool-${tIdx}`;
         const isOpen = tl.status === 'running' || openDetailsIds.has(detId);
+        const toolName = String(tl.name || 'tool');
+        const kind = /shell|bash|terminal|exec/i.test(toolName) ? 'shell' : (/read|list|search/i.test(toolName) ? 'read' : (/edit|write|patch/i.test(toolName) ? 'edit' : 'other'));
         return `
-          <details class="trace-acc" data-acc-id="${esc(detId)}" ${isOpen ? 'open' : ''}>
-            <summary>
-              <span>Tool · <strong>${esc(tl.name)}</strong> · <span class="muted">${esc(summarizeToolArgs(tl))}</span></span>
-              <span class="acc-tag ${cls}">${stTxt}</span>
-            </summary>
+          <details class="tool-pill kind-${kind}" data-acc-id="${esc(detId)}" ${isOpen ? 'open' : ''}>
+            <summary><span class="tool-badge">${esc(toolName)}</span><span class="tool-cmd-preview">${esc(summarizeToolArgs(tl))}</span><span class="tiny-tag">${stTxt}</span></summary>
             <div class="acc-body">${esc(formatToolBody(tl))}</div>
           </details>`;
       }).join('') : '';
@@ -470,29 +466,16 @@ window.ABChatPage = (() => {
               </div>
             </div>` : ''}
 
-          <div class="assistant-card">
-            <div class="turn-head">
-              <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
-                <strong style="color:var(--fg-0)">${esc(t.agent)}</strong>
-                ${t.model ? `<span>· ${esc(t.model)}</span>` : ''}
-                <span class="kv-pill ${esc(kvState)}">${esc(kvLabel)}</span>
-              </div>
-              <span>${esc(tokStr)}</span>
-            </div>
-
-            <div class="assistant-body">
+          <details class="assistant-fold" data-acc-id="${esc(t.id)}-message" open>
+            <summary class="assistant-fold-head"><span>پاسخ ${esc(t.model || t.agent || 'مدل')} · ${esc(tokStr)}</span><span class="kv-pill ${esc(kvState)}">${esc(kvLabel)} · باز/بسته</span></summary>
+            <div class="assistant-stream">
+              <div class="turn-meta-bar"><strong>${esc(t.agent)}</strong><span>${esc(t.model || '')}</span></div>
               ${thinkAcc}
               ${toolsAcc}
               ${bodyContent}
-              ${t.reply_en ? `
-                <div class="turn-foot-actions">
-                  <span>engine: ${esc(t.tr_engine || (trEnabled ? 'online' : 'proxy-only'))}</span>
-                  <div style="display:flex;gap:6px;">
-                    <button class="btn ghost" style="padding:2px 8px;font-size:10.5px;" onclick="ABChatPage.retranslate('${esc(t.id)}')">ترجمه مجدد این پاسخ ↻</button>
-                  </div>
-                </div>` : ''}
+              ${t.reply_en ? `<div class="turn-foot-actions"><span>engine: ${esc(t.tr_engine || (trEnabled ? 'online' : 'proxy-only'))}</span><button class="btn ghost" onclick="ABChatPage.retranslate('${esc(t.id)}')">ترجمه مجدد ↻</button></div>` : ''}
             </div>
-          </div>
+          </details>
         </article>`;
     }).join('');
 

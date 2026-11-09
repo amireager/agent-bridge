@@ -1,297 +1,94 @@
-// Arena-Smooth Settings — Built-in Online + Offline APIs, Pure Proxy Mode, Interleaved View & PTY Guide
+// Lean OS-style settings: conditional Online Proxy / user-owned Offline endpoint, local-only model connection.
 window.ABSettingsPage = (() => {
   const { esc, api } = window.ABUtils;
+  const $ = id => document.getElementById(id);
+  const cfg = () => window.ABApp.getState().config;
 
   async function saveTranslation() {
-    await api('/api/config', {
-      translation: {
-        enabled: document.getElementById('sTrEnabled').value === 'true',
-        engine: document.getElementById('sTrEngine').value,
-        proxy: document.getElementById('sTrProxy').value.trim(),
-        openai_model: document.getElementById('sOpenaiModel').value.trim(),
-        endpoints: {
-          bergamot: document.getElementById('sEpBerg').value.trim(),
-          plamo: document.getElementById('sEpPlamo').value.trim(),
-          openai: document.getElementById('sEpOpenai').value.trim()
-        }
-      }
+    const isOnline = $('sEngine').value === 'builtin-online';
+    await api('/api/config', { translation: {
+      enabled: $('sEnabled').checked,
+      engine: isOnline ? 'builtin-online' : 'custom-offline',
+      proxy: isOnline ? $('sProxy').value.trim() : '',
+      offline_protocol: $('sProtocol').value,
+      offline_url: $('sOfflineUrl').value.trim(),
+      offline_model: $('sOfflineModel').value.trim()
+    }});
+  }
+
+  async function testConnection() {
+    const out = $('sTestResult'); out.textContent = 'در حال تست...';
+    const online = $('sEngine').value === 'builtin-online';
+    const res = await api('/api/translate/ping', {
+      engine: online ? 'builtin-online' : 'custom-offline',
+      proxy: online ? $('sProxy').value.trim() : '',
+      offline_protocol: $('sProtocol').value,
+      offline_url: $('sOfflineUrl').value.trim(),
+      offline_model: $('sOfflineModel').value.trim()
     });
+    out.textContent = res.ok ? `اتصال موفق · ${res.latency_ms} ms · ${res.engine}${res.sample ? ` · ${res.sample}` : ''}` : `خطا · ${res.error}`;
+    out.style.color = res.ok ? 'var(--phosphor)' : 'var(--red)';
   }
 
-  async function testTranslator() {
-    const txt = document.getElementById('sTrTestIn').value;
-    const out = document.getElementById('sTrTestOut');
-    out.value = 'در حال ترجمه...';
-    const r = await api('/api/translate', { text: txt, to: 'en' });
-    out.value = r.error ? `ERR: ${r.error}` : `${r.translation}\n[${r.engine} · ${r.elapsed_ms}ms]`;
+  async function saveUI() {
+    const theme = $('sTheme').value;
+    const font_scale = $('sFont').value;
+    const sidebar_side = $('sSide').value;
+    const show_think = $('sThink').checked;
+    const translate_thinking = $('sTranslateThink').checked;
+    const show_tools = $('sTools').checked;
+    const show_inline_tokens = $('sTokens').checked;
+    const show_shadow_cost = $('sCost').checked;
+    await api('/api/config', { ui: { theme, font_scale, sidebar_side, show_think, translate_thinking, show_tools, show_inline_tokens, show_shadow_cost } });
   }
 
-  function addGlossaryItem() {
-    const box = document.getElementById('sGlossaryList');
-    const div = document.createElement('div');
-    div.style.cssText = 'display:flex;gap:8px;margin-bottom:8px;';
-    div.innerHTML = `
-      <input class="gl-fa" placeholder="اصطلاح فارسی" style="flex:1;background:var(--bg-0);color:var(--fg-0);border:1px solid var(--line-strong);padding:7px 10px;border-radius:8px;" />
-      <input class="gl-en mono ltr" placeholder="Locked English term" style="flex:1;background:var(--bg-0);color:var(--fg-0);border:1px solid var(--line-strong);padding:7px 10px;border-radius:8px;" />
-      <button class="btn danger" onclick="this.parentElement.remove()">×</button>`;
-    box.appendChild(div);
+  async function saveModel() {
+    await api('/api/config', { tap: {
+      upstream_url: $('sUpstream').value.trim(),
+      workdir: $('sWorkdir').value.trim(),
+      lab_enable_tools: $('sLabTools').checked,
+      lab_system_prompt: $('sLabPrompt').value
+    }});
   }
 
-  async function saveGlossary() {
-    const rows = [...document.querySelectorAll('#sGlossaryList > div')];
-    const glossary = rows.map(r => ({
-      fa: r.querySelector('.gl-fa').value.trim(),
-      en: r.querySelector('.gl-en').value.trim()
-    })).filter(x => x.fa && x.en);
-    await api('/api/glossary', { glossary });
+  async function clearData(kind) {
+    if (!confirm('واقعاً این داده‌ها پاک شوند؟')) return;
+    if (kind === 'telemetry') await api('/api/telemetry/clear', {});
+    if (kind === 'sessions') await api('/api/lab/delete-all', {});
+    if (kind === 'all') { await api('/api/telemetry/clear', {}); await api('/api/lab/delete-all', {}); }
   }
 
-  async function saveHud() {
-    await api('/api/config', {
-      ui: {
-        sidebar_side: document.getElementById('sSbSide').value,
-        chat_mode: document.getElementById('sChatMode').value,
-        show_inline_tokens: document.getElementById('sShowTok').value === 'true',
-        show_shadow_cost: document.getElementById('sShowCost').value === 'true',
-        show_think: document.getElementById('sShowThink').value === 'true',
-        show_tools: document.getElementById('sShowTools').value === 'true'
-      }
-    });
-  }
-
-  async function saveTap() {
-    await api('/api/config', {
-      tap: {
-        upstream_url: document.getElementById('sUpstream').value.trim(),
-        workdir: document.getElementById('sWorkdir').value.trim(),
-        pi_bin: document.getElementById('sPiBin').value.trim()
-      }
-    });
-  }
-
-  async function applyRetention(days) {
-    const res = await api('/api/retention/prune', { days: Number(days) });
-    const msgEl = document.getElementById('sPruneResult');
-    if (msgEl) {
-      msgEl.textContent = `ذخیره شد (${res.retention_days === 0 ? 'همیشگی' : res.retention_days + ' روز'}) — پاکسازی فوری: ${res.deleted_requests} رکورد توکن و ${res.deleted_sessions} نشست منقضی حذف شد.`;
-    }
+  function toggleHelp(id) { $(id).classList.toggle('open'); }
+  function syncConditional() {
+    const online = $('sEngine').value === 'builtin-online';
+    $('onlineFields').hidden = !online;
+    $('offlineFields').hidden = online;
   }
 
   function render(host, state, route) {
-    const c = state.config;
-    const curEng = c.translation.engine === 'online' ? 'builtin-online' : (c.translation.engine || 'builtin-online');
-    const trEnabled = c.translation.enabled !== false;
-
+    const c = state.config, tr = c.translation, ui = c.ui, tap = c.tap;
     if (route === 'set-translate') {
-      host.innerHTML = `
-        <div class="panel-wrap">
-          <div class="panel">
-            <div class="panel-head">
-              <h3>مترجم داخلی آنلاین + API آفلاین + حالت پروکسی خالص (بدون ترجمه)</h3>
-              <button class="btn primary" onclick="ABSettingsPage.saveTranslation()">ذخیره تنظیمات</button>
-            </div>
-            <div class="field-grid">
-              <div class="fld">
-                <label>وضعیت ماژول ترجمه</label>
-                <select id="sTrEnabled">
-                  <option value="true" ${trEnabled ? 'selected' : ''}>فعال — ترجمه پاراگرافی دوطرفه</option>
-                  <option value="false" ${!trEnabled ? 'selected' : ''}>خاموش — فقط پروکسی شکارچی کش KV (بدون تاخیر ترجمه)</option>
-                </select>
-              </div>
-              <div class="fld">
-                <label>موتور ترجمه</label>
-                <select id="sTrEngine">
-                  <option value="builtin-online" ${curEng === 'builtin-online' ? 'selected' : ''}>Built-in Online (داخلی — بدون سرور جدا)</option>
-                  <option value="offline-openai" ${curEng === 'offline-openai' ? 'selected' : ''}>Offline OpenAI API (/v1/chat/completions — مثل HY-MT2)</option>
-                  <option value="bergamot" ${curEng === 'bergamot' ? 'selected' : ''}>Offline REST API — Bergamot (:18092)</option>
-                  <option value="plamo" ${curEng === 'plamo' ? 'selected' : ''}>Offline REST API — PLaMo-3 (:18093)</option>
-                </select>
-              </div>
-              <div class="fld">
-                <label>پروکسی اختیاری برای حالت آنلاین (SOCKS5H / HTTP)</label>
-                <input id="sTrProxy" class="mono ltr" placeholder="مثلاً socks5h://127.0.0.1:1080" value="${esc(c.translation.proxy || '')}" />
-              </div>
-              <div class="fld">
-                <label>آدرس API آفلاین OpenAI-Compatible</label>
-                <input id="sEpOpenai" class="mono ltr" value="${esc(c.translation.endpoints?.openai || 'http://127.0.0.1:18093')}" />
-              </div>
-              <div class="fld">
-                <label>نام مدل در API آفلاین OpenAI</label>
-                <input id="sOpenaiModel" class="mono ltr" value="${esc(c.translation.openai_model || 'hy-mt2-1.8b')}" />
-              </div>
-              <div class="fld">
-                <label>آدرس Bergamot REST / PLaMo REST</label>
-                <div style="display:flex;gap:6px;">
-                  <input id="sEpBerg" class="mono ltr" style="width:50%;" value="${esc(c.translation.endpoints?.bergamot || 'http://127.0.0.1:18092')}" />
-                  <input id="sEpPlamo" class="mono ltr" style="width:50%;" value="${esc(c.translation.endpoints?.plamo || 'http://127.0.0.1:18093')}" />
-                </div>
-              </div>
-            </div>
-          </div>
-
-          <div class="panel">
-            <div class="panel-head">
-              <h3>تست زنده مترجم و سپر محافظ کد</h3>
-              <button class="btn" onclick="ABSettingsPage.testTranslator()">تست FA → EN</button>
-            </div>
-            <div class="field-grid">
-              <div class="fld"><textarea id="sTrTestIn" rows="2">کش کی‌وی را در فایل \`bridge.py\` با دستور \`--metrics\` بررسی کن.</textarea></div>
-              <div class="fld"><textarea id="sTrTestOut" class="mono ltr" rows="2" readonly placeholder="output..."></textarea></div>
-            </div>
-          </div>
-
-          <div class="panel">
-            <div class="panel-head">
-              <h3>واژه‌نامه فنی قفل‌شده (<code>.data/glossary.json</code>)</h3>
-              <div style="display:flex;gap:8px;">
-                <button class="btn" onclick="ABSettingsPage.addGlossaryItem()">+ افزودن اصطلاح</button>
-                <button class="btn primary" onclick="ABSettingsPage.saveGlossary()">ذخیره واژه‌نامه</button>
-              </div>
-            </div>
-            <div id="sGlossaryList">
-              ${(state.glossary || []).map(g => `
-                <div style="display:flex;gap:8px;margin-bottom:8px;">
-                  <input class="gl-fa" value="${esc(g.fa)}" style="flex:1;background:var(--bg-0);color:var(--fg-0);border:1px solid var(--line-strong);padding:7px 10px;border-radius:8px;" />
-                  <input class="gl-en mono ltr" value="${esc(g.en)}" style="flex:1;background:var(--bg-0);color:var(--fg-0);border:1px solid var(--line-strong);padding:7px 10px;border-radius:8px;" />
-                  <button class="btn danger" onclick="this.parentElement.remove()">×</button>
-                </div>`).join('')}
-            </div>
-          </div>
-        </div>`;
-      return;
-    }
-
-    if (route === 'set-hud') {
-      const curMode = c.ui.chat_mode || 'interleaved';
-      host.innerHTML = `
-        <div class="panel-wrap">
-          <div class="panel">
-            <div class="panel-head">
-              <h3>چیدمان نمایش پاراگرافی (سبک افزونه مرورگر) و پنل‌ها</h3>
-              <button class="btn primary" onclick="ABSettingsPage.saveHud()">ذخیره چیدمان</button>
-            </div>
-            <div class="field-grid">
-              <div class="fld">
-                <label>حالت نمایش پاسخ‌ها در چت (کدها همیشه فقط یک‌بار رندر می‌شوند)</label>
-                <select id="sChatMode">
-                  <option value="interleaved" ${curMode === 'interleaved' ? 'selected' : ''}>زیرِ هم (هر پاراگراف انگلیسی + ترجمه فارسی زیرش)</option>
-                  <option value="fa_only" ${curMode === 'fa_only' ? 'selected' : ''}>تمام‌صفحه فارسی یکپارچه + بلوک کدهای اصلی</option>
-                  <option value="en_only" ${curMode === 'en_only' ? 'selected' : ''}>فقط انگلیسی اصلی (مناسب حالت پروکسی کش)</option>
-                </select>
-              </div>
-              <div class="fld">
-                <label>جایگاه سایدبار</label>
-                <select id="sSbSide">
-                  <option value="left" ${c.ui.sidebar_side === 'left' ? 'selected' : ''}>سمت چپ (Left — پیش‌فرض)</option>
-                  <option value="right" ${c.ui.sidebar_side === 'right' ? 'selected' : ''}>سمت راست (Right)</option>
-                </select>
-              </div>
-              <div class="fld">
-                <label>نمایش آمار توکن و کش بالای هر پیام</label>
-                <select id="sShowTok">
-                  <option value="true" ${c.ui.show_inline_tokens !== false ? 'selected' : ''}>فعال</option>
-                  <option value="false" ${c.ui.show_inline_tokens === false ? 'selected' : ''}>غیرفعال</option>
-                </select>
-              </div>
-              <div class="fld">
-                <label>نمایش هزینه معادل کلود در نوار بالا</label>
-                <select id="sShowCost">
-                  <option value="true" ${c.ui.show_shadow_cost !== false ? 'selected' : ''}>فعال</option>
-                  <option value="false" ${c.ui.show_shadow_cost === false ? 'selected' : ''}>غیرفعال</option>
-                </select>
-              </div>
-              <div class="fld">
-                <label>نمایش کشوی فکر مدل (Think)</label>
-                <select id="sShowThink">
-                  <option value="true" ${c.ui.show_think !== false ? 'selected' : ''}>فعال</option>
-                  <option value="false" ${c.ui.show_think === false ? 'selected' : ''}>مخفی</option>
-                </select>
-              </div>
-              <div class="fld">
-                <label>نمایش کشوی فراخوانی ابزارها (Tools)</label>
-                <select id="sShowTools">
-                  <option value="true" ${c.ui.show_tools !== false ? 'selected' : ''}>فعال</option>
-                  <option value="false" ${c.ui.show_tools === false ? 'selected' : ''}>مخفی</option>
-                </select>
-              </div>
-            </div>
-          </div>
-        </div>`;
-      return;
-    }
-
-    if (route === 'set-tap') {
-      host.innerHTML = `
-        <div class="panel-wrap">
-          <div class="panel">
-            <div class="panel-head">
-              <h3>پروکسی میانی <code>/v1</code> و اجرای هم‌زمان محیط تعاملی <code>pi</code> در ترمینال</h3>
-              <button class="btn primary" onclick="ABSettingsPage.saveTap()">ذخیره مسیر</button>
-            </div>
-            <div class="field-grid">
-              <div class="fld">
-                <label>آدرس سرور مدل مقصد (مثلاً <code>llama-server</code>)</label>
-                <input id="sUpstream" class="mono ltr" value="${esc(c.tap.upstream_url)}" />
-              </div>
-              <div class="fld">
-                <label>پوشه کاری پیش‌فرض</label>
-                <input id="sWorkdir" class="mono ltr" value="${esc(c.tap.workdir)}" />
-              </div>
-              <div class="fld">
-                <label>فرمان پیش‌فرض عامل</label>
-                <input id="sPiBin" class="mono ltr" value="${esc(c.tap.pi_bin)}" />
-              </div>
-            </div>
-          </div>
-
-          <div class="panel">
-            <div class="panel-head"><h3>دو روش کار با <code>pi</code> واقعی در ترمینال سندباکس</h3></div>
-            <p class="fg-1" style="margin:0 0 8px;">
-              <strong>حالت اول — اجرای <code>pi</code> معمولی بدون هیچ اسکریپتی (صرفاً تنظیم آدرس مدل روی <code>:18080/v1</code>):</strong>
-              خروجی‌ها، ابزارها و آمار کش ۱۰۰٪ خودکار از مسیر شبکه استخراج و ترجمه می‌شوند؛ و برای ارسال پرامپت از وب، با یک کلیک روی <code>Copy EN</code> در ترمینال Paste می‌کنی.
-            </p>
-            <p class="fg-1" style="margin:10px 0 8px;">
-              <strong>حالت دوم — اجرای محیط تعاملی ۱۰۰٪ واقعی <code>pi</code> همراه با تایپ خودکار از وب (پیشنهادی):</strong>
-              داخل ترمینال سندباکس دستور زیر را بزن تا همان محیط رنگی و تعاملی کامل <code>pi</code> باز شود و هرچه در وب تایید کردی مستقیم داخلش تایپ شود:
-            </p>
-            <div class="md-code"><div class="md-code-bar"><span>inside sandbox terminal</span></div><pre>python3 ~/path/to/agent-bridge/cli.py --wrap pi</pre></div>
-          </div>
-        </div>`;
-      return;
-    }
-
-    const curDays = c.retention?.days ?? 7;
-    const st = state.storage || {};
-    host.innerHTML = `
-      <div class="panel-wrap">
-        <div class="panel">
-          <div class="panel-head"><h3>پاکسازی خودکار تاریخچه (Retention Policy)</h3></div>
-          <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px;">
-            ${[[1, '۱ روز (1 Day)'], [7, '۱ هفته (1 Week)'], [30, '۱ ماه (1 Month)'], [0, 'همیشگی (Forever)']].map(([d, lbl]) => `
-              <button class="btn ${curDays === d ? 'primary' : ''}" onclick="ABSettingsPage.applyRetention(${d})">${lbl}</button>
-            `).join('')}
-          </div>
-          <div id="sPruneResult" class="mono" style="color:var(--phosphor);font-size:11.8px;"></div>
+      host.innerHTML = `<div class="panel-wrap">
+        <div class="panel rtl"><div class="panel-head"><h3>مترجم همه‌فن‌حریف · اتصال قابل‌تغییر</h3></div>
+          <div class="os-row"><div class="os-row-top"><div class="os-title-wrap">ترجمه خودکار روشن باشد</div><label class="ui-switch"><input id="sEnabled" type="checkbox" ${tr.enabled !== false ? 'checked' : ''} onchange="ABSettingsPage.saveTranslation()"><span class="ui-slider"></span></label></div>
+            <div class="os-help-drawer open" id="hEnabled">اگر خاموش باشد، Agent Bridge در مسیر OpenAI pass-through عمل می‌کند و متن را ترجمه نمی‌کند.</div></div>
+          <div class="fld" style="margin-top:18px"><label>حالت ترجمه</label><select id="sEngine" onchange="ABSettingsPage.syncConditional()"><option value="builtin-online" ${tr.engine !== 'custom-offline' ? 'selected' : ''}>آنلاین داخلی</option><option value="custom-offline" ${tr.engine === 'custom-offline' ? 'selected' : ''}>آفلاین دلخواه من</option></select></div>
+          <div id="onlineFields" class="os-card" style="margin-top:14px" ${tr.engine === 'custom-offline' ? 'hidden' : ''}><div class="os-card-head"><h3>اتصال آنلاین</h3></div><div class="os-row"><div class="fld"><label>Proxy (خالی = اتصال مستقیم)</label><input id="sProxy" value="${esc(tr.proxy || '')}" placeholder="socks5h://127.0.0.1:1080"></div><button class="btn" style="margin-top:12px" onclick="ABSettingsPage.testConnection()">تست اتصال و پروکسی</button></div></div>
+          <div id="offlineFields" class="os-card" style="margin-top:14px" ${tr.engine !== 'custom-offline' ? 'hidden' : ''}><div class="os-card-head"><h3>API آفلاین دلخواه کاربر</h3></div><div class="os-row"><div class="field-grid"><div class="fld"><label>قرارداد API</label><select id="sProtocol"><option value="openai" ${(tr.offline_protocol || 'openai') === 'openai' ? 'selected' : ''}>OpenAI-compatible Chat Completions</option><option value="rest" ${tr.offline_protocol === 'rest' ? 'selected' : ''}>JSON REST · POST /translate</option></select></div><div class="fld"><label>URL پایه (پورت آزاد)</label><input id="sOfflineUrl" value="${esc(tr.offline_url || 'http://127.0.0.1:18095')}"></div><div class="fld"><label>نام مدل (برای OpenAI API)</label><input id="sOfflineModel" value="${esc(tr.offline_model || 'local-translator')}"></div></div><div class="os-help-drawer open">قرارداد OpenAI: <code>POST /v1/chat/completions</code> با <code>messages</code>؛ REST: <code>POST /translate</code> و JSON برابر <code>{"text":"...","from":"fa","to":"en"}</code>، پاسخ <code>{"translation":"..."}</code>. آدرس و پورت را خودت انتخاب کن.</div><button class="btn" style="margin-top:12px" onclick="ABSettingsPage.testConnection()">تست endpoint</button></div></div>
+          <div id="sTestResult" class="mono" style="margin-top:14px"></div><button class="btn primary" style="margin-top:14px" onclick="ABSettingsPage.saveTranslation()">ذخیره تنظیمات مترجم</button>
         </div>
-
-        <div class="panel">
-          <div class="panel-head">
-            <h3>فایل‌های داخل <code>./.data/</code></h3>
-            <span class="mono muted">${st.file_count || 0} files · ${st.total_kib || 0} KiB</span>
-          </div>
-          <div class="table-scroll">
-            <table class="grid-table">
-              <thead><tr><th>مسیر داخل <code>.data/</code></th><th>حجم (Bytes)</th></tr></thead>
-              <tbody>
-                ${(st.files || []).map(f => `
-                  <tr><td class="m">${esc(f.path)}</td><td class="m">${f.bytes.toLocaleString()}</td></tr>
-                `).join('')}
-              </tbody>
-            </table>
-          </div>
-        </div>
+        <div class="panel rtl"><div class="panel-head"><h3>واژه‌نامه</h3></div><p class="muted">مدیریت واژه‌نامه‌ی موجود در بخش قبلی به‌زودی به این پنل سبک منتقل می‌شود؛ فایل داده در <code>.data/glossary.json</code> می‌ماند.</p></div>
       </div>`;
+    } else if (route === 'set-hud') {
+      host.innerHTML = `<div class="panel-wrap"><div class="panel rtl"><div class="panel-head"><h3>ظاهر و نمایش</h3></div>
+        <div class="field-grid"><div class="fld"><label>تم سبک</label><select id="sTheme"><option value="openwebui-dark">Open WebUI · Slate</option><option value="mocha-dark">Catppuccin Mocha</option><option value="zed-dark">Zed Dark</option><option value="lobechat-dark">LobeChat Glass</option></select></div><div class="fld"><label>اندازه فونت</label><select id="sFont"><option value="normal">معمولی</option><option value="large">خوانا · 15.5px</option><option value="xlarge">درشت</option></select></div><div class="fld"><label>جایگاه سایدبار</label><select id="sSide"><option value="left">چپ</option><option value="right">راست</option></select></div></div>
+        <div class="os-card" style="margin-top:18px">${[['sThink','نمایش Think',ui.show_think],['sTranslateThink','ترجمه Think',ui.translate_thinking],['sTools','نمایش ابزارها',ui.show_tools],['sTokens','نمایش آمار توکن',ui.show_inline_tokens],['sCost','نمایش هزینه سایه‌ای',ui.show_shadow_cost]].map(([id,label,val])=>`<div class="os-row"><div class="os-row-top"><div class="os-title-wrap">${label}<button class="help-pill" onclick="ABSettingsPage.toggleHelp('help-${id}')">؟ توضیح</button></div><label class="ui-switch"><input id="${id}" type="checkbox" ${val ? 'checked' : ''}><span class="ui-slider"></span></label></div><div class="os-help-drawer" id="help-${id}">این گزینه فقط نحوه نمایش/ترجمه در رابط را کنترل می‌کند و موتور مدل را تغییر نمی‌دهد.</div></div>`).join('')}</div><button class="btn primary" style="margin-top:16px" onclick="ABSettingsPage.saveUI()">ذخیره</button></div></div>`;
+      $('sTheme').value = ui.theme || 'openwebui-dark'; $('sFont').value = ui.font_scale || 'large'; $('sSide').value = ui.sidebar_side || 'left';
+    } else if (route === 'set-tap') {
+      host.innerHTML = `<div class="panel-wrap"><div class="panel rtl"><div class="panel-head"><h3>مدل محلی و چت آزمایشی</h3></div><div class="fld"><label>llama-server upstream محلی</label><input id="sUpstream" value="${esc(tap.upstream_url)}" placeholder="http://127.0.0.1:8080"></div><div class="fld" style="margin-top:12px"><label>دایرکتوری کاری ابزارهای Lab</label><input id="sWorkdir" value="${esc(tap.workdir || '.')}"></div><div class="os-row"><div class="os-row-top"><div class="os-title-wrap">فعال‌کردن ابزارهای محلی (shell/read/list)</div><label class="ui-switch"><input id="sLabTools" type="checkbox" ${tap.lab_enable_tools ? 'checked' : ''}><span class="ui-slider"></span></label></div><div class="os-help-drawer open">ابزارها فقط در چت داخلی Lab فعال‌اند، نه آینه‌ی pi. دستورات در workdir اجرا می‌شوند؛ مدل محلیِ ناآزموده می‌تواند فرمان نامناسب بسازد—قبل از فعال‌سازی این ریسک را در نظر بگیر.</div></div><div class="fld" style="margin-top:12px"><label>System Prompt برای Lab</label><textarea id="sLabPrompt" rows="4">${esc(tap.lab_system_prompt || '')}</textarea></div><button class="btn primary" style="margin-top:15px" onclick="ABSettingsPage.saveModel()">ذخیره اتصال</button></div></div>`;
+    } else {
+      host.innerHTML = `<div class="panel-wrap"><div class="panel rtl"><div class="panel-head"><h3>نگهداری و پاکسازی داده</h3></div><p>فایل‌های اجرایی و وضعیت فقط در <code>.data/</code> قرار دارند. حجم فعلی: <strong>${state.storage?.total_kib || 0} KiB</strong> · ${state.storage?.file_count || 0} فایل.</p><div class="field-grid"><button class="btn danger" onclick="ABSettingsPage.clearData('telemetry')">پاک‌کردن آمار توکن</button><button class="btn danger" onclick="ABSettingsPage.clearData('sessions')">پاک‌کردن نشست‌های Lab</button><button class="btn danger" onclick="ABSettingsPage.clearData('all')">پاک‌کردن آمار + نشست‌ها</button></div><details style="margin-top:16px"><summary>فهرست فایل‌های داده</summary><pre class="acc-body">${esc((state.storage?.files || []).map(f => `${f.path} · ${f.bytes} B`).join('\n'))}</pre></details></div></div>`;
+    }
   }
-
-  return { render, saveTranslation, testTranslator, addGlossaryItem, saveGlossary, saveHud, saveTap, applyRetention };
+  return { render, saveTranslation, testConnection, saveUI, saveModel, clearData, toggleHelp, syncConditional };
 })();
