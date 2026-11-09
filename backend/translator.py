@@ -29,6 +29,8 @@ INLINE_SHIELD_RE = re.compile(
     r"(`[^`\n]+`|--[a-zA-Z0-9_-]+|(?:~|\B)/(?:[\w.-]+/)+[\w.-]*|\b[A-Z][A-Z0-9_]{2,}=\S+)"
 )
 PERSIAN_RE = re.compile(r"[\u0600-\u06FF]")
+PERSIAN_RUN_RE = re.compile(r"[\u0600-\u06FF]+(?:\s+[\u0600-\u06FF]+)*")
+LATIN_RE = re.compile(r"[A-Za-z]")
 PERSIAN_DIGITS_MAP = str.maketrans("۰۱۲۳۴۵۶۷۸۹٠١٢٣٤٥٦٧٨٩", "01234567890123456789")
 
 _CACHE_LOCK = threading.Lock()
@@ -112,7 +114,7 @@ def _http_get_external(url: str, proxy: str = "", timeout: int = 8) -> bytes:
         return resp.read()
 
 
-def _builtin_online_segment(seg: str, src: str, tgt: str, proxy: str) -> tuple[str, str]:
+def _builtin_online_segment(seg: str, src: str, tgt: str, proxy: str, provider: str = "builtin-online") -> tuple[str, str]:
     shielded, saved = _shield_inline(seg)
 
     def p_chrome() -> str:
@@ -135,8 +137,14 @@ def _builtin_online_segment(seg: str, src: str, tgt: str, proxy: str) -> tuple[s
         data = json.loads(_http_get_external(f"https://api.mymemory.translated.net/get?{q}", proxy).decode("utf-8"))
         return str(data["responseData"]["translatedText"])
 
+    providers = {
+        "online-google": ("online:google-chrome", p_chrome),
+        "online-google-gtx": ("online:google-gtx", p_gtx),
+        "online-mymemory": ("online:mymemory", p_mymemory),
+    }
+    chain = [providers[provider]] if provider in providers else list(providers.values())
     last_err: Exception | None = None
-    for name, fn in (("builtin:google-chrome", p_chrome), ("builtin:google-gtx", p_gtx), ("builtin:mymemory", p_mymemory)):
+    for name, fn in chain:
         try:
             out = _unshield_inline(fn(), saved).strip()
             if out:
@@ -202,7 +210,9 @@ def _resolve_mode(tr_cfg: dict) -> tuple[str, str, str, str]:
     """Normalizes config into (mode, protocol, url, model)."""
     eng = str(tr_cfg.get("engine", "builtin-online"))
     if eng in ("builtin-online", "online"):
-        return "online", "online", "", ""
+        return "online", "builtin-online", "", ""
+    if eng in ("online-google", "online-google-gtx", "online-mymemory"):
+        return "online", eng, "", ""
     # Backward-compat with older config keys if present
     proto = str(tr_cfg.get("offline_protocol", "openai"))
     url = str(tr_cfg.get("offline_url", "http://127.0.0.1:18095")).strip()
@@ -224,7 +234,7 @@ def test_translator_connection(test_cfg: dict) -> dict:
     sample = "بررسی سلامت اتصال مترجم"
     try:
         if mode == "online":
-            out, used = _builtin_online_segment(sample, "fa", "en", proxy)
+            out, used = _builtin_online_segment(sample, "fa", "en", proxy, provider=proto)
         elif proto == "rest":
             out, used = _offline_rest_segment(sample, "fa", "en", url)
         else:
@@ -244,6 +254,13 @@ def _translate_one_prose_chunk(
     glossary: list[dict],
 ) -> tuple[str, str]:
     working = chunk
+    protected_persian: dict[str, str] = {}
+    if tgt == "fa" and src == "en":
+        def shield_fa(match: re.Match[str]) -> str:
+            token = f"ZXQFA{len(protected_persian)}QXZ"
+            protected_persian[token] = match.group(0)
+            return token
+        working = PERSIAN_RUN_RE.sub(shield_fa, working)
     if tgt == "en":
         for item in glossary:
             fa_term = item.get("fa", "").strip()
@@ -257,10 +274,13 @@ def _translate_one_prose_chunk(
     ck = hashlib.sha256(cache_sig.encode("utf-8")).hexdigest()
     hit = _cache_get(ck)
     if hit is not None:
-        return hit[0], f"{hit[1]} (cache)"
+        cached_out = hit[0]
+        for token, original in protected_persian.items():
+            cached_out = cached_out.replace(token, original)
+        return cached_out, f"{hit[1]} (cache)"
 
     if mode == "online":
-        out, used = _builtin_online_segment(working, src, tgt, proxy)
+        out, used = _builtin_online_segment(working, src, tgt, proxy, provider=proto)
     elif proto == "rest":
         out, used = _offline_rest_segment(working, src, tgt, url)
     else:
@@ -273,6 +293,8 @@ def _translate_one_prose_chunk(
                 out = out.replace(f"`{en_term}`", en_term)
 
     _cache_put(ck, out, used)
+    for token, original in protected_persian.items():
+        out = out.replace(token, original)
     return out, used
 
 
@@ -316,9 +338,27 @@ def translate_prose(
     if tr_cfg.get("enabled", True) is False:
         return {"translation": "", "blocks": split_markdown_into_blocks(text), "engine": "proxy-only", "elapsed_ms": 0.0}
 
-    has_fa = bool(PERSIAN_RE.search(text))
-    src = "fa" if has_fa else "en"
-    tgt = ("en" if has_fa else "fa") if (not target_lang or target_lang == "auto") else target_lang.lower()
+    detection_text = FENCE_RE.sub("", text)
+    fa_chars = len(PERSIAN_RE.findall(detection_text))
+    latin_chars = len(LATIN_RE.findall(detection_text))
+    has_fa = fa_chars > 0
+    has_latin = latin_chars > 0
+    if not target_lang or target_lang == "auto":
+        # Persian-dominant prose is an input prompt (translate to EN); English-dominant
+        # prose with a Persian name/quote is model output (translate to FA, preserve FA spans).
+        tgt = "en" if has_fa and (not has_latin or fa_chars >= latin_chars * 0.18) else ("fa" if has_latin else "en")
+    else:
+        tgt = target_lang.lower()
+    # Explicit output direction wins over naive script detection; mixed EN+FA model output
+    # is translated as English while Persian names/phrases are protected as tokens.
+    src = "en" if tgt == "fa" else "fa"
+    if tgt == "fa" and has_fa and not has_latin:
+        return {
+            "translation": text,
+            "blocks": [{"type": "prose", "en": "", "fa": text}] if not FENCE_RE.search(text) else split_markdown_into_blocks(text),
+            "engine": "already-target-language",
+            "elapsed_ms": 0.0,
+        }
     t0 = time.perf_counter()
 
     if tgt == "fa":

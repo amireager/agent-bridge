@@ -11,6 +11,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import copy
+from contextlib import closing
 import os
 import queue
 import re
@@ -43,6 +45,24 @@ def _extract_msg_text(content) -> str:
     return str(content or "")
 
 
+def _wire_assistant_anchor(content, tool_calls: list[dict] | None) -> str:
+    normalized = []
+    for tc in tool_calls or []:
+        fn = tc.get("function", {}) if isinstance(tc, dict) else {}
+        args = fn.get("arguments", tc.get("args", {}) if isinstance(tc, dict) else {})
+        if isinstance(args, str):
+            try:
+                args = json.loads(args)
+            except Exception:
+                pass
+        normalized.append({"id": tc.get("id", ""), "name": fn.get("name", tc.get("name", "")), "args": args})
+    text = _extract_msg_text(content).strip()
+    if not text and not normalized:
+        return ""
+    payload = json.dumps({"content": text, "tool_calls": normalized}, ensure_ascii=False, sort_keys=True)
+    return hashlib.sha1(payload.encode("utf-8")).hexdigest()[:12]
+
+
 class BridgeHub:
     def __init__(self, store: DataStore, bridge_port: int) -> None:
         self.store = store
@@ -64,6 +84,7 @@ class BridgeHub:
         # 1. Live Terminal Mirrors (keyed by agent_id: 'pi', 'pi-2', 'hermes', ...)
         self.mirrors: dict[str, dict] = {}
         self.pty_heartbeats: dict[str, float] = {}
+        self.agent_activity: dict[str, dict] = {}
         self.pending_fa_by_agent: dict[str, dict] = {}
         self.pending_saved_by_agent: dict[str, int] = {}
 
@@ -164,9 +185,11 @@ class BridgeHub:
         # Every live PTY gets an exclusive channel lease. Even duplicate explicit names
         # are suffixed so one terminal can never unregister another terminal's heartbeat.
         chosen = base
-        if (now - self.pty_heartbeats.get(chosen, 0.0)) <= 25.0:
+        # Do not reuse even a closed channel name when it has retained history;
+        # a fresh wrapper gets a fresh mirror so yesterday's conversation cannot surface as today's.
+        if chosen in self.mirrors or (now - self.pty_heartbeats.get(chosen, 0.0)) <= 25.0:
             idx = 2
-            while (now - self.pty_heartbeats.get(f"{base}-{idx}", 0.0)) <= 25.0:
+            while f"{base}-{idx}" in self.mirrors or (now - self.pty_heartbeats.get(f"{base}-{idx}", 0.0)) <= 25.0:
                 idx += 1
             chosen = f"{base}-{idx}"
 
@@ -186,6 +209,15 @@ class BridgeHub:
 
     def unregister_pty(self, agent_id: str) -> None:
         self.pty_heartbeats.pop(agent_id, None)
+        self.agent_activity[agent_id] = {"status": "IDLE", "started_at": 0}
+        self.broadcast_state()
+
+    def wire_request_started(self, agent_id: str) -> None:
+        self.agent_activity[agent_id] = {"status": "GENERATING", "started_at": time.time()}
+        self.broadcast_state()
+
+    def wire_request_failed(self, agent_id: str) -> None:
+        self.agent_activity[agent_id] = {"status": "IDLE", "started_at": 0}
         self.broadcast_state()
 
     def delete_mirror(self, agent_id: str) -> bool:
@@ -255,7 +287,7 @@ class BridgeHub:
         if "telemetry" in scopes:
             with self.store._db_lock:
                 import sqlite3
-                with sqlite3.connect(self.store.db_path) as conn:
+                with closing(sqlite3.connect(self.store.db_path)) as conn:
                     req_count = int(conn.execute("SELECT COUNT(*) FROM llm_requests WHERE ts < ?", (cutoff or time.time()+1,)).fetchone()[0])
         return {"days": int(days), "scopes": scopes, "telemetry_requests": req_count, "xray_frames": xray_count, "files": items, "file_count": len(items), "bytes": sum(x["bytes"] for x in items)}
 
@@ -271,7 +303,7 @@ class BridgeHub:
         if "telemetry" in scopes:
             with self.store._db_lock:
                 import sqlite3
-                with sqlite3.connect(self.store.db_path) as conn:
+                with closing(sqlite3.connect(self.store.db_path)) as conn:
                     cur = conn.execute("DELETE FROM llm_requests WHERE ts < ?", (cutoff or time.time()+1,))
                     deleted_requests = cur.rowcount or 0
                     conn.commit()
@@ -430,6 +462,9 @@ class BridgeHub:
             if t["id"] != turn_id:
                 continue
             forced_cfg = {**self.config["translation"], "enabled": True}
+            if scope == "prompt" and t.get("user_raw"):
+                prompt_result = translate_prose(t["user_raw"], "en", forced_cfg, self.glossary)
+                t["prompt_translation"] = prompt_result.get("translation", "")
             if scope in ("all", "reply") and t.get("reply_en"):
                 r = translate_prose(t["reply_en"], "fa", forced_cfg, self.glossary)
                 t["reply_fa"] = r.get("translation", "")
@@ -462,6 +497,61 @@ class BridgeHub:
             self._persist_mirror(self.mirrors[self.view_id])
 
     # ---- Wire-Driven Live Terminal Mirror Sync ----
+    def _seed_untranslated_history(self, messages: list[dict], agent_name: str) -> list[dict]:
+        """Reconstruct prior visible turns from pi's messages[] without translating them."""
+        turns: list[dict] = []
+        current: dict | None = None
+        tool_index: dict[str, dict] = {}
+        for msg in messages:
+            role = msg.get("role")
+            if role == "user":
+                raw = _extract_msg_text(msg.get("content", "")).strip()
+                if not raw:
+                    continue
+                current = {
+                    "id": uuid.uuid4().hex[:8], "agent": agent_name, "model": "", "source": "history",
+                    "ts": "", "user_raw": raw, "prompt_sent": raw, "saved_fa_tokens": 0,
+                    "kv_status": "cold", "thinking": "", "thinking_fa": "", "think_blocks": [],
+                    "steps": [], "tools": [], "reply_en": "", "reply_fa": "", "blocks": [],
+                    "tr_engine": "history-untranslated", "status": "done", "elapsed_s": 0,
+                    "metrics": {"uncached_in": 0, "cached_in": 0, "out_tok": 0, "tg_tps": 0},
+                }
+                turns.append(current)
+            elif role == "assistant" and current is not None:
+                content = _extract_msg_text(msg.get("content", "")).strip()
+                reasoning = _extract_msg_text(msg.get("reasoning_content", "")).strip()
+                tcs = msg.get("tool_calls", []) or []
+                hist_tools = []
+                for tc in tcs:
+                    fn = tc.get("function", {})
+                    raw_args = fn.get("arguments", {})
+                    try:
+                        parsed = json.loads(raw_args) if isinstance(raw_args, str) else raw_args
+                    except Exception:
+                        parsed = raw_args
+                    rec = {"id": tc.get("id", ""), "name": fn.get("name", "tool"), "args": parsed,
+                           "output": "", "status": "running", "is_error": False}
+                    current["tools"].append(rec)
+                    tool_index[rec["id"]] = rec
+                    hist_tools.append(rec)
+                if content:
+                    current["reply_en"] = (current["reply_en"] + "\n\n" + content).strip()
+                if reasoning:
+                    current["thinking"] = (current["thinking"] + "\n\n" + reasoning).strip()
+                if content or reasoning or hist_tools:
+                    current["steps"].append({"index": len(current["steps"])+1, "thinking": reasoning,
+                                             "tools": hist_tools, "reply_en": content,
+                                             "status": "tools" if hist_tools else "final"})
+            elif role == "tool" and current is not None:
+                tid = msg.get("tool_call_id", "")
+                if tid in tool_index:
+                    tool_index[tid]["output"] = _extract_msg_text(msg.get("content", ""))
+                    tool_index[tid]["status"] = "done"
+        for turn in turns:
+            if turn["reply_en"]:
+                turn["blocks"] = split_markdown_into_blocks(turn["reply_en"])
+        return turns
+
     def record_passive_wire_turn(
         self,
         *,
@@ -481,15 +571,20 @@ class BridgeHub:
 
         first_user_txt = ""
         last_user_txt = ""
+        last_user_index = -1
+        first_assistant_anchor = ""
         tool_outputs_by_id: dict[str, str] = {}
 
-        for m in messages:
+        for msg_index, m in enumerate(messages):
             role = m.get("role")
             c_str = _extract_msg_text(m.get("content", "")).strip()
             if role == "user" and c_str:
                 if not first_user_txt:
                     first_user_txt = c_str
                 last_user_txt = c_str
+                last_user_index = msg_index
+            elif role == "assistant" and not first_assistant_anchor:
+                first_assistant_anchor = _wire_assistant_anchor(m.get("content", ""), m.get("tool_calls", []))
             elif role == "tool":
                 tcid = m.get("tool_call_id", "")
                 if tcid:
@@ -503,15 +598,39 @@ class BridgeHub:
             clean_reply = THINK_TAG_RE.sub("", clean_reply).strip()
 
         if not clean_reply.strip() and not tool_calls and not extracted_think.strip():
+            self.agent_activity[agent_name] = {"status": "IDLE", "started_at": 0}
             return
 
         mirror = self.mirrors.setdefault(agent_name, self._new_mirror_obj(agent_name))
 
-        # Auto-detect terminal session switch (/new or /resume inside terminal `pi`!)
+        # Archive prior web context when pi switches session; never overwrite historical mirror data.
         conv_fp = hashlib.sha1(first_user_txt.encode("utf-8")).hexdigest()[:12] if first_user_txt else "init"
-        if mirror.get("conv_fp") and mirror["conv_fp"] != conv_fp:
-            mirror["turns"] = []
+        anchor_changed = bool(mirror.get("first_assistant_fp") and first_assistant_anchor and
+                              mirror["first_assistant_fp"] != first_assistant_anchor)
+        count_rolled_back = int(mirror.get("wire_message_count", 0)) > 4 and len(messages) <= 2
+        session_changed = bool(mirror.get("conv_fp") and mirror.get("conv_fp") != conv_fp) or anchor_changed or count_rolled_back
+        prior_turns = messages[:last_user_index] if last_user_index >= 0 else messages
+        if session_changed:
+            if mirror.get("turns"):
+                archived = copy.deepcopy(mirror)
+                old_fp = archived.get("conv_fp") or uuid.uuid4().hex[:8]
+                archived["agent_id"] = f"{agent_name}--{old_fp}"
+                archived["title"] = (archived.get("title") or agent_name)[:36]
+                self.mirrors[archived["agent_id"]] = archived
+                self._persist_mirror(archived)
+            mirror = self._new_mirror_obj(agent_name)
+            self.mirrors[agent_name] = mirror
+            mirror["turns"] = self._seed_untranslated_history(prior_turns, agent_name)
+        elif not mirror.get("conv_fp") and prior_turns:
+            # On wrapper startup/resume, import existing pi messages[] as untranslated history.
+            mirror["turns"] = self._seed_untranslated_history(prior_turns, agent_name)
+
         mirror["conv_fp"] = conv_fp
+        mirror["wire_message_count"] = len(messages)
+        if first_assistant_anchor and not mirror.get("first_assistant_fp"):
+            mirror["first_assistant_fp"] = first_assistant_anchor
+        if not mirror.get("first_assistant_fp"):
+            mirror["first_assistant_fp"] = _wire_assistant_anchor(clean_reply, tool_calls)
         if first_user_txt:
             mirror["title"] = first_user_txt.replace("\n", " ")[:36]
 
@@ -560,6 +679,10 @@ class BridgeHub:
                 em["tg_tps"] = metrics["tg_tps"]
             existing_turn["kv_status"] = kv_status
             existing_turn["elapsed_s"] = round(existing_turn.get("elapsed_s", 0.0) + elapsed_s, 1)
+            status = "WAITING_TOOLS" if tool_calls else "IDLE"
+            self.agent_activity[agent_name] = {"status": status, "started_at": 0}
+            if self.view_kind == "mirror" and self.view_id == agent_name:
+                self.session_state = status
             self._persist_mirror(mirror)
             return
 
@@ -592,12 +715,16 @@ class BridgeHub:
             "reply_fa": "",
             "blocks": [],
             "tr_engine": "",
-            "status": "done",
+            "status": "tools" if tool_calls else "done",
             "elapsed_s": round(elapsed_s, 1),
             "metrics": metrics,
         }
         self._translate_turn_fields(turn)
         mirror["turns"].append(turn)
+        status = "WAITING_TOOLS" if tool_calls else "IDLE"
+        self.agent_activity[agent_name] = {"status": status, "started_at": 0}
+        if self.view_kind == "mirror" and self.view_id == agent_name:
+            self.session_state = status
         self._persist_mirror(mirror)
 
         # Auto-focus mirror if user is watching mirrors
@@ -914,12 +1041,13 @@ class BridgeHub:
     def mark_translator_tested(self, cfg: dict, result: dict) -> None:
         if not result.get("ok"):
             return
-        mode = "online" if cfg.get("engine") in ("builtin-online", "online") else "offline"
+        cfg_engine = str(cfg.get("engine", "builtin-online"))
+        mode = cfg_engine if cfg_engine in ("builtin-online", "online", "online-google", "online-google-gtx", "online-mymemory") else "offline"
         item = {"mode": mode, "label": result.get("engine", mode), "latency_ms": result.get("latency_ms", 0), "tested_at": time.strftime("%H:%M:%S")}
         self.tested_translators = [x for x in self.tested_translators if x.get("mode") != mode]
         self.tested_translators.append(item)
         self.tested_translator_configs[mode] = {
-            "engine": "builtin-online" if mode == "online" else "custom-offline",
+            "engine": mode if mode in ("builtin-online", "online-google", "online-google-gtx", "online-mymemory") else ("builtin-online" if mode == "online" else "custom-offline"),
             **{k: cfg[k] for k in ("proxy", "offline_protocol", "offline_url", "offline_model") if k in cfg},
         }
 
@@ -968,11 +1096,14 @@ class BridgeHub:
 
         with self._lock:
             insp = list(self._inspector_ring)
+        visible_session_state = self.session_state
+        if self.view_kind == "mirror":
+            visible_session_state = self.agent_activity.get(self.view_id, {}).get("status", "IDLE") if self.view_id else "IDLE"
 
         return {
             "config": self.config,
             "glossary": self.glossary,
-            "session_state": self.session_state,
+            "session_state": visible_session_state,
             "view_kind": self.view_kind,
             "view_id": self.view_id,
             "mirrors": mirrors_list,

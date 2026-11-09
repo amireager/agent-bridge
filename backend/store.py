@@ -7,6 +7,7 @@ import json
 import os
 import shutil
 import sqlite3
+from contextlib import contextmanager
 import threading
 import time
 from pathlib import Path
@@ -76,8 +77,17 @@ class DataStore:
         self._init_db()
         self._ensure_defaults()
 
+    @contextmanager
+    def _connection(self):
+        conn = sqlite3.connect(self.db_path)
+        try:
+            with conn:
+                yield conn
+        finally:
+            conn.close()
+
     def _init_db(self) -> None:
-        with self._db_lock, sqlite3.connect(self.db_path) as conn:
+        with self._db_lock, self._connection() as conn:
             conn.execute("PRAGMA journal_mode=WAL;")
             conn.execute("PRAGMA synchronous=NORMAL;")
             conn.execute(
@@ -252,7 +262,7 @@ class DataStore:
         tot_in = int(uncached_input) + int(cached_input)
         hit_ratio = (cached_input / tot_in) if tot_in > 0 else 0.0
 
-        with self._db_lock, sqlite3.connect(self.db_path) as conn:
+        with self._db_lock, self._connection() as conn:
             prev = conn.execute(
                 """
                 SELECT uncached_input, cached_input, ts
@@ -314,7 +324,7 @@ class DataStore:
             return {"deleted_requests": 0, "deleted_sessions": 0, "retention_days": 0}
 
         cutoff = time.time() - (keep_days * 86400.0)
-        with self._db_lock, sqlite3.connect(self.db_path) as conn:
+        with self._db_lock, self._connection() as conn:
             cur = conn.execute("DELETE FROM llm_requests WHERE ts < ?", (cutoff,))
             deleted_reqs = cur.rowcount or 0
 
@@ -334,7 +344,7 @@ class DataStore:
         }
 
     def clear_telemetry(self) -> None:
-        with self._db_lock, sqlite3.connect(self.db_path) as conn:
+        with self._db_lock, self._connection() as conn:
             conn.execute("DELETE FROM llm_requests;")
             conn.commit()
             conn.execute("VACUUM;")
@@ -363,7 +373,7 @@ class DataStore:
 
         extra_sql = (" AND " + " AND ".join(where_extra)) if where_extra else ""
 
-        with self._db_lock, sqlite3.connect(self.db_path) as conn:
+        with self._db_lock, self._connection() as conn:
             conn.row_factory = sqlite3.Row
 
             obs_models = [
@@ -465,8 +475,10 @@ class DataStore:
                 """,
                 [win_since, *params_extra, max(1, min(100, int(recent_limit)))],
             ).fetchall()
-
-        win_summary = agg_since(win_since)
+            win_summary = agg_since(win_since)
+            last_1h_summary = agg_since(now - 3600.0)
+            last_24h_summary = agg_since(now - 86400.0)
+            all_time_summary = agg_since(0.0)
 
         # Simultaneous Multi-Model Cost Comparison Matrix (recalculated dynamically!)
         cost_matrix = []
@@ -563,9 +575,9 @@ class DataStore:
             "pricing_profiles": CLOUD_PRICING_PROFILES,
             "cost_matrix": cost_matrix,
             "window": win_summary,
-            "last_1h": agg_since(now - 3600.0),
-            "last_24h": agg_since(now - 86400.0),
-            "all_time": agg_since(0.0),
+            "last_1h": last_1h_summary,
+            "last_24h": last_24h_summary,
+            "all_time": all_time_summary,
             "by_agent": pack_group(by_agent_rows, "agent"),
             "by_model": pack_group(by_model_rows, "model"),
             "hourly": hourly,

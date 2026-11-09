@@ -9,6 +9,14 @@ window.ABChatPage = (() => {
   let lastTurnCount = 0;
   let stickToBottom = true;
 
+  function getThinkMode(key) {
+    try { return localStorage.getItem(`ab-think:${key}`) || 'half'; } catch (_) { return 'half'; }
+  }
+  function thinkModeControls(key) {
+    const current = getThinkMode(key);
+    return `<span class="think-modes"><button class="${current==='closed'?'selected':''}" onclick="ABChatPage.setThinkMode('${esc(key)}','closed',event)" title="بستن کامل">×</button><button class="${current==='half'?'selected':''}" onclick="ABChatPage.setThinkMode('${esc(key)}','half',event)" title="نمایش نیمه، شش خط">۶ خط</button><button class="${current==='full'?'selected':''}" onclick="ABChatPage.setThinkMode('${esc(key)}','full',event)" title="نمایش کامل">باز</button></span>`;
+  }
+
   // O(1) Zero-CPU Multiplication Estimate: Persian ~0.68 tok/char vs English ~0.25 tok/char
   function estimateSavings(faText, enText) {
     const faChars = (String(faText || '').match(/[\u0600-\u06FF]/g) || []).length;
@@ -335,6 +343,18 @@ window.ABChatPage = (() => {
     await api('/api/config', { ui: { [key]: !cur } });
   }
 
+  function setThinkMode(key, mode, ev) {
+    if (ev) { ev.preventDefault(); ev.stopPropagation(); }
+    if (!['closed','half','full'].includes(mode)) return;
+    try { localStorage.setItem(`ab-think:${key}`, mode); } catch (_) {}
+    const details = ev?.target?.closest('details.think-drawer');
+    if (details) {
+      details.classList.remove('think-mode-closed','think-mode-half','think-mode-full');
+      details.classList.add(`think-mode-${mode}`);
+      details.open = mode !== 'closed';
+    }
+  }
+
   function closeSelectionTranslate() {
     document.getElementById('selectionTranslatePanel').hidden = true;
     window.getSelection?.().removeAllRanges();
@@ -348,6 +368,11 @@ window.ABChatPage = (() => {
     out.textContent = 'در حال ترجمه...';
     const res = await api('/api/translate', { text, to: 'auto', engine_mode: engineMode });
     out.innerHTML = res.error ? `<span class="term-error">${esc(res.error)}</span>` : window.ABMarkdown.render(res.translation || '');
+  }
+
+  async function translatePrompt(turnId, ev) {
+    if (ev) ev.stopPropagation();
+    await api('/api/turn/translate', { turn_id: turnId, scope: 'prompt' });
   }
 
   async function retranslate(turnId) {
@@ -482,10 +507,10 @@ window.ABChatPage = (() => {
         </details>` : '';
 
       const thinkId = `${t.id}-think`;
-      const autoOpenThink = wasOpen(thinkId, true);
+      const globalThinkMode = getThinkMode(thinkId);
       const thinkAcc = (ui.show_think && t.thinking) ? `
-        <details class="think-drawer" data-acc-id="${esc(thinkId)}" ${autoOpenThink ? 'open' : ''}>
-          <summary><span>تفکر مدل · Think</span><span>${t.thinking.length} chars · باز/بسته</span></summary>
+        <details class="think-drawer think-mode-${globalThinkMode}" data-acc-id="${esc(thinkId)}" ${globalThinkMode !== 'closed' ? 'open' : ''}>
+          <summary><span>تفکر مدل · Think · ${t.thinking.length} chars</span>${thinkModeControls(thinkId)}</summary>
           <div class="think-body">${window.ABMarkdown.renderBlocks(t.think_blocks || [], t.thinking, t.thinking_fa || '', chatMode)}<button class="btn ghost think-translate-btn" onclick="ABChatPage.translateThink('${esc(t.id)}',-1,event)">${t.thinking_fa ? 'ترجمه‌ی مجدد تفکر' : 'ترجمه‌ی تفکر'}</button></div>
         </details>` : '';
 
@@ -499,20 +524,21 @@ window.ABChatPage = (() => {
         return `
           <details class="tool-pill kind-${kind}" data-acc-id="${esc(detId)}" ${isOpen ? 'open' : ''}>
             <summary><span class="tool-badge">${esc(toolName)}</span><span class="tool-cmd-preview">${esc(summarizeToolArgs(tl))}</span><span class="tiny-tag">${stTxt}</span></summary>
-            <div class="acc-body">${renderToolContent(tl)}</div>
+            <div class="tool-render">${renderToolContent(tl)}</div>
           </details>`;
       }).join('') : '';
 
       const stepTimeline = (Array.isArray(t.steps) && t.steps.length) ? t.steps.map((step, sIdx) => {
         const stepThinkId = `${t.id}-step-${sIdx}-think`;
+        const stepThinkMode = getThinkMode(stepThinkId);
         const stageId = `${t.id}-stage-${sIdx}`;
         const stepTools = ui.show_tools ? (step.tools || []).map((tool, tIdx) => {
           const nm = String(tool.name || 'tool');
           const kind = /shell|bash|terminal|exec/i.test(nm) ? 'shell' : (/read|list|search/i.test(nm) ? 'read' : (/edit|write|patch/i.test(nm) ? 'edit' : 'other'));
           const toolId = `${t.id}-step-${sIdx}-tool-${tIdx}`;
-          return `<details class="tool-pill kind-${kind}" data-acc-id="${esc(toolId)}"><summary><span class="tool-badge">${esc(nm)}</span><span class="tool-cmd-preview">${esc(summarizeToolArgs(tool))}</span><span class="tiny-tag">${esc(tool.status || 'done')}</span></summary><div class="acc-body">${renderToolContent(tool)}</div></details>`;
+          return `<details class="tool-pill kind-${kind}" data-acc-id="${esc(toolId)}"><summary><span class="tool-badge">${esc(nm)}</span><span class="tool-cmd-preview">${esc(summarizeToolArgs(tool))}</span><span class="tiny-tag">${esc(tool.status || 'done')}</span></summary><div class="tool-render">${renderToolContent(tool)}</div></details>`;
         }).join('') : '';
-        const reasoning = ui.show_think && step.thinking ? `<details class="think-drawer" data-acc-id="${esc(stepThinkId)}" ${wasOpen(stepThinkId, true) ? 'open' : ''}><summary><span>تفکر · مرحله ${sIdx + 1}</span><span>${step.thinking.length} chars · باز/بسته</span></summary><div class="think-body md-body">${window.ABMarkdown.render(step.thinking)}${step.thinking_fa ? `<div class="think-translation">${window.ABMarkdown.render(step.thinking_fa)}</div>` : ''}<button class="btn ghost think-translate-btn" onclick="ABChatPage.translateThink('${esc(t.id)}',${sIdx},event)">${step.thinking_fa ? 'ترجمه دوباره' : 'ترجمه‌ی این مرحله'}</button></div></details>` : '';
+        const reasoning = ui.show_think && step.thinking ? `<details class="think-drawer think-mode-${stepThinkMode}" data-acc-id="${esc(stepThinkId)}" ${stepThinkMode !== 'closed' ? 'open' : ''}><summary><span>تفکر · مرحله ${sIdx + 1} · ${step.thinking.length} chars</span>${thinkModeControls(stepThinkId)}</summary><div class="think-body md-body">${window.ABMarkdown.render(step.thinking)}${step.thinking_fa ? `<div class="think-translation">${window.ABMarkdown.render(step.thinking_fa)}</div>` : ''}<button class="btn ghost think-translate-btn" onclick="ABChatPage.translateThink('${esc(t.id)}',${sIdx},event)">${step.thinking_fa ? 'ترجمه دوباره' : 'ترجمه‌ی این مرحله'}</button></div></details>` : '';
         return `<details class="agent-step" data-acc-id="${esc(stageId)}" ${wasOpen(stageId, true) ? 'open' : ''}><summary class="step-label">مرحله ${sIdx + 1} · ${esc(step.status || 'در حال اجرا')} · تفکر و ابزارهای این دور</summary><div class="step-content">${reasoning}${stepTools}</div></details>`;
       }).join('') : '';
 
@@ -533,6 +559,8 @@ window.ABChatPage = (() => {
                 <summary><span>پرامپت شما · ${String(t.user_raw || '').length} نویسه</span><span>${esc(src)} · باز/بسته</span></summary>
                 <div class="user-bubble">
                   ${window.ABMarkdown.render(t.user_raw)}
+                  <button class="btn ghost prompt-translate-btn" onclick="ABChatPage.translatePrompt('${esc(t.id)}',event)">${t.prompt_translation ? 'ترجمه‌ی ورودی دوباره' : 'ترجمه‌ی همین پرامپت'}</button>
+                  ${t.prompt_translation ? `<div class="prompt-translation">${window.ABMarkdown.render(t.prompt_translation)}</div>` : ''}
                   <div class="user-bubble-meta">
                     <span>#${String(idx + 1).padStart(2, '0')} · <span class="src-badge ${src !== 'WEB' ? 'cli' : ''}">${esc(src)}</span></span>
                     ${savedPill}
@@ -570,6 +598,6 @@ window.ABChatPage = (() => {
   return {
     render, translateDraft, sendFinal, validateOutgoing,
     toggleComposerMd, closePreview, copyOutgoing,
-    setChatMode, toggleUiFlag, retranslate, translateThink, translateSelection, closeSelectionTranslate, abort, scrollToBottom
+    setChatMode, toggleUiFlag, retranslate, translatePrompt, translateThink, setThinkMode, translateSelection, closeSelectionTranslate, abort, scrollToBottom
   };
 })();

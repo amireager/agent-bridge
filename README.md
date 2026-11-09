@@ -15,6 +15,14 @@ Smooth, zero-dependency local `/v1` KV-cache hunter proxy, **paragraph-interleav
 4. **Built-in Online + Standard API Offline Translation & Strict `./.data/` Isolation**:
    - Built-in online translator (`0` extra servers) + offline OpenAI (`/v1/chat/completions`) & REST (`/translate`) APIs; all state isolated inside `./.data/`.
 
+## Code map and tests
+
+See [the module map](docs/module-map-fa.md) for the responsibility of each source file and where to make changes. Run regression tests with:
+
+```bash
+python3 -m unittest discover -s tests -v
+```
+
 ## Quick Start (NixOS Host + Sandboxed `pi`)
 
 ```bash

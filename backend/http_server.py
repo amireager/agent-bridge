@@ -104,6 +104,8 @@ def make_handler(hub: BridgeHub):
                     tr_cfg.update(hub.tested_translator_configs[engine_mode])
                 if engine_mode == "online":
                     tr_cfg["engine"] = "builtin-online"
+                elif engine_mode in ("online-google", "online-google-gtx", "online-mymemory"):
+                    tr_cfg["engine"] = engine_mode
                 elif engine_mode == "offline":
                     tr_cfg["engine"] = "custom-offline"
                 for key in ("proxy", "offline_protocol", "offline_url", "offline_model"):
@@ -359,9 +361,11 @@ def make_handler(hub: BridgeHub):
                 method="POST",
             )
             t0 = time.perf_counter()
+            hub.wire_request_started(agent_name)
             try:
                 resp = LOOPBACK_OPENER.open(req, timeout=300)
             except urllib.error.HTTPError as err:
+                hub.wire_request_failed(agent_name)
                 eb = err.read()
                 self.send_response(err.code)
                 self.send_header("Content-Type", "application/json")
@@ -370,6 +374,7 @@ def make_handler(hub: BridgeHub):
                 self.wfile.write(eb)
                 return
             except Exception as exc:
+                hub.wire_request_failed(agent_name)
                 self._send_json({"error": str(exc)}, 502)
                 return
 
@@ -438,7 +443,7 @@ def make_handler(hub: BridgeHub):
                             "name": it["name"] or "tool",
                             "args": parsed_args,
                             "output": "",
-                            "status": "done",
+                            "status": "running",
                             "is_error": False,
                         }
                     )
@@ -469,7 +474,7 @@ def make_handler(hub: BridgeHub):
                                     "name": fn.get("name", "tool"),
                                     "args": parsed_a,
                                     "output": "",
-                                    "status": "done",
+                                    "status": "running",
                                     "is_error": False,
                                 }
                             )
