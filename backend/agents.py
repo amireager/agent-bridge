@@ -14,7 +14,6 @@ import json
 import os
 import queue
 import re
-import subprocess
 import threading
 import time
 import urllib.request
@@ -68,6 +67,15 @@ class BridgeHub:
         # 2. Built-in Direct Model & Tool Lab sessions
         self.lab_sessions: dict[str, dict] = {}
         self.lab_abort_flag = False
+        # Lab tools are jailed to a dedicated project workspace, never the Bridge repo/root.
+        self.lab_workspace = (self.store.data_dir.parent / "agent-team").resolve()
+        self.lab_workspace.mkdir(parents=True, exist_ok=True)
+        workspace_readme = self.lab_workspace / "README.md"
+        if not workspace_readme.exists():
+            workspace_readme.write_text(
+                "# agent-team workspace\n\nA separate sandbox for gradually built local agents. Lab file tools are restricted here.\n",
+                encoding="utf-8",
+            )
 
         # Active view target: ("mirror", "pi") or ("lab", "<session_id>")
         self.view_kind: str = "mirror"
@@ -156,17 +164,15 @@ class BridgeHub:
     # ---- PTY Multi-Terminal Registration ----
     def register_pty(self, desired_base: str = "pi", explicit_name: str = "") -> str:
         now = time.time()
-        if explicit_name:
-            chosen = re.sub(r"[^a-zA-Z0-9_.-]", "-", explicit_name)
-        else:
-            base = re.sub(r"[^a-zA-Z0-9_.-]", "-", desired_base) or "pi"
-            if (now - self.pty_heartbeats.get(base, 0.0)) > 20.0:
-                chosen = base
-            else:
-                idx = 2
-                while (now - self.pty_heartbeats.get(f"{base}-{idx}", 0.0)) <= 20.0:
-                    idx += 1
-                chosen = f"{base}-{idx}"
+        base = re.sub(r"[^a-zA-Z0-9_.-]", "-", explicit_name or desired_base) or "pi"
+        # Every live PTY gets an exclusive channel lease. Even duplicate explicit names
+        # are suffixed so one terminal can never unregister another terminal's heartbeat.
+        chosen = base
+        if (now - self.pty_heartbeats.get(chosen, 0.0)) <= 25.0:
+            idx = 2
+            while (now - self.pty_heartbeats.get(f"{base}-{idx}", 0.0)) <= 25.0:
+                idx += 1
+            chosen = f"{base}-{idx}"
 
         self.pty_heartbeats[chosen] = now
         if chosen not in self.mirrors:
@@ -379,6 +385,14 @@ class BridgeHub:
         )
 
         if is_continuation and existing_turn is not None:
+            step = {
+                "index": len(existing_turn.setdefault("steps", [])) + 1,
+                "thinking": extracted_think,
+                "tools": list(tool_calls),
+                "reply_en": clean_reply,
+                "status": "tools" if tool_calls else "final",
+            }
+            existing_turn["steps"].append(step)
             for tl in existing_turn.get("tools", []):
                 if tl["id"] in tool_outputs_by_id and not tl.get("output"):
                     tl["output"] = tool_outputs_by_id[tl["id"]]
@@ -433,6 +447,7 @@ class BridgeHub:
             "thinking": extracted_think,
             "thinking_fa": "",
             "think_blocks": [],
+            "steps": [{"index": 1, "thinking": extracted_think, "tools": list(tool_calls), "reply_en": clean_reply, "status": "tools" if tool_calls else "final"}],
             "tools": tool_calls,
             "reply_en": clean_reply,
             "reply_fa": "",
@@ -476,41 +491,37 @@ class BridgeHub:
                     },
                 },
             },
-            {
-                "type": "function",
-                "function": {
-                    "name": "run_shell",
-                    "description": "Run a quick diagnostic shell command in workdir (10s timeout).",
-                    "parameters": {
-                        "type": "object",
-                        "properties": {"command": {"type": "string"}},
-                        "required": ["command"],
-                    },
-                },
-            },
         ]
 
+    def _lab_safe_path(self, value: str) -> Path:
+        """Resolve a Lab path and reject absolute paths, traversal, and symlink escapes."""
+        raw = Path(value or ".")
+        if raw.is_absolute():
+            raise PermissionError("Lab file tools accept workspace-relative paths only.")
+        root = self.lab_workspace.resolve()
+        target = (root / raw).resolve()
+        if target != root and root not in target.parents:
+            raise PermissionError("Path escapes the isolated agent-team workspace.")
+        return target
+
     def _exec_lab_tool(self, name: str, args: dict) -> tuple[str, bool]:
-        workdir = Path(self.config["tap"].get("workdir") or ".").expanduser().resolve()
+        """Read-only starter tools, jailed to ./agent-team; no shell or repo access."""
         try:
             if name == "list_files":
-                rel = str(args.get("path", ".") or ".")
-                target = (workdir / rel).resolve() if not Path(rel).is_absolute() else Path(rel).resolve()
-                entries = sorted(p.name + ("/" if p.is_dir() else "") for p in target.iterdir())[:120]
-                return "\n".join(entries) or "(empty directory)", False
+                target = self._lab_safe_path(str(args.get("path", ".") or "."))
+                if not target.is_dir():
+                    return "Not a directory.", True
+                entries = sorted(p.name + ("/" if p.is_dir() else "") for p in target.iterdir())[:80]
+                return "\\n".join(entries) or "(empty directory)", False
             if name == "read_file":
-                rel = str(args.get("path", ""))
-                target = (workdir / rel).resolve() if not Path(rel).is_absolute() else Path(rel).resolve()
+                target = self._lab_safe_path(str(args.get("path", "")))
+                if not target.is_file():
+                    return "Not a regular file.", True
+                if target.stat().st_size > 128 * 1024:
+                    return "File exceeds the 128 KiB Lab read limit.", True
                 lines = target.read_text(encoding="utf-8", errors="replace").splitlines()[:160]
-                return "\n".join(f"{i+1}: {ln}" for i, ln in enumerate(lines)), False
-            if name == "run_shell":
-                cmd = str(args.get("command", ""))
-                r = subprocess.run(
-                    cmd, shell=True, cwd=str(workdir), capture_output=True, text=True, timeout=10
-                )
-                out = (r.stdout + ("\n" + r.stderr if r.stderr else "")).strip()
-                return (out[:4000] or f"(exit {r.returncode})"), (r.returncode != 0)
-            return f"Unknown tool: {name}", True
+                return "\\n".join(f"{i+1}: {ln}" for i, ln in enumerate(lines)), False
+            return f"Tool not enabled in the starter Lab: {name}", True
         except Exception as exc:
             return f"Tool error: {exc}", True
 
@@ -519,7 +530,14 @@ class BridgeHub:
         self.lab_abort_flag = False
         self.broadcast_state()
 
-        sys_prompt = self.config["tap"].get("lab_system_prompt", "").strip()
+        custom_prompt = self.config["tap"].get("lab_system_prompt", "").strip()
+        sys_prompt = (
+            "You are the starter agent-team workspace assistant. Work only inside the dedicated "
+            "agent-team workspace. The only available tools are read-only list_files and read_file; "
+            "there is no shell, write, or access to the Agent Bridge repository or other folders. "
+            "Do not pretend that files were changed. Build capabilities incrementally only when asked.\n\n"
+            + custom_prompt
+        )
         use_tools = bool(self.config["tap"].get("lab_enable_tools", True))
 
         # Build clean OpenAI conversation history so KV prefix stays 100% static across turns!
@@ -562,6 +580,9 @@ class BridgeHub:
 
                 step_content: list[str] = []
                 step_think: list[str] = []
+                step_no = len(turn.setdefault("steps", [])) + 1
+                step_record = {"index": step_no, "thinking": "", "tools": [], "reply_en": "", "status": "thinking"}
+                turn["steps"].append(step_record)
                 tool_map: dict[int, dict] = {}
                 last_bcast = 0.0
 
@@ -586,10 +607,12 @@ class BridgeHub:
                             d = ch.get("delta", {})
                             if d.get("reasoning_content"):
                                 step_think.append(d["reasoning_content"])
-                                turn["thinking"] = "".join(step_think)
+                                step_record["thinking"] = "".join(step_think)
+                                turn["thinking"] = "\n\n".join(s.get("thinking", "") for s in turn["steps"] if s.get("thinking"))
                             if d.get("content"):
                                 self.session_state = "STREAMING"
                                 step_content.append(d["content"])
+                                step_record["reply_en"] = "".join(step_content)
                                 turn["reply_en"] = "".join(step_content)
                             for tcd in d.get("tool_calls", []) or []:
                                 idx = int(tcd.get("index", 0))
@@ -610,12 +633,16 @@ class BridgeHub:
                 full_txt = "".join(step_content)
                 m_th = THINK_TAG_RE.search(full_txt)
                 if m_th:
-                    turn["thinking"] = (turn["thinking"] + "\n" + m_th.group(1)).strip()
+                    step_record["thinking"] = (step_record.get("thinking", "") + "\n" + m_th.group(1)).strip()
+                    turn["thinking"] = "\n\n".join(s.get("thinking", "") for s in turn["steps"] if s.get("thinking"))
                     full_txt = THINK_TAG_RE.sub("", full_txt).strip()
                     turn["reply_en"] = full_txt
 
                 if not tool_map:
+                    step_record["status"] = "final"
+                    step_record["reply_en"] = full_txt or step_record.get("reply_en", "")
                     break
+                step_record["status"] = "tools"
 
                 # Execute requested Lab tools & continue loop
                 self.session_state = "TOOL_EXEC"
@@ -637,6 +664,7 @@ class BridgeHub:
                         "is_error": False,
                     }
                     turn["tools"].append(t_rec)
+                    step_record["tools"].append(t_rec)
                     self.broadcast_state()
 
                     out_str, is_err = self._exec_lab_tool(t_rec["name"], parsed_a if isinstance(parsed_a, dict) else {})
@@ -704,6 +732,7 @@ class BridgeHub:
                 "thinking": "",
                 "thinking_fa": "",
                 "think_blocks": [],
+                "steps": [],
                 "tools": [],
                 "reply_en": "",
                 "reply_fa": "",

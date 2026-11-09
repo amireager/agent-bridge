@@ -443,6 +443,18 @@ window.ABChatPage = (() => {
           </details>`;
       }).join('') : '';
 
+      const stepTimeline = (Array.isArray(t.steps) && t.steps.length) ? t.steps.map((step, sIdx) => {
+        const stepThinkId = `${t.id}-step-${sIdx}-think`;
+        const stepTools = ui.show_tools ? (step.tools || []).map((tool, tIdx) => {
+          const nm = String(tool.name || 'tool');
+          const kind = /shell|bash|terminal|exec/i.test(nm) ? 'shell' : (/read|list|search/i.test(nm) ? 'read' : (/edit|write|patch/i.test(nm) ? 'edit' : 'other'));
+          const toolId = `${t.id}-step-${sIdx}-tool-${tIdx}`;
+          return `<details class="tool-pill kind-${kind}" data-acc-id="${esc(toolId)}"><summary><span class="tool-badge">${esc(nm)}</span><span class="tool-cmd-preview">${esc(summarizeToolArgs(tool))}</span><span class="tiny-tag">${esc(tool.status || 'done')}</span></summary><div class="acc-body">${esc(formatToolBody(tool))}</div></details>`;
+        }).join('') : '';
+        const reasoning = ui.show_think && step.thinking ? `<details class="think-drawer" data-acc-id="${esc(stepThinkId)}"><summary><span>تفکر · مرحله ${sIdx + 1}</span><span>${step.thinking.length} chars · باز/بسته</span></summary><div class="think-body md-body">${window.ABMarkdown.render(step.thinking)}</div></details>` : '';
+        return `<section class="agent-step"><div class="step-label">مرحله ${sIdx + 1} · ${esc(step.status || 'در حال اجرا')}</div>${reasoning}${stepTools}</section>`;
+      }).join('') : '';
+
       const bodyContent = (t.reply_en || (t.blocks && t.blocks.length))
         ? window.ABMarkdown.renderBlocks(t.blocks, t.reply_en, t.reply_fa, chatMode)
         : (t.tools?.length ? '' : '<div class="mono muted">[در حال دریافت پاسخ مدل...]</div>');
@@ -470,8 +482,7 @@ window.ABChatPage = (() => {
             <summary class="assistant-fold-head"><span>پاسخ ${esc(t.model || t.agent || 'مدل')} · ${esc(tokStr)}</span><span class="kv-pill ${esc(kvState)}">${esc(kvLabel)} · باز/بسته</span></summary>
             <div class="assistant-stream">
               <div class="turn-meta-bar"><strong>${esc(t.agent)}</strong><span>${esc(t.model || '')}</span></div>
-              ${thinkAcc}
-              ${toolsAcc}
+              ${stepTimeline || `${thinkAcc}${toolsAcc}`}
               ${bodyContent}
               ${t.reply_en ? `<div class="turn-foot-actions"><span>engine: ${esc(t.tr_engine || (trEnabled ? 'online' : 'proxy-only'))}</span><button class="btn ghost" onclick="ABChatPage.retranslate('${esc(t.id)}')">ترجمه مجدد ↻</button></div>` : ''}
             </div>

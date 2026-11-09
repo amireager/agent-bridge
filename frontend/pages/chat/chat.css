@@ -99,6 +99,10 @@
   direction: ltr;
 }
 
+/* Iterative agent trace: each think/tool round gets its own lightweight timeline section */
+.agent-step { border-left: 2px solid var(--line-strong); padding-left: 10px; margin: 8px 0; display:flex; flex-direction:column; gap:7px; }
+.step-label { color:var(--fg-2); font: 11px var(--mono); letter-spacing:.02em; }
+
 /* Each assistant turn can be folded independently for clean long-chat reading */
 details.assistant-fold { display:block; }
 details.assistant-fold > summary { list-style:none; cursor:pointer; }
