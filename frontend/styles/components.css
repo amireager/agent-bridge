@@ -555,3 +555,14 @@ table.grid-table td.m { font-family: var(--mono); font-size: 12.6px; direction: 
 .model-help pre { direction:ltr; text-align:left; padding:8px; background:var(--bg-0); border-radius:8px; }
 .model-provider-docs { display:inline-block; margin-top:6px; color:var(--cyan); font-size:12px; }
 .model-availability-alert.fallback-ready { color:var(--amber); border-color:color-mix(in srgb,var(--amber) 55%,transparent); background:color-mix(in srgb,var(--amber) 8%,var(--bg-1)); }
+
+/* Appearance settings: live theme preview and safe pending-change actions. */
+.ui-theme-preview { margin-top:16px; padding:16px; border:1px solid var(--line-strong); border-radius:var(--radius-lg); background:var(--bg-0); color:var(--fg-0); box-shadow:var(--shadow-soft); }
+.ui-preview-top { display:flex; align-items:center; gap:9px; color:var(--fg-1); }
+.ui-preview-top small { margin-inline-start:auto; color:var(--fg-2); }
+.ui-preview-dot { width:10px; height:10px; border-radius:50%; background:var(--phosphor); box-shadow:0 0 12px var(--phosphor-dim); }
+.ui-preview-card { margin:12px 0; padding:14px; border:1px solid var(--line); border-radius:var(--radius-md); background:var(--bg-1); color:var(--fg-1); }
+.ui-preview-card p { margin:10px 0; color:var(--fg-0); }
+.ui-preview-card code { color:var(--cyan); font-family:var(--mono); }
+.ui-preview-chip { display:inline-flex; padding:3px 9px; border-radius:999px; background:var(--phosphor-dim); color:var(--phosphor); font-size:.82em; }
+.ui-settings-actions { display:flex; flex-wrap:wrap; gap:9px; margin-top:16px; }

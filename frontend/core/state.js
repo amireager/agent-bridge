@@ -16,6 +16,7 @@ window.ABApp = (() => {
   function getRoute() { return route; }
 
   function navigate(nextRoute) {
+    if (route === 'set-hud' && nextRoute !== 'set-hud') window.ABSettingsPage?.cancelUIPreview?.();
     route = nextRoute;
     renderTree();
     renderMainPage(true);

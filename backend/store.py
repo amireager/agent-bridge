@@ -132,6 +132,7 @@ class DataStore:
                 "chat_mode": "interleaved",  # interleaved | fa_only | en_only
                 "translate_thinking": False,
                 "show_think": True,
+                "think_default_mode": "half",  # closed | half (6 lines) | full
                 "show_tools": True,
                 "show_inline_tokens": True,
                 "show_shadow_cost": True,

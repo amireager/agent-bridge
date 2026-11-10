@@ -4,6 +4,59 @@ window.ABSettingsPage = (() => {
   const $ = id => document.getElementById(id);
   const cfg = () => window.ABApp.getState().config;
   let modelAccountsCache = [];
+  let uiPreviewActive = false;
+  const UI_DEFAULTS = { theme: 'openwebui-dark', font_scale: 'large', sidebar_side: 'left', show_think: true, think_default_mode: 'half', translate_thinking: false, show_tools: true, show_inline_tokens: true, show_shadow_cost: true, recent_requests_limit: 10, xray_limit: 40 };
+
+  function previewUI() {
+    const theme = $('sTheme')?.value || UI_DEFAULTS.theme;
+    const font = $('sFont')?.value || UI_DEFAULTS.font_scale;
+    document.documentElement.setAttribute('data-theme', theme);
+    document.documentElement.setAttribute('data-font', font);
+    uiPreviewActive = true;
+    const label = $('uiPreviewStatus');
+    if (label) label.textContent = 'پیش‌نمایش زنده است؛ برای ثبت، ذخیره را بزن. با لغو یا خروج از این صفحه، تغییرات برمی‌گردند.';
+  }
+
+  function fillUIForm(ui) {
+    $('sTheme').value = ui.theme || UI_DEFAULTS.theme;
+    $('sFont').value = ui.font_scale || UI_DEFAULTS.font_scale;
+    $('sSide').value = ui.sidebar_side || UI_DEFAULTS.sidebar_side;
+    $('sThink').checked = ui.show_think ?? UI_DEFAULTS.show_think;
+    $('sThinkDefault').value = ui.think_default_mode || UI_DEFAULTS.think_default_mode;
+    $('sTranslateThink').checked = ui.translate_thinking ?? UI_DEFAULTS.translate_thinking;
+    $('sTools').checked = ui.show_tools ?? UI_DEFAULTS.show_tools;
+    $('sTokens').checked = ui.show_inline_tokens ?? UI_DEFAULTS.show_inline_tokens;
+    $('sCost').checked = ui.show_shadow_cost ?? UI_DEFAULTS.show_shadow_cost;
+    $('sRecentLimit').value = ui.recent_requests_limit || UI_DEFAULTS.recent_requests_limit;
+    $('sXrayLimit').value = ui.xray_limit || UI_DEFAULTS.xray_limit;
+  }
+
+  function cancelUIPreview() {
+    const ui = window.ABApp.getState()?.config?.ui || {};
+    document.documentElement.setAttribute('data-theme', ui.theme || UI_DEFAULTS.theme);
+    document.documentElement.setAttribute('data-font', ui.font_scale || UI_DEFAULTS.font_scale);
+    fillUIForm(ui);
+    uiPreviewActive = false;
+    const status = $('uiPreviewStatus');
+    if (status) { status.textContent = 'پیش‌نمایش لغو شد؛ تنظیمات ذخیره‌شده برگشت.'; status.style.color = 'var(--fg-2)'; }
+  }
+
+  function resetUIToDefaults() {
+    $('sTheme').value = UI_DEFAULTS.theme;
+    $('sFont').value = UI_DEFAULTS.font_scale;
+    $('sSide').value = UI_DEFAULTS.sidebar_side;
+    $('sThink').checked = UI_DEFAULTS.show_think;
+    $('sThinkDefault').value = UI_DEFAULTS.think_default_mode;
+    $('sTranslateThink').checked = UI_DEFAULTS.translate_thinking;
+    $('sTools').checked = UI_DEFAULTS.show_tools;
+    $('sTokens').checked = UI_DEFAULTS.show_inline_tokens;
+    $('sCost').checked = UI_DEFAULTS.show_shadow_cost;
+    $('sRecentLimit').value = UI_DEFAULTS.recent_requests_limit;
+    $('sXrayLimit').value = UI_DEFAULTS.xray_limit;
+    previewUI();
+    const status = $('uiPreviewStatus');
+    if (status) status.textContent = 'مقادیر پیش‌فرض این بخش بارگذاری شد؛ برای ثبت، ذخیره را بزن.';
+  }
 
   function translationMode() { return $('sMode')?.value || 'online'; }
   function selectedTranslationEngine() {
@@ -98,13 +151,22 @@ window.ABSettingsPage = (() => {
     const font_scale = $('sFont').value;
     const sidebar_side = $('sSide').value;
     const show_think = $('sThink').checked;
+    const think_default_mode = $('sThinkDefault').value;
     const translate_thinking = $('sTranslateThink').checked;
     const show_tools = $('sTools').checked;
     const show_inline_tokens = $('sTokens').checked;
     const show_shadow_cost = $('sCost').checked;
     const recent_requests_limit = Math.max(1, Math.min(100, Number($('sRecentLimit').value || 10)));
     const xray_limit = Math.max(1, Math.min(200, Number($('sXrayLimit').value || 40)));
-    await api('/api/config', { ui: { theme, font_scale, sidebar_side, show_think, translate_thinking, show_tools, show_inline_tokens, show_shadow_cost, recent_requests_limit, xray_limit } });
+    try {
+      await api('/api/config', { ui: { theme, font_scale, sidebar_side, show_think, think_default_mode, translate_thinking, show_tools, show_inline_tokens, show_shadow_cost, recent_requests_limit, xray_limit } });
+      uiPreviewActive = false;
+      const status = $('uiPreviewStatus');
+      if (status) { status.textContent = 'تنظیمات کاربری ذخیره شد.'; status.style.color = 'var(--phosphor)'; }
+    } catch (e) {
+      const status = $('uiPreviewStatus');
+      if (status) { status.textContent = `ذخیره ناموفق · ${e.message}`; status.style.color = 'var(--red)'; }
+    }
   }
 
   async function testModelConnection() {
@@ -363,10 +425,26 @@ Content-Type: application/json
         </section>
       </div>`;
     } else if (route === 'set-hud') {
-      host.innerHTML = `<div class="panel-wrap"><div class="panel rtl"><div class="panel-head"><h3>ظاهر و نمایش</h3></div>
-        <div class="field-grid"><div class="fld"><label>تم سبک</label><select id="sTheme"><option value="openwebui-dark">Open WebUI · Slate</option><option value="mocha-dark">Catppuccin Mocha</option><option value="zed-dark">Zed Dark</option><option value="lobechat-dark">LobeChat Glass</option><option value="nord-dark">Nord</option><option value="forest-dark">Forest</option><option value="paper-light">Paper Light</option></select></div><div class="fld"><label>اندازه فونت</label><select id="sFont"><option value="compact">فشرده · 13px</option><option value="normal">معمولی · 14px</option><option value="large">خوانا · 15.5px</option><option value="xlarge">درشت · 17px</option><option value="xxlarge">خیلی درشت · 19px</option></select></div><div class="fld"><label>جایگاه سایدبار</label><select id="sSide"><option value="left">چپ</option><option value="right">راست</option></select></div></div>
-        <div class="os-card" style="margin-top:18px">${[['sThink','نمایش Think',ui.show_think],['sTranslateThink','ترجمه Think',ui.translate_thinking],['sTools','نمایش ابزارها',ui.show_tools],['sTokens','نمایش آمار توکن',ui.show_inline_tokens],['sCost','نمایش هزینه سایه‌ای',ui.show_shadow_cost]].map(([id,label,val])=>`<div class="os-row"><div class="os-row-top"><div class="os-title-wrap">${label}<button class="help-pill" onclick="ABSettingsPage.toggleHelp('help-${id}')">؟ توضیح</button></div><label class="ui-switch"><input id="${id}" type="checkbox" ${val ? 'checked' : ''}><span class="ui-slider"></span></label></div><div class="os-help-drawer" id="help-${id}">این گزینه فقط نحوه نمایش/ترجمه در رابط را کنترل می‌کند و موتور مدل را تغییر نمی‌دهد.</div></div>`).join('')}</div><div class="field-grid" style="margin-top:16px"><div class="fld"><label>تعداد درخواست‌های اخیر در Usage</label><input id="sRecentLimit" type="number" min="1" max="100" value="${ui.recent_requests_limit || 10}"></div><div class="fld"><label>سقف قاب‌های X-Ray در حافظه</label><input id="sXrayLimit" type="number" min="1" max="200" value="${ui.xray_limit || 40}"></div></div><button class="btn primary" style="margin-top:16px" onclick="ABSettingsPage.saveUI()">ذخیره</button></div></div>`;
-      $('sTheme').value = ui.theme || 'openwebui-dark'; $('sFont').value = ui.font_scale || 'large'; $('sSide').value = ui.sidebar_side || 'left';
+      host.innerHTML = `<div class="panel-wrap ui-settings">
+        <div class="panel rtl">
+          <div class="panel-head"><div><h3>تم و تنظیمات کاربری</h3><p class="muted">تغییر تم و اندازهٔ نوشته را زنده پیش‌نمایش کن؛ تا وقتی ذخیره نزنی فقط پیش‌نمایش موقت است.</p></div></div>
+          <div class="field-grid">
+            <div class="fld"><label for="sTheme">تم</label><select id="sTheme" onchange="ABSettingsPage.previewUI()"><option value="openwebui-dark">Open WebUI · Slate</option><option value="mocha-dark">Catppuccin Mocha</option><option value="zed-dark">Zed Dark</option><option value="lobechat-dark">LobeChat Glass</option><option value="nord-dark">Nord</option><option value="forest-dark">Forest</option><option value="paper-light">Paper Light</option></select></div>
+            <div class="fld"><label for="sFont">اندازهٔ نوشته</label><select id="sFont" onchange="ABSettingsPage.previewUI()"><option value="compact">فشرده · 13px</option><option value="normal">معمولی · 14px</option><option value="large">خوانا · 15.5px</option><option value="xlarge">درشت · 17px</option><option value="xxlarge">خیلی درشت · 19px</option></select></div>
+            <div class="fld"><label for="sSide">جایگاه سایدبار</label><select id="sSide"><option value="left">چپ</option><option value="right">راست</option></select></div>
+          </div>
+          <div class="ui-theme-preview" aria-live="polite"><div class="ui-preview-top"><span class="ui-preview-dot"></span><strong>پیش‌نمایش رابط</strong><small>نمونهٔ کارت و متن</small></div><div class="ui-preview-card"><span class="ui-preview-chip">ابزار · جست‌وجو</span><p>این متن نمونه برای بررسی خوانایی، کنتراست و حالت باکس‌هاست.</p><code>model → response</code></div><div id="uiPreviewStatus" class="muted" role="status">تم فعلی از تنظیمات کاربر گرفته شده است.</div></div>
+        </div>
+        <div class="panel rtl">
+          <div class="panel-head"><div><h3>نمایش گفتگو</h3><p class="muted">این گزینه‌ها فقط نمایش رابط را تغییر می‌دهند، نه رفتار مدل را.</p></div></div>
+          <div class="fld"><label for="sThinkDefault">حالت پیش‌فرض Think برای پیام‌های تازه</label><select id="sThinkDefault"><option value="closed">بسته</option><option value="half">نیمه‌باز · ۶ خط</option><option value="full">باز کامل</option></select><small>انتخاب دستی هر پیام حفظ می‌شود؛ این مقدار فقط پیش‌فرض پیام‌هایی است که هنوز انتخاب شخصی ندارند.</small></div>
+          <div class="os-card" style="margin-top:14px">${[['sThink','نمایش Think',ui.show_think],['sTranslateThink','ترجمه Think',ui.translate_thinking],['sTools','نمایش ابزارها',ui.show_tools],['sTokens','نمایش آمار توکن',ui.show_inline_tokens],['sCost','نمایش هزینه سایه‌ای',ui.show_shadow_cost]].map(([id,label,val])=>`<div class="os-row"><div class="os-row-top"><div class="os-title-wrap">${label}<button class="help-pill" onclick="ABSettingsPage.toggleHelp('help-${id}')">؟ توضیح</button></div><label class="ui-switch"><input id="${id}" type="checkbox" ${val ? 'checked' : ''}><span class="ui-slider"></span></label></div><div class="os-help-drawer" id="help-${id}">این گزینه فقط نحوه نمایش/ترجمه در رابط را کنترل می‌کند و موتور مدل را تغییر نمی‌دهد.</div></div>`).join('')}</div>
+          <div class="field-grid" style="margin-top:16px"><div class="fld"><label for="sRecentLimit">تعداد درخواست‌های اخیر در Usage</label><input id="sRecentLimit" type="number" min="1" max="100" value="${ui.recent_requests_limit || 10}"></div><div class="fld"><label for="sXrayLimit">سقف قاب‌های X-Ray در حافظه</label><input id="sXrayLimit" type="number" min="1" max="200" value="${ui.xray_limit || 40}"></div></div>
+          <div class="ui-settings-actions"><button class="btn" type="button" onclick="ABSettingsPage.resetUIToDefaults()">بازگردانی پیش‌فرض‌های این بخش</button><button class="btn ghost" type="button" onclick="ABSettingsPage.cancelUIPreview()">لغو تغییرات پیش‌نمایش</button><button class="btn primary" type="button" onclick="ABSettingsPage.saveUI()">ذخیره تنظیمات کاربری</button></div>
+        </div>
+      </div>`;
+      fillUIForm(ui);
+      uiPreviewActive = false;
     } else if (route === 'set-tap') {
       const models = c.models || {};
       const vault = state.model_vault || { locked: false, encryption_enabled: false, accounts: [] };
@@ -413,5 +491,5 @@ Content-Type: application/json
         <details style="margin-top:16px"><summary>فهرست فایل‌های داده</summary><pre class="acc-body">${esc((state.storage?.files || []).map(f => `${f.path} · ${f.bytes} B`).join('\n'))}</pre></details></div></div>`;
     }
   }
-  return { render, saveTranslation, testConnection, translateSettingsSample, addGlossaryRow, saveGlossary, saveUI, saveModel, testModelConnection, refreshProviderAccounts, applyProviderDefaults, saveModelAccount, editModelAccount, testOnlineAccount, discoverOnlineModels, deleteModelAccount, changeModelEncryption, clearData, previewCleanup, runSelectedCleanup, toggleHelp, syncConditional };
+  return { render, saveTranslation, testConnection, translateSettingsSample, addGlossaryRow, saveGlossary, saveUI, previewUI, cancelUIPreview, resetUIToDefaults, saveModel, testModelConnection, refreshProviderAccounts, applyProviderDefaults, saveModelAccount, editModelAccount, testOnlineAccount, discoverOnlineModels, deleteModelAccount, changeModelEncryption, clearData, previewCleanup, runSelectedCleanup, toggleHelp, syncConditional };
 })();

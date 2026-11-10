@@ -9,11 +9,11 @@ window.ABChatPage = (() => {
   let lastTurnCount = 0;
   let stickToBottom = true;
 
-  function getThinkMode(key) {
-    try { return localStorage.getItem(`ab-think:${key}`) || 'half'; } catch (_) { return 'half'; }
+  function getThinkMode(key, defaultMode = 'half') {
+    try { return localStorage.getItem(`ab-think:${key}`) || defaultMode; } catch (_) { return defaultMode; }
   }
-  function thinkModeControls(key) {
-    const current = getThinkMode(key);
+  function thinkModeControls(key, defaultMode = 'half') {
+    const current = getThinkMode(key, defaultMode);
     return `<span class="think-modes"><button class="${current==='closed'?'selected':''}" onclick="ABChatPage.setThinkMode('${esc(key)}','closed',event)" title="بستن کامل">×</button><button class="${current==='half'?'selected':''}" onclick="ABChatPage.setThinkMode('${esc(key)}','half',event)" title="نمایش نیمه، شش خط">۶ خط</button><button class="${current==='full'?'selected':''}" onclick="ABChatPage.setThinkMode('${esc(key)}','full',event)" title="نمایش کامل">باز</button></span>`;
   }
 
@@ -507,10 +507,10 @@ window.ABChatPage = (() => {
         </details>` : '';
 
       const thinkId = `${t.id}-think`;
-      const globalThinkMode = getThinkMode(thinkId);
+      const globalThinkMode = getThinkMode(thinkId, ui.think_default_mode || 'half');
       const thinkAcc = (ui.show_think && t.thinking) ? `
         <details class="think-drawer think-mode-${globalThinkMode}" data-acc-id="${esc(thinkId)}" ${globalThinkMode !== 'closed' ? 'open' : ''}>
-          <summary><span>تفکر مدل · Think · ${t.thinking.length} chars</span>${thinkModeControls(thinkId)}</summary>
+          <summary><span>تفکر مدل · Think · ${t.thinking.length} chars</span>${thinkModeControls(thinkId, ui.think_default_mode || 'half')}</summary>
           <div class="think-body">${window.ABMarkdown.renderBlocks(t.think_blocks || [], t.thinking, t.thinking_fa || '', chatMode)}<button class="btn ghost think-translate-btn" onclick="ABChatPage.translateThink('${esc(t.id)}',-1,event)">${t.thinking_fa ? 'ترجمه‌ی مجدد تفکر' : 'ترجمه‌ی تفکر'}</button></div>
         </details>` : '';
 
@@ -530,7 +530,7 @@ window.ABChatPage = (() => {
 
       const stepTimeline = (Array.isArray(t.steps) && t.steps.length) ? t.steps.map((step, sIdx) => {
         const stepThinkId = `${t.id}-step-${sIdx}-think`;
-        const stepThinkMode = getThinkMode(stepThinkId);
+        const stepThinkMode = getThinkMode(stepThinkId, ui.think_default_mode || 'half');
         const stageId = `${t.id}-stage-${sIdx}`;
         const stepTools = ui.show_tools ? (step.tools || []).map((tool, tIdx) => {
           const nm = String(tool.name || 'tool');
@@ -538,7 +538,7 @@ window.ABChatPage = (() => {
           const toolId = `${t.id}-step-${sIdx}-tool-${tIdx}`;
           return `<details class="tool-pill kind-${kind}" data-acc-id="${esc(toolId)}"><summary><span class="tool-badge">${esc(nm)}</span><span class="tool-cmd-preview">${esc(summarizeToolArgs(tool))}</span><span class="tiny-tag">${esc(tool.status || 'done')}</span></summary><div class="tool-render">${renderToolContent(tool)}</div></details>`;
         }).join('') : '';
-        const reasoning = ui.show_think && step.thinking ? `<details class="think-drawer think-mode-${stepThinkMode}" data-acc-id="${esc(stepThinkId)}" ${stepThinkMode !== 'closed' ? 'open' : ''}><summary><span>تفکر · مرحله ${sIdx + 1} · ${step.thinking.length} chars</span>${thinkModeControls(stepThinkId)}</summary><div class="think-body md-body">${window.ABMarkdown.render(step.thinking)}${step.thinking_fa ? `<div class="think-translation">${window.ABMarkdown.render(step.thinking_fa)}</div>` : ''}<button class="btn ghost think-translate-btn" onclick="ABChatPage.translateThink('${esc(t.id)}',${sIdx},event)">${step.thinking_fa ? 'ترجمه دوباره' : 'ترجمه‌ی این مرحله'}</button></div></details>` : '';
+        const reasoning = ui.show_think && step.thinking ? `<details class="think-drawer think-mode-${stepThinkMode}" data-acc-id="${esc(stepThinkId)}" ${stepThinkMode !== 'closed' ? 'open' : ''}><summary><span>تفکر · مرحله ${sIdx + 1} · ${step.thinking.length} chars</span>${thinkModeControls(stepThinkId, ui.think_default_mode || 'half')}</summary><div class="think-body md-body">${window.ABMarkdown.render(step.thinking)}${step.thinking_fa ? `<div class="think-translation">${window.ABMarkdown.render(step.thinking_fa)}</div>` : ''}<button class="btn ghost think-translate-btn" onclick="ABChatPage.translateThink('${esc(t.id)}',${sIdx},event)">${step.thinking_fa ? 'ترجمه دوباره' : 'ترجمه‌ی این مرحله'}</button></div></details>` : '';
         return `<details class="agent-step" data-acc-id="${esc(stageId)}" ${wasOpen(stageId, true) ? 'open' : ''}><summary class="step-label">مرحله ${sIdx + 1} · ${esc(step.status || 'در حال اجرا')} · تفکر و ابزارهای این دور</summary><div class="step-content">${reasoning}${stepTools}</div></details>`;
       }).join('') : '';
 
