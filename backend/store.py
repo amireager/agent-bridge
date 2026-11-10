@@ -133,15 +133,18 @@ class DataStore:
                 "translate_thinking": False,
                 "show_think": True,
                 "think_default_mode": "half",  # closed | half (6 lines) | full
-                "box_style": "outlined",       # outlined | soft | flat
-                "think_style": "violet",       # violet | focus | minimal
-                "tool_style": "cards",         # cards | compact | minimal
-                "paragraph_spacing": "comfortable", # compact | comfortable | airy
-                "image_mode": "click",         # off | click | inline
-                "code_wrap": "scroll",         # scroll | wrap
-                "code_theme": "midnight",      # midnight | surface
+                "box_style": "outlined",       # outlined | soft | flat | glass | raised
+                "think_style": "violet",       # violet | focus | minimal | outline | amber
+                "tool_style": "cards",         # cards | compact | minimal | outlined | timeline
+                "translation_style": "accent", # accent | soft | outline | underline | minimal | contrast
+                "markdown_style": "reader",   # reader | compact | editorial | contrast | technical
+                "paragraph_spacing": "comfortable", # snug | compact | comfortable | airy | spacious
+                "image_mode": "click",         # off | placeholder | click | hover | inline
+                "image_size": "large",         # small | medium | large | wide | viewport
+                "code_wrap": "scroll",         # scroll | wrap | break | clip
+                "code_theme": "midnight",      # midnight | surface | graphite | paper | neon
                 "show_code_lines": False,
-                "tool_output_mode": "terminal", # terminal | markdown
+                "tool_output_mode": "terminal", # terminal | markdown | plain | json
                 "show_tools": True,
                 "show_inline_tokens": True,
                 "show_shadow_cost": True,

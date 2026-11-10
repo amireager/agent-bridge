@@ -30,7 +30,9 @@ window.ABMarkdown = (() => {
 
   function loadImage(button) {
     const url = button?.dataset?.imageUrl || '';
-    if (!/^https?:\/\//i.test(url)) return;
+    const safeRemote = /^https?:\/\//i.test(url);
+    const safeLocalPng = url.length <= 2_000_000 && /^data:image\/png;base64,[A-Za-z0-9+/=]+$/i.test(url);
+    if (!safeRemote && !safeLocalPng) return;
     const figure = document.createElement('figure');
     figure.className = 'md-image-frame';
     const img = document.createElement('img');
@@ -73,10 +75,13 @@ window.ABMarkdown = (() => {
     });
     s = esc(s);
     const imageMode = (typeof document !== 'undefined' ? document.documentElement?.getAttribute('data-image-mode') : 'click') || 'click';
-    s = s.replace(/!\[([^\]]*)\]\((https?:\/\/[^\s)<>\"]+)\)/g, (_, alt, url) => {
+    s = s.replace(/!\[([^\]]*)\]\(((?:https?:\/\/[^\s)<>\"]+|data:image\/png;base64,[A-Za-z0-9+/=]+))\)/g, (_, alt, url) => {
       if (imageMode === 'off') return `<span class="md-image-blocked">[تصویر پنهان${alt ? ` · ${alt}` : ''}]</span>`;
+      if (imageMode === 'placeholder') return `<span class="md-image-placeholder" role="img" aria-label="${alt || 'تصویر'}"><b>▧</b><span>${alt || 'تصویر Markdown'}</span></span>`;
       if (imageMode === 'inline') return `<figure class="md-image-frame"><img src="${url}" alt="${alt}" loading="lazy" referrerpolicy="no-referrer" onclick="ABMarkdown.zoomImage(this)"></figure>`;
-      return `<button class="md-image-reveal" type="button" data-image-url="${url}" data-image-alt="${alt}" onclick="ABMarkdown.loadImage(this)">▧ بارگذاری تصویر${alt ? ` · ${alt}` : ''}</button>`;
+      const trigger = imageMode === 'hover' ? 'onmouseenter' : 'onclick';
+      const hint = imageMode === 'hover' ? 'برای بارگذاری روی تصویر مکث کن' : 'بارگذاری تصویر';
+      return `<button class="md-image-reveal" type="button" data-image-url="${url}" data-image-alt="${alt}" ${trigger}="ABMarkdown.loadImage(this)">▧ ${hint}${alt ? ` · ${alt}` : ''}</button>`;
     });
     s = s.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
     s = s.replace(/\*([^*\n]+)\*/g, '<em>$1</em>');
@@ -209,7 +214,7 @@ window.ABMarkdown = (() => {
     if (mode === 'fa_after') {
       if (!Array.isArray(blocks) || !blocks.length) return `<div class="translation-review-flow"><section><h4>متن اصلی</h4><div class="ltr">${render(fallbackEn)}</div></section><section><h4>ترجمه</h4><div class="rtl">${render(fallbackFa || '')}</div></section></div>`;
       const original = blocks.map(b => b.type === 'code' ? renderCodeCard(b.raw) : b.type === 'hr' ? '<hr/>' : `<div class="md-body para-en">${renderProseSegment(b.en || '')}</div>`).join('');
-      const translated = blocks.filter(b => b.type === 'prose').map(b => `<div class="md-body para-fa-seamless">${b.fa && b.fa.trim() ? renderProseSegment(b.fa) : '<span class="translation-missing">ترجمهٔ این بند موجود نیست.</span>'}</div>`).join('');
+      const translated = blocks.filter(b => b.type === 'prose').map(b => `<div class="md-body para-fa-seamless para-fa">${b.fa && b.fa.trim() ? renderProseSegment(b.fa) : '<span class="translation-missing">ترجمهٔ این بند موجود نیست.</span>'}</div>`).join('');
       return `<div class="translation-review-flow"><section class="translation-original"><h4>متن اصلی · کد دست‌نخورده</h4><div class="immersive-flow">${original}</div></section><section class="translation-fa"><h4>ترجمهٔ فارسی</h4><div class="immersive-flow fa-clean">${translated || '<p class="muted">ترجمه‌ای برای این بخش نداریم.</p>'}</div></section></div>`;
     }
     if (mode === 'side_by_side') {
@@ -233,7 +238,7 @@ window.ABMarkdown = (() => {
         if (b.type === 'code') return renderCodeCard(b.raw);
         if (b.type === 'hr') return '<hr/>';
         const txt = (b.fa && b.fa.trim()) ? b.fa : (b.en || '');
-        const dirCls = (b.fa && b.fa.trim()) ? 'para-fa-seamless' : 'para-en';
+        const dirCls = (b.fa && b.fa.trim()) ? 'para-fa-seamless para-fa' : 'para-en';
         return `<div class="md-body ${dirCls}">${renderProseSegment(txt)}</div>`;
       }).join('');
       return `<div class="immersive-flow fa-clean">${inner}</div>`;

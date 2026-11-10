@@ -5,17 +5,28 @@ const attrs = { 'data-image-mode': 'click' };
 global.document = { documentElement: { getAttribute: key => attrs[key] || null } };
 global.window = { ABUtils: { esc: value => String(value ?? '').replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch])) } };
 vm.runInThisContext(fs.readFileSync('frontend/core/markdown.js', 'utf8'));
+const localPng = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aWTkAAAAASUVORK5CYII=';
 let html = window.ABMarkdown.render('![mountain](https://example.test/mountain.png)');
 assert.match(html, /md-image-reveal/);
 assert.doesNotMatch(html, /<img src=/);
+assert.match(window.ABMarkdown.render(`![local](${localPng})`), /md-image-reveal/);
 attrs['data-image-mode'] = 'off';
 html = window.ABMarkdown.render('![mountain](https://example.test/mountain.png)');
 assert.match(html, /md-image-blocked/);
+assert.doesNotMatch(html, /<img src=/);
+attrs['data-image-mode'] = 'placeholder';
+html = window.ABMarkdown.render('![mountain](https://example.test/mountain.png)');
+assert.match(html, /md-image-placeholder/);
+assert.doesNotMatch(html, /<img src=/);
+attrs['data-image-mode'] = 'hover';
+html = window.ABMarkdown.render('![mountain](https://example.test/mountain.png)');
+assert.match(html, /onmouseenter=/);
 assert.doesNotMatch(html, /<img src=/);
 attrs['data-image-mode'] = 'inline';
 html = window.ABMarkdown.render('![mountain](https://example.test/mountain.png)');
 assert.match(html, /<img src="https:\/\/example\.test\/mountain\.png"/);
 assert.doesNotMatch(window.ABMarkdown.render('![x](javascript:alert(1))'), /<img src=/);
+assert.match(window.ABMarkdown.render(`![local](${localPng})`), /<img src="data:image\/png;base64,/);
 const blocks = [
   {type:'prose', en:'Original text.', fa:'متن اصلی.'},
   {type:'code', raw:'```js\nconst x = 1;\n```'}
@@ -25,5 +36,6 @@ assert.match(side, /side-by-side/);
 assert.equal((side.match(/class="md-code"/g) || []).length, 1);
 const below = window.ABMarkdown.renderBlocks(blocks, '', '', 'fa_after');
 assert.match(below, /translation-review-flow/);
+assert.match(below, /para-fa-seamless para-fa/);
 assert.equal((below.match(/class="md-code"/g) || []).length, 1);
 console.log('markdown media and translation layout smoke: PASS');

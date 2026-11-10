@@ -194,6 +194,9 @@ window.ABApp = (() => {
     document.documentElement.setAttribute('data-box-style', ui.box_style || 'outlined');
     document.documentElement.setAttribute('data-think-style', ui.think_style || 'violet');
     document.documentElement.setAttribute('data-tool-style', ui.tool_style || 'cards');
+    document.documentElement.setAttribute('data-translation-style', ui.translation_style || 'accent');
+    document.documentElement.setAttribute('data-markdown-style', ui.markdown_style || 'reader');
+    document.documentElement.setAttribute('data-image-size', ui.image_size || 'large');
     document.documentElement.setAttribute('data-paragraph-spacing', ui.paragraph_spacing || 'comfortable');
     document.documentElement.setAttribute('data-image-mode', ui.image_mode || 'click');
     document.documentElement.setAttribute('data-code-wrap', ui.code_wrap || 'scroll');

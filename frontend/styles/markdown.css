@@ -172,3 +172,45 @@ html[data-code-lines="on"] .md-code-line::before { counter-increment:mdline; con
 .side-by-side-fallback { display:grid; grid-template-columns:minmax(0,1fr) minmax(0,1fr); align-items:start; gap:16px; }
 .side-by-side-fallback > .md-side-column { min-width:0; }
 @media(max-width:760px) { .side-by-side-fallback { grid-template-columns:minmax(0,1fr); } }
+
+/* User-selectable reader and translation skins: these apply to live replies and the settings gallery. */
+html[data-translation-style="accent"] .para-fa { border-color:var(--phosphor); background:var(--phosphor-dim); }
+html[data-translation-style="soft"] .para-fa { border:0; border-inline-start:3px solid color-mix(in srgb,var(--cyan) 70%,transparent); border-radius:10px; background:color-mix(in srgb,var(--cyan) 9%,var(--bg-1)); }
+html[data-translation-style="outline"] .para-fa { border:1px solid color-mix(in srgb,var(--cyan) 58%,var(--line)); border-inline-start:4px solid var(--cyan); background:transparent; }
+html[data-translation-style="underline"] .para-fa { border:0; border-radius:0; background:transparent; box-shadow:inset 0 -2px 0 color-mix(in srgb,var(--violet) 70%,transparent); padding-inline:4px; }
+html[data-translation-style="minimal"] .para-fa { border:0; border-radius:0; background:transparent; padding:3px 0; color:var(--fg-1); }
+html[data-translation-style="contrast"] .para-fa { border-inline-start:4px solid var(--amber); background:color-mix(in srgb,var(--amber) 13%,var(--bg-1)); color:var(--fg-0); font-weight:550; }
+html[data-markdown-style="compact"] .md-body { line-height:1.55; font-size:calc(var(--prose-fs) - .8px); }
+html[data-markdown-style="editorial"] .md-body { line-height:2; letter-spacing:.01em; }
+html[data-markdown-style="editorial"] .md-body h1,html[data-markdown-style="editorial"] .md-body h2 { letter-spacing:-.025em; }
+html[data-markdown-style="contrast"] .md-body { color:var(--fg-0); font-weight:500; line-height:1.9; }
+html[data-markdown-style="technical"] .md-body { font-family:var(--mono); font-size:calc(var(--prose-fs) - 1px); line-height:1.72; }
+html[data-paragraph-spacing="snug"] .md-body p { margin-bottom:2px; }
+html[data-paragraph-spacing="snug"] .immersive-flow { gap:4px; }
+html[data-paragraph-spacing="snug"] .bilingual-pair { gap:3px; }
+html[data-paragraph-spacing="spacious"] .md-body p { margin-bottom:26px; }
+html[data-paragraph-spacing="spacious"] .immersive-flow { gap:30px; }
+html[data-paragraph-spacing="spacious"] .bilingual-pair { gap:17px; }
+html[data-code-wrap="break"] .md-code pre { white-space:pre-wrap; overflow-wrap:anywhere; word-break:break-all; }
+html[data-code-theme="graphite"] .md-code { background:#181b21; border-color:#3b414d; }
+html[data-code-theme="graphite"] .md-code-bar { background:#222630; }
+html[data-code-theme="paper"] .md-code { background:#f4f1e8; border-color:#d4ccbb; }
+html[data-code-theme="paper"] .md-code pre { color:#293040; }
+html[data-code-theme="paper"] .md-code-bar { background:#e9e4d8; color:#536071; }
+html[data-code-theme="paper"] .md-code .tok-kw { color:#245b9b; }
+html[data-code-theme="paper"] .md-code .tok-str { color:#28734c; }
+html[data-code-theme="paper"] .md-code .tok-com { color:#7a8190; }
+html[data-code-theme="paper"] .md-code .tok-num { color:#a35411; }
+html[data-code-theme="neon"] .md-code { background:#09131b; border-color:#176a70; box-shadow:inset 0 0 28px #00e5ff0a; }
+html[data-code-theme="neon"] .md-code .tok-kw { color:#52e7ff; }
+html[data-code-theme="neon"] .md-code .tok-str { color:#c4ff70; }
+html[data-code-theme="neon"] .md-code .tok-num { color:#ffb86c; }
+html[data-image-size="small"] .md-image-frame img { max-width:min(100%,360px); }
+html[data-image-size="medium"] .md-image-frame img { max-width:min(100%,560px); }
+html[data-image-size="large"] .md-image-frame img { max-width:min(100%,760px); }
+html[data-image-size="wide"] .md-image-frame { width:100%; }
+html[data-image-size="wide"] .md-image-frame img { width:100%; max-width:100%; }
+html[data-image-size="viewport"] .md-image-frame img { max-width:100%; max-height:80vh; }
+html[data-code-wrap="clip"] .md-code pre { white-space:pre; overflow:hidden; text-overflow:clip; }
+.md-image-placeholder { display:inline-flex; align-items:center; gap:8px; max-width:100%; margin:7px 0; padding:9px 12px; border:1px dashed var(--line-strong); border-radius:9px; color:var(--fg-2); background:var(--bg-1); font-size:.9em; }
+.md-image-placeholder b { color:var(--cyan); font-size:1.25em; }

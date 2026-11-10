@@ -5,7 +5,8 @@ window.ABSettingsPage = (() => {
   const cfg = () => window.ABApp.getState().config;
   let modelAccountsCache = [];
   let uiPreviewActive = false;
-  const UI_DEFAULTS = { theme: 'openwebui-dark', font_scale: 'large', sidebar_side: 'left', show_think: true, think_default_mode: 'half', box_style: 'outlined', think_style: 'violet', tool_style: 'cards', chat_mode: 'interleaved', paragraph_spacing: 'comfortable', image_mode: 'click', code_wrap: 'scroll', code_theme: 'midnight', show_code_lines: false, tool_output_mode: 'terminal', translate_thinking: false, show_tools: true, show_inline_tokens: true, show_shadow_cost: true, recent_requests_limit: 10, xray_limit: 40 };
+  const PREVIEW_IMAGE_URL = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAGAAAAA2CAIAAAC3LQuFAAACDElEQVR42u3Q20qUYRTG8ec+OugWPO3QOyiUZMJQjCJRisIoFAclSQrD3WFbw/ZUVqRlYbmhss3JqKPO3plRL6M+ecMGnXd94xq+9cHLgt8wBwPr/c+Do7diioBjt2OKgLo7MUVA/d0lRcDxe0uKgIb7y4qAyNiyIuDEgxVFQOP4ikv+5Ib3q+YgTj6MO6PsOgb7Jpoexd1ArGPwzqL58aobfAfinUXLk1U3+A7EO4tTT9fc4DsQ7yxOP1tzg+9AvLM483zdDb4D8c7i7It1N/gOxDuL1pcJZxDrsG+i7VXCJWXXqeYg2icSioBzr5OKgPNvkoqAC29TioCL71KKgI7JtCLg0lRaEXD5fUYRcOVDRhHQOZ1VBHR9zIboSGu0VLgxZfPQ/SkXlj3reEKMseUhOpMLxf51jLB6bG3o+bwhz7aOEUqSLQ+9Xzbk0QOFkmRrw9XZvCR6ml3CVUQh+ubykiocSLiKyMO1+bykCgfyCIfZ8tC/UBBT+TqGZJstD9e/FsQcdCDJNlsebnwryjjoOh6xNiIPA9+LAhjrGDJ5RCFuLm4Gjb2ORyCPLoT3GfyxGZxq1jECzfON3Blo6OdWcA7XRnbxBgo0z2NeKe0sTYX5Gvm1FYQ9r7I3CijPFlma+m+g0d/bDMRf8n61PcybiVdIIwr/D3SoplYRdCAdSAfSgXQgHUgHctZfi0XGmvcO0XcAAAAASUVORK5CYII=';
+  const UI_DEFAULTS = { theme: 'openwebui-dark', font_scale: 'large', sidebar_side: 'left', show_think: true, think_default_mode: 'half', box_style: 'outlined', think_style: 'violet', tool_style: 'cards', translation_style: 'accent', markdown_style: 'reader', chat_mode: 'interleaved', paragraph_spacing: 'comfortable', image_mode: 'click', image_size: 'large', code_wrap: 'scroll', code_theme: 'midnight', show_code_lines: false, tool_output_mode: 'terminal', translate_thinking: false, show_tools: true, show_inline_tokens: true, show_shadow_cost: true, recent_requests_limit: 10, xray_limit: 40 };
 
   function renderDisplayPreview() {
     const markdownHost = $('uiMarkdownPreview');
@@ -17,23 +18,57 @@ window.ABSettingsPage = (() => {
       ];
       markdownHost.innerHTML = window.ABMarkdown.renderBlocks(blocks, 'The original paragraph stays intact.\n\nA second paragraph demonstrates spacing and alignment.', 'پاراگراف اصلی دست‌نخورده می‌ماند.\n\nپاراگراف دوم فاصله و چیدمان را نشان می‌دهد.', $('sChatMode')?.value || UI_DEFAULTS.chat_mode);
     }
+    const thinkHost = $('uiThinkPreview');
+    if (thinkHost) {
+      const mode = $('sThinkDefault')?.value || UI_DEFAULTS.think_default_mode;
+      thinkHost.open = mode !== 'closed';
+      thinkHost.dataset.mode = mode;
+      thinkHost.hidden = !$('sThink')?.checked;
+      const translation = $('uiThinkTranslation');
+      if (translation) translation.hidden = !$('sTranslateThink')?.checked;
+    }
     const toolHost = $('uiToolPreview');
     if (toolHost) {
+      toolHost.hidden = !$('sTools')?.checked;
       const outputMode = $('sToolOutputMode')?.value || UI_DEFAULTS.tool_output_mode;
       const head = '<summary><span class="tool-badge">shell</span><span class="tool-cmd-preview">$ check --status</span><span class="tiny-tag">done</span></summary>';
       toolHost.innerHTML = outputMode === 'markdown'
-        ? `<details class="tool-pill kind-shell" open>${head}<div class="tool-readable-content"><details class="tool-args" open><summary>ورودی ابزار</summary><pre>{"command":"check --status"}</pre></details><div class="tool-markdown-output">${window.ABMarkdown?.render('Service is ready.\n\n- First check\n- Second check') || 'Service is ready.'}</div></div></details>`
-        : `<details class="tool-pill kind-shell" open>${head}<div class="tool-render"><div class="terminal-view"><div class="terminal-chrome"><i></i><i></i><i></i><span>نمونه خروجی</span></div><div class="terminal-content"><div class="term-line"><span class="term-ln">1</span><code>service ready ✓</code></div></div></div></div></details>`;
+        ? `<details class="tool-pill kind-shell" open>${head}<div class="tool-readable-content"><details class="tool-args" open><summary>ورودی ابزار</summary><pre>{"command":"check --status"}</pre></details><div class="tool-markdown-output">${window.ABMarkdown?.render(`Service is ready.\n\n- First check\n- Second check\n\n![نمونهٔ امن محلی](${PREVIEW_IMAGE_URL})`) || 'Service is ready.'}</div></div></details>`
+        : outputMode === 'plain'
+          ? `<details class="tool-pill kind-shell" open>${head}<div class="tool-readable-content tool-plain-output"><p>Service is ready.</p><p>• First check passed</p><p>• Second check passed</p></div></details>`
+          : outputMode === 'json'
+            ? `<details class="tool-pill kind-shell" open>${head}<div class="tool-readable-content"><details class="tool-args" open><summary>ورودی ساخت‌یافتهٔ ابزار</summary><pre>{"command": "check --status"}</pre></details><pre class="tool-plain-body">{"status": "ready", "checks": 2}</pre></div></details>`
+            : `<details class="tool-pill kind-shell" open>${head}<div class="tool-render"><div class="terminal-view"><div class="terminal-chrome"><i></i><i></i><i></i><span>نمونه خروجی</span></div><div class="terminal-content"><div class="term-line"><span class="term-ln">1</span><code>service ready ✓</code></div></div></div></div></details>`;
     }
+    const meta = $('uiPreviewMeta');
+    if (meta) meta.innerHTML = [ $('sTokens')?.checked ? '<span class="ui-meta-chip">↗ 1.2k tokens</span>' : '', $('sCost')?.checked ? '<span class="ui-meta-chip">◈ $0.004</span>' : '' ].join('');
     const imageHost = $('uiImagePreview');
     if (imageHost) {
       const mode = $('sImageMode')?.value || UI_DEFAULTS.image_mode;
-      imageHost.className = `ui-image-preview image-mode-${mode}`;
-      imageHost.innerHTML = mode === 'off' ? '<span>تصاویر Markdown پنهان هستند.</span>' : mode === 'inline' ? '<span class="image-swatch"></span><span>تصویر درون‌خطی · نمونهٔ بی‌اتصال شبکه</span>' : '<span class="image-swatch"></span><span>تصویر با کلیک کاربر بارگذاری می‌شود.</span>';
+      imageHost.className = `ui-image-preview image-mode-${mode} image-size-${$('sImageSize')?.value || UI_DEFAULTS.image_size}`;
+      imageHost.hidden = false;
+      imageHost.innerHTML = mode === 'off' ? '<span>▧ تصاویر Markdown پنهان هستند.</span>' : mode === 'placeholder' ? '<span class="md-image-placeholder"><b>▧</b><span>تصویر بدون بارگذاری · جای‌نگهدار</span></span>' : `<button type="button" class="image-swatch" aria-label="نمونهٔ محلی تصویر؛ بدون اتصال شبکه" ${mode === 'hover' ? 'onmouseenter' : 'onclick'}="this.classList.toggle('revealed')"></button><span>${mode === 'inline' ? 'تصویر درون‌خطی · نمونهٔ محلی، بدون شبکه' : mode === 'hover' ? 'بارگذاری با مکث روی تصویر · شبکه فقط با انتخاب تو' : 'تصویر با اقدام کاربر · برای نمایش نمونه کلیک کن'}</span>`;
     }
   }
 
+  function applyPreset(name) {
+    const presets = {
+      aurora: { theme: 'forest-dark', box_style: 'glass', think_style: 'focus', tool_style: 'cards', translation_style: 'accent', markdown_style: 'reader', paragraph_spacing: 'comfortable', code_theme: 'neon' },
+      studio: { theme: 'zed-dark', box_style: 'raised', think_style: 'outline', tool_style: 'outlined', translation_style: 'outline', markdown_style: 'editorial', paragraph_spacing: 'airy', code_theme: 'graphite' },
+      focus: { theme: 'mocha-dark', box_style: 'flat', think_style: 'minimal', tool_style: 'minimal', translation_style: 'minimal', markdown_style: 'compact', paragraph_spacing: 'compact', code_theme: 'midnight' },
+      paper: { theme: 'paper-light', box_style: 'soft', think_style: 'amber', tool_style: 'cards', translation_style: 'soft', markdown_style: 'editorial', paragraph_spacing: 'spacious', code_theme: 'paper' },
+      terminal: { theme: 'nord-dark', box_style: 'outlined', think_style: 'focus', tool_style: 'timeline', translation_style: 'contrast', markdown_style: 'technical', paragraph_spacing: 'snug', code_theme: 'neon', code_wrap: 'scroll', tool_output_mode: 'terminal' }
+    };
+    const preset = presets[name];
+    if (!preset) return;
+    const controls = { theme:'sTheme', box_style:'sBoxStyle', think_style:'sThinkStyle', tool_style:'sToolStyle', translation_style:'sTranslationStyle', markdown_style:'sMarkdownStyle', paragraph_spacing:'sParagraphSpacing', code_theme:'sCodeTheme', code_wrap:'sCodeWrap', tool_output_mode:'sToolOutputMode' };
+    Object.entries(preset).forEach(([key, value]) => { const el = $(controls[key]); if (el) el.value = value; });
+    previewUI();
+    document.querySelectorAll('.ui-preset').forEach(btn => btn.classList.toggle('active', btn.getAttribute('onclick')?.includes(`'${name}'`)));
+  }
+
   function previewUI() {
+    document.querySelectorAll('.ui-preset.active').forEach(btn => btn.classList.remove('active'));
     const theme = $('sTheme')?.value || UI_DEFAULTS.theme;
     const font = $('sFont')?.value || UI_DEFAULTS.font_scale;
     document.documentElement.setAttribute('data-theme', theme);
@@ -41,12 +76,17 @@ window.ABSettingsPage = (() => {
     document.documentElement.setAttribute('data-box-style', $('sBoxStyle')?.value || UI_DEFAULTS.box_style);
     document.documentElement.setAttribute('data-think-style', $('sThinkStyle')?.value || UI_DEFAULTS.think_style);
     document.documentElement.setAttribute('data-tool-style', $('sToolStyle')?.value || UI_DEFAULTS.tool_style);
+    document.documentElement.setAttribute('data-translation-style', $('sTranslationStyle')?.value || UI_DEFAULTS.translation_style);
+    document.documentElement.setAttribute('data-markdown-style', $('sMarkdownStyle')?.value || UI_DEFAULTS.markdown_style);
+    document.documentElement.setAttribute('data-image-size', $('sImageSize')?.value || UI_DEFAULTS.image_size);
     document.documentElement.setAttribute('data-paragraph-spacing', $('sParagraphSpacing')?.value || UI_DEFAULTS.paragraph_spacing);
     document.documentElement.setAttribute('data-image-mode', $('sImageMode')?.value || UI_DEFAULTS.image_mode);
     document.documentElement.setAttribute('data-code-wrap', $('sCodeWrap')?.value || UI_DEFAULTS.code_wrap);
     document.documentElement.setAttribute('data-code-theme', $('sCodeTheme')?.value || UI_DEFAULTS.code_theme);
     document.documentElement.setAttribute('data-code-lines', $('sCodeLines')?.checked ? 'on' : 'off');
     document.documentElement.setAttribute('data-tool-output', $('sToolOutputMode')?.value || UI_DEFAULTS.tool_output_mode);
+    const shell = document.getElementById('shellRoot');
+    if (shell) shell.classList.toggle('sidebar-right', ($('sSide')?.value || UI_DEFAULTS.sidebar_side) === 'right');
     renderDisplayPreview();
     uiPreviewActive = true;
     const label = $('uiPreviewStatus');
@@ -62,6 +102,9 @@ window.ABSettingsPage = (() => {
     $('sBoxStyle').value = ui.box_style || UI_DEFAULTS.box_style;
     $('sThinkStyle').value = ui.think_style || UI_DEFAULTS.think_style;
     $('sToolStyle').value = ui.tool_style || UI_DEFAULTS.tool_style;
+    $('sTranslationStyle').value = ui.translation_style || UI_DEFAULTS.translation_style;
+    $('sMarkdownStyle').value = ui.markdown_style || UI_DEFAULTS.markdown_style;
+    $('sImageSize').value = ui.image_size || UI_DEFAULTS.image_size;
     $('sChatMode').value = ui.chat_mode || UI_DEFAULTS.chat_mode;
     $('sParagraphSpacing').value = ui.paragraph_spacing || UI_DEFAULTS.paragraph_spacing;
     $('sImageMode').value = ui.image_mode || UI_DEFAULTS.image_mode;
@@ -78,12 +121,17 @@ window.ABSettingsPage = (() => {
   }
 
   function cancelUIPreview() {
+    document.querySelectorAll('.ui-preset.active').forEach(btn => btn.classList.remove('active'));
     const ui = window.ABApp.getState()?.config?.ui || {};
     document.documentElement.setAttribute('data-theme', ui.theme || UI_DEFAULTS.theme);
     document.documentElement.setAttribute('data-font', ui.font_scale || UI_DEFAULTS.font_scale);
+    document.getElementById('shellRoot')?.classList.toggle('sidebar-right', (ui.sidebar_side || UI_DEFAULTS.sidebar_side) === 'right');
     document.documentElement.setAttribute('data-box-style', ui.box_style || UI_DEFAULTS.box_style);
     document.documentElement.setAttribute('data-think-style', ui.think_style || UI_DEFAULTS.think_style);
     document.documentElement.setAttribute('data-tool-style', ui.tool_style || UI_DEFAULTS.tool_style);
+    document.documentElement.setAttribute('data-translation-style', ui.translation_style || UI_DEFAULTS.translation_style);
+    document.documentElement.setAttribute('data-markdown-style', ui.markdown_style || UI_DEFAULTS.markdown_style);
+    document.documentElement.setAttribute('data-image-size', ui.image_size || UI_DEFAULTS.image_size);
     document.documentElement.setAttribute('data-paragraph-spacing', ui.paragraph_spacing || UI_DEFAULTS.paragraph_spacing);
     document.documentElement.setAttribute('data-image-mode', ui.image_mode || UI_DEFAULTS.image_mode);
     document.documentElement.setAttribute('data-code-wrap', ui.code_wrap || UI_DEFAULTS.code_wrap);
@@ -91,6 +139,7 @@ window.ABSettingsPage = (() => {
     document.documentElement.setAttribute('data-code-lines', (ui.show_code_lines ?? UI_DEFAULTS.show_code_lines) ? 'on' : 'off');
     document.documentElement.setAttribute('data-tool-output', ui.tool_output_mode || UI_DEFAULTS.tool_output_mode);
     fillUIForm(ui);
+    renderDisplayPreview();
     uiPreviewActive = false;
     const status = $('uiPreviewStatus');
     if (status) { status.textContent = 'پیش‌نمایش لغو شد؛ تنظیمات ذخیره‌شده برگشت.'; status.style.color = 'var(--fg-2)'; }
@@ -105,6 +154,9 @@ window.ABSettingsPage = (() => {
     $('sBoxStyle').value = UI_DEFAULTS.box_style;
     $('sThinkStyle').value = UI_DEFAULTS.think_style;
     $('sToolStyle').value = UI_DEFAULTS.tool_style;
+    $('sTranslationStyle').value = UI_DEFAULTS.translation_style;
+    $('sMarkdownStyle').value = UI_DEFAULTS.markdown_style;
+    $('sImageSize').value = UI_DEFAULTS.image_size;
     $('sChatMode').value = UI_DEFAULTS.chat_mode;
     $('sParagraphSpacing').value = UI_DEFAULTS.paragraph_spacing;
     $('sImageMode').value = UI_DEFAULTS.image_mode;
@@ -220,6 +272,9 @@ window.ABSettingsPage = (() => {
     const box_style = $('sBoxStyle').value;
     const think_style = $('sThinkStyle').value;
     const tool_style = $('sToolStyle').value;
+    const translation_style = $('sTranslationStyle').value;
+    const markdown_style = $('sMarkdownStyle').value;
+    const image_size = $('sImageSize').value;
     const chat_mode = $('sChatMode').value;
     const paragraph_spacing = $('sParagraphSpacing').value;
     const image_mode = $('sImageMode').value;
@@ -234,7 +289,7 @@ window.ABSettingsPage = (() => {
     const recent_requests_limit = Math.max(1, Math.min(100, Number($('sRecentLimit').value || 10)));
     const xray_limit = Math.max(1, Math.min(200, Number($('sXrayLimit').value || 40)));
     try {
-      await api('/api/config', { ui: { theme, font_scale, sidebar_side, show_think, think_default_mode, box_style, think_style, tool_style, chat_mode, paragraph_spacing, image_mode, code_wrap, code_theme, show_code_lines, tool_output_mode, translate_thinking, show_tools, show_inline_tokens, show_shadow_cost, recent_requests_limit, xray_limit } });
+      await api('/api/config', { ui: { theme, font_scale, sidebar_side, show_think, think_default_mode, box_style, think_style, tool_style, translation_style, markdown_style, image_size, chat_mode, paragraph_spacing, image_mode, code_wrap, code_theme, show_code_lines, tool_output_mode, translate_thinking, show_tools, show_inline_tokens, show_shadow_cost, recent_requests_limit, xray_limit } });
       uiPreviewActive = false;
       const status = $('uiPreviewStatus');
       if (status) { status.textContent = 'تنظیمات کاربری ذخیره شد.'; status.style.color = 'var(--phosphor)'; }
@@ -506,31 +561,35 @@ Content-Type: application/json
           <div class="field-grid">
             <div class="fld"><label for="sTheme">تم رنگی</label><select id="sTheme" onchange="ABSettingsPage.previewUI()"><option value="openwebui-dark">Open WebUI · Slate</option><option value="mocha-dark">Catppuccin Mocha</option><option value="zed-dark">Zed Dark</option><option value="lobechat-dark">LobeChat Glass</option><option value="nord-dark">Nord</option><option value="forest-dark">Forest</option><option value="paper-light">Paper Light</option></select></div>
             <div class="fld"><label for="sFont">اندازهٔ نوشته</label><select id="sFont" onchange="ABSettingsPage.previewUI()"><option value="compact">فشرده · 13px</option><option value="normal">معمولی · 14px</option><option value="large">خوانا · 15.5px</option><option value="xlarge">درشت · 17px</option><option value="xxlarge">خیلی درشت · 19px</option></select></div>
-            <div class="fld"><label for="sSide">جایگاه سایدبار</label><select id="sSide"><option value="left">چپ</option><option value="right">راست</option></select></div>
+            <div class="fld"><label for="sSide">جایگاه سایدبار</label><select id="sSide" onchange="ABSettingsPage.previewUI()"><option value="left">چپ</option><option value="right">راست</option></select></div>
           </div>
           <h4 class="ui-style-heading">حالت مستقل اجزای گفتگو</h4>
           <div class="field-grid ui-style-picks">
-            <div class="fld"><label for="sBoxStyle">باکس‌ها و کارت‌های عمومی</label><select id="sBoxStyle" onchange="ABSettingsPage.previewUI()"><option value="outlined">قاب ظریف</option><option value="soft">نرم و برجسته</option><option value="flat">تخت و مینیمال</option></select></div>
-            <div class="fld"><label for="sThinkStyle">ظاهر Think</label><select id="sThinkStyle" onchange="ABSettingsPage.previewUI()"><option value="violet">بنفش کلاسیک</option><option value="focus">Focus · هالهٔ ملایم</option><option value="minimal">مینیمال</option></select></div>
-            <div class="fld"><label for="sToolStyle">نمایش ابزارها</label><select id="sToolStyle" onchange="ABSettingsPage.previewUI()"><option value="cards">کارت رنگی</option><option value="compact">کارت فشرده</option><option value="minimal">ردیف مینیمال</option></select></div>
+            <div class="fld"><label for="sBoxStyle">باکس‌ها و کارت‌های عمومی</label><select id="sBoxStyle" onchange="ABSettingsPage.previewUI()"><option value="outlined">قاب ظریف</option><option value="soft">نرم و برجسته</option><option value="flat">تخت و مینیمال</option><option value="glass">شیشه‌ای · شفاف</option><option value="raised">برجسته · عمق‌دار</option></select></div>
+            <div class="fld"><label for="sThinkStyle">ظاهر Think</label><select id="sThinkStyle" onchange="ABSettingsPage.previewUI()"><option value="violet">بنفش کلاسیک</option><option value="focus">Focus · هالهٔ ملایم</option><option value="minimal">مینیمال</option><option value="outline">خط دور رنگی</option><option value="amber">کهربایی · گرم</option></select></div>
+            <div class="fld"><label for="sToolStyle">نمایش ابزارها</label><select id="sToolStyle" onchange="ABSettingsPage.previewUI()"><option value="cards">کارت رنگی</option><option value="compact">کارت فشرده</option><option value="minimal">ردیف مینیمال</option><option value="outlined">خطی و شفاف</option><option value="timeline">خط زمانی</option></select></div>
           </div>
-          <div class="ui-theme-preview" aria-live="polite"><div class="ui-preview-top"><span class="ui-preview-dot"></span><strong>پیش‌نمایش زندهٔ محتوا</strong><small>همان Markdown renderer برنامه</small></div><div class="ui-preview-gallery"><section class="ui-preview-content"><h4>پاسخ، ترجمه، جدول و کد</h4><div id="uiMarkdownPreview" class="ui-markdown-preview"></div><div id="uiImagePreview" class="ui-image-preview"></div></section><section class="ui-preview-elements"><h4>Think و خروجی ابزار</h4><div class="ui-preview-think"><strong>Think · پیش‌نمایش</strong><p>یک قاب مستقل برای محتوای تفکر؛ حالت باز/بسته جداگانه تنظیم می‌شود.</p></div><div id="uiToolPreview"></div></section></div><div id="uiPreviewStatus" class="muted" role="status">انتخاب‌ها را تغییر بده تا نمونه‌ها زنده عوض شوند.</div></div>
         </div>
         <div class="panel rtl">
           <div class="panel-head"><div><h3>نمایش گفتگو</h3><p class="muted">این گزینه‌ها فقط نمایش رابط را تغییر می‌دهند، نه رفتار مدل را.</p></div></div>
-          <div class="fld"><label for="sThinkDefault">حالت پیش‌فرض Think برای پیام‌های تازه</label><select id="sThinkDefault"><option value="closed">بسته</option><option value="half">نیمه‌باز · ۶ خط</option><option value="full">باز کامل</option></select><small>انتخاب دستی هر پیام حفظ می‌شود؛ این مقدار فقط پیش‌فرض پیام‌هایی است که هنوز انتخاب شخصی ندارند.</small></div>
+          <div class="fld"><label for="sThinkDefault">حالت پیش‌فرض Think برای پیام‌های تازه</label><select id="sThinkDefault" onchange="ABSettingsPage.previewUI()"><option value="closed">بسته</option><option value="half">نیمه‌باز · ۶ خط</option><option value="full">باز کامل</option></select><small>انتخاب دستی هر پیام حفظ می‌شود؛ این مقدار فقط پیش‌فرض پیام‌هایی است که هنوز انتخاب شخصی ندارند.</small></div>
           <h4 class="ui-style-heading">Markdown، ترجمه و رسانه</h4>
           <div class="field-grid ui-content-picks">
+            <div class="fld"><label for="sTranslationStyle">پوستهٔ ترجمه</label><select id="sTranslationStyle" onchange="ABSettingsPage.previewUI()"><option value="accent">زمردی · برجسته</option><option value="soft">پس‌زمینهٔ نرم</option><option value="outline">قاب فیروزه‌ای</option><option value="underline">خط زیر رنگی</option><option value="minimal">بی‌قاب و ساده</option><option value="contrast">کنتراست بالا</option></select></div>
+            <div class="fld"><label for="sMarkdownStyle">سبک خواندن Markdown</label><select id="sMarkdownStyle" onchange="ABSettingsPage.previewUI()"><option value="reader">Reader · خوانا</option><option value="compact">فشرده</option><option value="editorial">تحریریه‌ای</option><option value="contrast">کنتراست بالا</option><option value="technical">فنی · تک‌فاصله</option></select></div>
             <div class="fld"><label for="sChatMode">چیدمان ترجمهٔ پاسخ</label><select id="sChatMode" onchange="ABSettingsPage.previewUI()"><option value="interleaved">زیرهم · اصلی و ترجمهٔ هر پاراگراف</option><option value="side_by_side">کنارهم · صفحهٔ عریض</option><option value="fa_after">اصل، سپس ترجمه</option><option value="fa_only">فقط فارسی</option><option value="en_only">فقط زبان اصلی</option></select></div>
-            <div class="fld"><label for="sParagraphSpacing">فاصلهٔ پاراگراف‌ها</label><select id="sParagraphSpacing" onchange="ABSettingsPage.previewUI()"><option value="compact">فشرده</option><option value="comfortable">خوانا · پیش‌فرض</option><option value="airy">باز و فاصله‌دار</option></select></div>
-            <div class="fld"><label for="sImageMode">تصاویر Markdown</label><select id="sImageMode" onchange="ABSettingsPage.previewUI()"><option value="off">پنهان</option><option value="click">بارگذاری با کلیک · امن‌تر</option><option value="inline">نمایش خودکار</option></select></div>
-            <div class="fld"><label for="sCodeWrap">کدهای بلند</label><select id="sCodeWrap" onchange="ABSettingsPage.previewUI()"><option value="scroll">اسکرول افقی</option><option value="wrap">شکستن خط</option></select></div>
-            <div class="fld"><label for="sCodeTheme">قالب کد</label><select id="sCodeTheme" onchange="ABSettingsPage.previewUI()"><option value="midnight">Midnight · تیره</option><option value="surface">هم‌رنگ پوسته</option></select></div>
-            <div class="fld"><label for="sToolOutputMode">محتوای ابزارها</label><select id="sToolOutputMode" onchange="ABSettingsPage.previewUI()"><option value="terminal">ترمینال رنگی</option><option value="markdown">Markdown خوانا</option></select></div>
+            <div class="fld"><label for="sParagraphSpacing">فاصلهٔ پاراگراف‌ها</label><select id="sParagraphSpacing" onchange="ABSettingsPage.previewUI()"><option value="snug">خیلی فشرده</option><option value="compact">فشرده</option><option value="comfortable">خوانا · پیش‌فرض</option><option value="airy">باز و فاصله‌دار</option><option value="spacious">خیلی باز</option></select></div>
+            <div class="fld"><label for="sImageMode">تصاویر Markdown</label><select id="sImageMode" onchange="ABSettingsPage.previewUI()"><option value="off">پنهان</option><option value="placeholder">جای‌نگهدار · بدون شبکه</option><option value="click">بارگذاری با کلیک · امن‌تر</option><option value="hover">بارگذاری با مکث</option><option value="inline">نمایش خودکار · شبکه</option></select></div>
+            <div class="fld"><label for="sImageSize">اندازهٔ تصویرها</label><select id="sImageSize" onchange="ABSettingsPage.previewUI()"><option value="small">ریز · 360px</option><option value="medium">متوسط · 560px</option><option value="large">بزرگ · 760px</option><option value="wide">عریض · 100%</option><option value="viewport">قد صفحه</option></select></div>
+            <div class="fld"><label for="sCodeWrap">کدهای بلند</label><select id="sCodeWrap" onchange="ABSettingsPage.previewUI()"><option value="scroll">اسکرول افقی</option><option value="wrap">شکستن خط</option><option value="break">شکستن واژه‌های بلند</option><option value="clip">برش در قاب · بدون اسکرول</option></select></div>
+            <div class="fld"><label for="sCodeTheme">قالب کد</label><select id="sCodeTheme" onchange="ABSettingsPage.previewUI()"><option value="midnight">Midnight · تیره</option><option value="surface">هم‌رنگ پوسته</option><option value="graphite">گرافیتی</option><option value="paper">کاغذ روشن</option><option value="neon">نئون · پررنگ</option></select></div>
+            <div class="fld"><label for="sToolOutputMode">محتوای ابزارها</label><select id="sToolOutputMode" onchange="ABSettingsPage.previewUI()"><option value="terminal">ترمینال رنگی</option><option value="markdown">Markdown خوانا</option><option value="plain">متن ساده</option><option value="json">JSON ساخت‌یافته</option></select></div>
             <div class="fld"><label class="ui-check-row"><input id="sCodeLines" type="checkbox" onchange="ABSettingsPage.previewUI()"> نمایش شمارهٔ خط کد</label></div>
           </div>
-          <div class="os-card" style="margin-top:14px">${[['sThink','نمایش Think',ui.show_think],['sTranslateThink','ترجمه Think',ui.translate_thinking],['sTools','نمایش ابزارها',ui.show_tools],['sTokens','نمایش آمار توکن',ui.show_inline_tokens],['sCost','نمایش هزینه سایه‌ای',ui.show_shadow_cost]].map(([id,label,val])=>`<div class="os-row"><div class="os-row-top"><div class="os-title-wrap">${label}<button class="help-pill" onclick="ABSettingsPage.toggleHelp('help-${id}')">؟ توضیح</button></div><label class="ui-switch"><input id="${id}" type="checkbox" ${val ? 'checked' : ''}><span class="ui-slider"></span></label></div><div class="os-help-drawer" id="help-${id}">این گزینه فقط نحوه نمایش/ترجمه در رابط را کنترل می‌کند و موتور مدل را تغییر نمی‌دهد.</div></div>`).join('')}</div>
+          <div class="os-card" style="margin-top:14px">${[['sThink','نمایش Think',ui.show_think],['sTranslateThink','ترجمه Think',ui.translate_thinking],['sTools','نمایش ابزارها',ui.show_tools],['sTokens','نمایش آمار توکن',ui.show_inline_tokens],['sCost','نمایش هزینه سایه‌ای',ui.show_shadow_cost]].map(([id,label,val])=>`<div class="os-row"><div class="os-row-top"><div class="os-title-wrap">${label}<button class="help-pill" onclick="ABSettingsPage.toggleHelp('help-${id}')">؟ توضیح</button></div><label class="ui-switch"><input id="${id}" type="checkbox" onchange="ABSettingsPage.previewUI()" ${val ? 'checked' : ''}><span class="ui-slider"></span></label></div><div class="os-help-drawer" id="help-${id}">این گزینه فقط نحوه نمایش/ترجمه در رابط را کنترل می‌کند و موتور مدل را تغییر نمی‌دهد.</div></div>`).join('')}</div>
           <div class="field-grid" style="margin-top:16px"><div class="fld"><label for="sRecentLimit">تعداد درخواست‌های اخیر در Usage</label><input id="sRecentLimit" type="number" min="1" max="100" value="${ui.recent_requests_limit || 10}"></div><div class="fld"><label for="sXrayLimit">سقف قاب‌های X-Ray در حافظه</label><input id="sXrayLimit" type="number" min="1" max="200" value="${ui.xray_limit || 40}"></div></div>
+          <div class="ui-presets"><div><strong>یک حال‌وهوای آماده انتخاب کن</strong><small>همهٔ گزینه‌ها بعدش همچنان قابل تغییرند</small></div><div class="ui-preset-buttons"><button type="button" class="ui-preset" onclick="ABSettingsPage.applyPreset('aurora')"><b>✦</b> شفق قطبی</button><button type="button" class="ui-preset" onclick="ABSettingsPage.applyPreset('studio')"><b>▤</b> استودیو</button><button type="button" class="ui-preset" onclick="ABSettingsPage.applyPreset('focus')"><b>◉</b> تمرکز</button><button type="button" class="ui-preset" onclick="ABSettingsPage.applyPreset('paper')"><b>☼</b> کاغذی</button><button type="button" class="ui-preset" onclick="ABSettingsPage.applyPreset('terminal')"><b>⌘</b> ترمینال</button></div></div>
+          <div class="ui-theme-preview" aria-live="polite"><div class="ui-preview-top"><span class="ui-preview-dot"></span><strong>پیش‌نمایش زندهٔ همهٔ انتخاب‌ها</strong><small>نمونهٔ واقعی Markdown، ترجمه، تصویر، Think و ابزار</small></div><div class="ui-preview-gallery"><section class="ui-preview-content"><h4>پاسخ، ترجمه، جدول و کد</h4><div id="uiMarkdownPreview" class="ui-markdown-preview"></div><div id="uiImagePreview" class="ui-image-preview"></div></section><section class="ui-preview-elements"><h4>Think و خروجی ابزار</h4><details id="uiThinkPreview" class="ui-preview-think" open><summary>✦ Think · پیش‌نمایش</summary><div class="ui-preview-think-body"><p>مقایسهٔ داده‌ها و بررسی نتیجه…</p><p>شرط وضعیت سرویس برقرار است.</p><p>ساختار پاسخ را بدون تغییر کد نگه می‌دارم.</p><p>محتوای ابزار در نمونهٔ کنار نمایش داده می‌شود.</p><p>خوانایی و فاصله‌ها از تنظیم انتخابی پیروی می‌کنند.</p><p>آمادهٔ پاسخ نهایی هستم.</p><p id="uiThinkTranslation" class="md-body para-fa" dir="rtl" hidden>ترجمهٔ نمایشی Think · این خط فقط در پیش‌نمایش نمونه است.</p></div></details><div id="uiToolPreview"></div><div id="uiPreviewMeta" class="ui-preview-meta"></div></section></div><div id="uiPreviewStatus" class="muted" role="status">تغییرها زنده دیده می‌شوند و تا ذخیره‌سازی موقت‌اند.</div></div>
           <div class="ui-settings-actions"><button class="btn" type="button" onclick="ABSettingsPage.resetUIToDefaults()">بازگردانی پیش‌فرض‌های این بخش</button><button class="btn ghost" type="button" onclick="ABSettingsPage.cancelUIPreview()">لغو تغییرات پیش‌نمایش</button><button class="btn primary" type="button" onclick="ABSettingsPage.saveUI()">ذخیره تنظیمات کاربری</button></div>
         </div>
       </div>`;
@@ -583,5 +642,5 @@ Content-Type: application/json
         <details style="margin-top:16px"><summary>فهرست فایل‌های داده</summary><pre class="acc-body">${esc((state.storage?.files || []).map(f => `${f.path} · ${f.bytes} B`).join('\n'))}</pre></details></div></div>`;
     }
   }
-  return { render, saveTranslation, testConnection, translateSettingsSample, addGlossaryRow, saveGlossary, saveUI, previewUI, cancelUIPreview, resetUIToDefaults, saveModel, testModelConnection, refreshProviderAccounts, applyProviderDefaults, saveModelAccount, editModelAccount, testOnlineAccount, discoverOnlineModels, deleteModelAccount, changeModelEncryption, clearData, previewCleanup, runSelectedCleanup, toggleHelp, syncConditional };
+  return { render, applyPreset, saveTranslation, testConnection, translateSettingsSample, addGlossaryRow, saveGlossary, saveUI, previewUI, cancelUIPreview, resetUIToDefaults, saveModel, testModelConnection, refreshProviderAccounts, applyProviderDefaults, saveModelAccount, editModelAccount, testOnlineAccount, discoverOnlineModels, deleteModelAccount, changeModelEncryption, clearData, previewCleanup, runSelectedCleanup, toggleHelp, syncConditional };
 })();

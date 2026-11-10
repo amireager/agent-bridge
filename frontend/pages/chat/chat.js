@@ -414,6 +414,20 @@ window.ABChatPage = (() => {
   }
 
   function renderToolContent(tl, displayMode = 'terminal') {
+    if (displayMode === 'json') {
+      const args = tl.args || {};
+      const argsText = typeof args === 'string' ? args : JSON.stringify(args, null, 2);
+      const raw = typeof tl.output === 'string' ? tl.output : JSON.stringify(tl.output ?? '', null, 2);
+      let output;
+      try { output = JSON.stringify(JSON.parse(raw), null, 2); } catch (_) { output = raw; }
+      return `<div class="tool-readable-content"><details class="tool-args"><summary>ورودی ساخت‌یافتهٔ ابزار · ${esc(tl.name || 'tool')}</summary><pre>${esc(argsText || '')}</pre></details><pre class="tool-plain-body tool-json-output">${esc(output || 'خروجی ساخت‌یافته‌ای ندارد.')}</pre></div>`;
+    }
+    if (displayMode === 'plain') {
+      const args = tl.args || {};
+      const argsText = typeof args === 'string' ? args : JSON.stringify(args, null, 2);
+      const output = typeof tl.output === 'string' ? tl.output : JSON.stringify(tl.output ?? '', null, 2);
+      return `<div class="tool-readable-content tool-plain-output"><details class="tool-args"><summary>ورودی ابزار · ${esc(tl.name || 'tool')}</summary><pre>${esc(argsText || '')}</pre></details><pre class="tool-plain-body">${esc(output || 'خروجی متنی ندارد.')}</pre></div>`;
+    }
     if (displayMode === 'markdown') {
       const args = tl.args || {};
       const argsText = typeof args === 'string' ? args : JSON.stringify(args, null, 2);
