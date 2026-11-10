@@ -19,7 +19,7 @@ const state = {
   },
   model_vault: { locked: false, encryption_enabled: false, accounts: [] },
   model_providers: {
-    'opencode-zen': { name:'OpenCode Zen', base_url:'https://opencode.ai/zen/v1', models_url:'https://opencode.ai/zen/v1/models', docs:'https://opencode.ai/docs/zen/' }
+    'opencode-zen': { name:'OpenCode Console / Zen', base_url:'https://opencode.ai/inference/openai/v1', models_url:'https://opencode.ai/inference/v1/models', docs:'https://opencode.ai/docs/console/harnesses' }
   }
 };
 window.ABSettingsPage.render(host, state, 'set-tap');

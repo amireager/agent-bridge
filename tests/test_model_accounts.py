@@ -32,6 +32,15 @@ class ModelAccountVaultTests(unittest.TestCase):
             reopened.unlock("test-passphrase")
             self.assertEqual(reopened.accounts[0]["api_key"], "fresh-secret")
 
+    def test_legacy_opencode_zen_endpoints_migrate_to_console_api(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "model_accounts.json"
+            path.write_text(json.dumps([{"id": "old", "provider": "opencode-zen", "base_url": "https://opencode.ai/zen/v1", "models_url": "https://opencode.ai/zen/v1/models", "api_key": "stored"}]))
+            vault = ModelAccountVault(Path(tmp))
+            self.assertEqual(vault.accounts[0]["base_url"], "https://opencode.ai/inference/openai/v1")
+            self.assertEqual(vault.accounts[0]["models_url"], "https://opencode.ai/inference/v1/models")
+            self.assertEqual(json.loads(path.read_text())[0]["api_key"], "stored")
+
     def test_edit_keeps_stored_key_and_proxy_when_fields_are_blank(self):
         with tempfile.TemporaryDirectory() as tmp:
             vault = ModelAccountVault(Path(tmp))
@@ -40,6 +49,19 @@ class ModelAccountVaultTests(unittest.TestCase):
             self.assertEqual(vault.accounts[0]["api_key"], "secret")
             self.assertEqual(vault.accounts[0]["proxy"], "http://127.0.0.1:9000")
             self.assertNotIn("secret", json.dumps(edited))
+
+    def test_opencode_console_catalog_uses_current_endpoint_and_bearer_auth(self):
+        class Response:
+            def __enter__(self): return self
+            def __exit__(self, *_): pass
+            def read(self): return b'{"data":[{"id":"paid-model","name":"Paid Model"}]}'
+        with patch("backend.model_accounts.urllib.request.build_opener") as build:
+            build.return_value.open.return_value = Response()
+            models = discover_models({"provider": "opencode-zen", "base_url": "https://opencode.ai/inference/openai/v1", "api_key": "oc_sk_test"})
+        request = build.return_value.open.call_args.args[0]
+        self.assertEqual(request.full_url, "https://opencode.ai/inference/v1/models")
+        self.assertEqual(request.get_header("Authorization"), "Bearer oc_sk_test")
+        self.assertEqual(models[0]["id"], "paid-model")
 
     def test_openai_compatible_catalog_is_discovered(self):
         class Response:

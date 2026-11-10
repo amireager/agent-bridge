@@ -152,6 +152,34 @@ def make_handler(hub: BridgeHub):
                             vault.disable_encryption(str(body.get("passphrase", "")))
                             hub.config.setdefault("models", {})["account_encryption"] = False
                             hub.store.save_config(hub.config)
+                    elif path == "/api/models/connection-test":
+                        account = dict(body.get("account") or {})
+                        account_id = str(account.get("id") or body.get("account_id") or "")
+                        if account_id and not str(account.get("api_key", "")):
+                            if vault.locked:
+                                raise PermissionError("خزانه قفل است؛ برای تست حساب ذخیره‌شده ابتدا بازش کن.")
+                            stored = next((x for x in vault.accounts if x.get("id") == account_id), None)
+                            if not stored:
+                                raise ValueError("حساب ذخیره‌شده پیدا نشد.")
+                            account = {**stored, **{k: v for k, v in account.items() if v not in (None, "")}}
+                        if account.get("provider") not in PROVIDERS:
+                            raise ValueError("ارائه‌دهنده را انتخاب کن.")
+                        if not account.get("api_key"):
+                            raise ValueError("API key را وارد کن یا یک حساب ذخیره‌شده انتخاب کن.")
+                        try:
+                            models = discover_models(account)
+                            return self._send_json({"ok": True, "models": models, "count": len(models)})
+                        except Exception as exc:
+                            message = str(exc)
+                            if "HTTP 401" in message:
+                                hint = "کلید نامعتبر، منقضی یا لغو شده است."
+                            elif "HTTP 403" in message:
+                                hint = "دسترسی این کلید رد شد. سطح دسترسی Models را بررسی کن؛ مدل‌های Free در OpenCode Console فقط داخل خود OpenCode قابل استفاده‌اند و از Bridge پاسخ 403 می‌دهند."
+                            elif "HTTP 402" in message:
+                                hint = "اعتبار یا بودجهٔ workspace کافی نیست."
+                            else:
+                                hint = "آدرس API، پروکسی و اتصال شبکه را بررسی کن."
+                            return self._send_json({"ok": False, "error": message, "hint": hint})
                     elif path == "/api/models/test":
                         mode = body.get("mode", "local")
                         model_id = str(body.get("model", ""))
@@ -395,7 +423,10 @@ def make_handler(hub: BridgeHub):
                 if models_cfg.get("default_mode") == "online":
                     account, _ = self._selected_online_account()
                     base = str(account.get("base_url", "")).rstrip("/")
-                    upstream = base + path[3:] if path.startswith("/v1/") and base.endswith("/v1") else base + path
+                    if path == "/v1/models":
+                        upstream = account.get("models_url") or PROVIDERS.get(account.get("provider"), {}).get("models_url") or (base + "/models" if base.endswith("/v1") else base + "/v1/models")
+                    else:
+                        upstream = base + path[3:] if path.startswith("/v1/") and base.endswith("/v1") else base + path
                     headers = {"Authorization": f"Bearer {account['api_key']}"} if account.get("api_key") else {}
                     req = urllib.request.Request(upstream, headers=headers)
                     proxy = str(account.get("proxy", "")).strip()

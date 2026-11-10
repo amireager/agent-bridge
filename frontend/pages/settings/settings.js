@@ -201,6 +201,34 @@ window.ABSettingsPage = (() => {
     if (res.saved?.id) $('sOnlineAccount').value = res.saved.id;
   }
 
+  async function testOnlineAccount() {
+    const out = $('modelAccountSaveStatus');
+    out.textContent = 'در حال بررسی API key و دریافت فهرست مدل‌ها…';
+    out.style.color = 'var(--muted)';
+    const account = {
+      id: $('sAccountId').value,
+      provider: $('sProvider').value,
+      label: $('sAccountLabel').value.trim(),
+      base_url: $('sAccountBaseUrl').value.trim(),
+      models_url: $('sAccountModelsUrl').value.trim(),
+      api_key: $('sAccountKey').value,
+      proxy: $('sAccountProxy').value.trim()
+    };
+    try {
+      const result = await api('/api/models/connection-test', { account });
+      if (!result.ok) throw new Error(`${result.error}${result.hint ? ` — ${result.hint}` : ''}`);
+      const selector = $('sOnlineModel');
+      const previous = cfg().models?.online_model || selector.value;
+      selector.innerHTML = result.models.map(m => `<option value="${esc(m.id)}">${m.free === true ? 'رایگان · ' : ''}${esc(m.name)} · ${esc(m.id)}${m.context_length ? ` · ${m.context_length} ctx` : ''}</option>`).join('') || '<option value="">اتصال برقرار شد؛ فهرست مدل خالی است</option>';
+      if (result.models.some(m => m.id === previous)) selector.value = previous;
+      out.textContent = `اتصال موفق · ${result.count} مدل دریافت شد. مدل‌های رایگان OpenCode ممکن است فقط داخل خود OpenCode قابل استفاده باشند.`;
+      out.style.color = 'var(--phosphor)';
+    } catch (e) {
+      out.textContent = `اتصال ناموفق · ${e.message}`;
+      out.style.color = 'var(--red)';
+    }
+  }
+
   async function discoverOnlineModels() {
     const accountId = $('sOnlineAccount').value;
     const out = $('onlineModelTest'); out.textContent = 'در حال دریافت فهرست زنده…';
@@ -364,7 +392,7 @@ Content-Type: application/json
             <div class="fld" style="margin-top:14px"><label for="sProvider">افزودن / به‌روزرسانی حساب</label><select id="sProvider" onchange="ABSettingsPage.applyProviderDefaults()">${Object.entries(state.model_providers || {}).map(([id,p])=>`<option value="${esc(id)}">${esc(p.name)} · ${esc(p.free_note || '')}</option>`).join('')}</select><a id="modelProviderDocs" class="model-provider-docs" target="_blank" rel="noopener noreferrer">راهنمای رسمی provider</a></div>
             <div class="model-account-form"><input id="sAccountId" type="hidden" value=""><div class="field-grid"><div class="fld"><label for="sAccountLabel">نام دلخواه حساب</label><input id="sAccountLabel" placeholder="مثلاً Groq شخصی"></div><div class="fld"><label for="sAccountKey">API key تازه</label><input id="sAccountKey" type="password" autocomplete="new-password" placeholder="برای ویرایش خالی بگذار تا کلید قبلی حفظ شود"></div></div>
               <div class="field-grid"><div class="fld"><label for="sAccountBaseUrl">Base URL</label><input id="sAccountBaseUrl" placeholder="https://.../v1"></div><div class="fld"><label for="sAccountModelsUrl">Models URL (اختیاری)</label><input id="sAccountModelsUrl" placeholder="خودکار از Base URL گرفته می‌شود"></div><div class="fld"><label for="sAccountProxy">پروکسی این حساب (اختیاری)</label><input id="sAccountProxy" placeholder="http://127.0.0.1:8080"></div></div>
-              <button class="btn" onclick="ABSettingsPage.saveModelAccount()">ذخیرهٔ حساب</button><div id="modelAccountSaveStatus" class="muted"></div></div>
+              <div class="model-settings-actions"><button class="btn" type="button" onclick="ABSettingsPage.testOnlineAccount()">تست API key و دریافت مدل‌ها</button><button class="btn" onclick="ABSettingsPage.saveModelAccount()">ذخیرهٔ حساب</button></div><div id="modelAccountSaveStatus" class="muted" role="status"></div><div class="os-help-drawer open">برای OpenCode: کلید را از Console و workspace درست بساز؛ باید دسترسی فهرست مدل‌ها داشته باشد و برای generation نیز Models Request داشته باشد. کلیدهای معمولاً با <code>oc_sk_</code> شروع می‌شوند. مدل‌های Free فقط داخل OpenCode قابل فراخوانی‌اند؛ در Bridge حتی با کلید معتبر ممکن است تست تولید HTTP 403 بدهد. برای Bridge از مدل پولی pay-as-you-go یا Go استفاده کن و قبل از استفاده اعتبار/بودجه را بررسی کن.</div></div>
             <div id="modelAccountsList" class="model-accounts-list">${vault.locked ? 'خزانه قفل است.' : vault.accounts.map(a=>`<div class="model-account-row"><span>${esc(a.label)} · ${esc(state.model_providers?.[a.provider]?.name || a.provider)} ${a.has_key ? '· کلید ذخیره است' : '· بدون کلید'}</span><button class="btn ghost" onclick="ABSettingsPage.editModelAccount('${esc(a.id)}')">ویرایش</button><button class="btn ghost" onclick="ABSettingsPage.deleteModelAccount('${esc(a.id)}')">حذف</button></div>`).join('') || '<p class="muted">حسابی ذخیره نشده است.</p>'}</div>
             <div class="os-row" style="margin-top:12px"><div class="os-row-top"><div class="os-title-wrap">رمزگذاری کلیدهای حساب‌ها با رمز اصلی</div><label class="ui-switch"><input id="sEncryptAccounts" type="checkbox" ${vault.encryption_enabled ? 'checked' : ''} ${vault.locked ? 'disabled' : ''} onchange="ABSettingsPage.changeModelEncryption()"><span class="ui-slider"></span></label></div><div id="modelVaultStatus" class="os-help-drawer open">${vault.locked ? 'خزانه قفل است.' : vault.encryption_enabled ? 'رمزگذاری فعال؛ کلیدها هنگام هر شروع برنامه قفل می‌شوند.' : 'خاموش: کلیدها در .data/model_accounts.json با دسترسی فایل محدود ذخیره می‌شوند. اگر رمزگذاری را روشن کنی، رمز را فراموش نکن؛ بدون آن بازیابی کلیدها ممکن نیست.'}</div></div>
           </section>
@@ -385,5 +413,5 @@ Content-Type: application/json
         <details style="margin-top:16px"><summary>فهرست فایل‌های داده</summary><pre class="acc-body">${esc((state.storage?.files || []).map(f => `${f.path} · ${f.bytes} B`).join('\n'))}</pre></details></div></div>`;
     }
   }
-  return { render, saveTranslation, testConnection, translateSettingsSample, addGlossaryRow, saveGlossary, saveUI, saveModel, testModelConnection, refreshProviderAccounts, applyProviderDefaults, saveModelAccount, editModelAccount, discoverOnlineModels, deleteModelAccount, changeModelEncryption, clearData, previewCleanup, runSelectedCleanup, toggleHelp, syncConditional };
+  return { render, saveTranslation, testConnection, translateSettingsSample, addGlossaryRow, saveGlossary, saveUI, saveModel, testModelConnection, refreshProviderAccounts, applyProviderDefaults, saveModelAccount, editModelAccount, testOnlineAccount, discoverOnlineModels, deleteModelAccount, changeModelEncryption, clearData, previewCleanup, runSelectedCleanup, toggleHelp, syncConditional };
 })();

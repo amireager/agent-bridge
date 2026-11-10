@@ -14,9 +14,9 @@ from typing import Any
 
 PROVIDERS = {
     "opencode-zen": {
-        "name": "OpenCode Zen", "base_url": "https://opencode.ai/zen/v1",
-        "models_url": "https://opencode.ai/zen/v1/models", "format": "openai",
-        "docs": "https://opencode.ai/docs/zen/", "free_note": "برخی مدل‌ها رایگان/محدود و برخی پولی؛ فهرست زنده را بررسی کن.",
+        "name": "OpenCode Console / Zen", "base_url": "https://opencode.ai/inference/openai/v1",
+        "models_url": "https://opencode.ai/inference/v1/models", "format": "openai",
+        "docs": "https://opencode.ai/docs/console/harnesses", "free_note": "کلید Console؛ مدل‌های رایگان فقط داخل OpenCode کار می‌کنند. برای Bridge از مدل پولی یا Go استفاده کن.",
     },
     "openrouter": {
         "name": "OpenRouter", "base_url": "https://openrouter.ai/api/v1",
@@ -64,6 +64,21 @@ class ModelAccountVault:
         self.locked = self.encryption_enabled
         if not self.encryption_enabled and self.plain_path.exists():
             self.accounts = self._read_plain()
+            if self._migrate_provider_endpoints():
+                self._write_plain()
+
+    def _migrate_provider_endpoints(self) -> bool:
+        changed = False
+        for account in self.accounts:
+            if account.get("provider") != "opencode-zen":
+                continue
+            if account.get("base_url", "").rstrip("/") == "https://opencode.ai/zen/v1":
+                account["base_url"] = PROVIDERS["opencode-zen"]["base_url"]
+                changed = True
+            if account.get("models_url", "").rstrip("/") == "https://opencode.ai/zen/v1/models":
+                account["models_url"] = PROVIDERS["opencode-zen"]["models_url"]
+                changed = True
+        return changed
 
     @staticmethod
     def _crypto():
@@ -112,6 +127,8 @@ class ModelAccountVault:
             raise ValueError("ساختار فایل کلیدها معتبر نیست.")
         self.accounts, self._encryption_key, self._salt = accounts, key, salt
         self.locked = False
+        if self._migrate_provider_endpoints():
+            self._persist_encrypted()
 
     def _persist_encrypted(self) -> None:
         if not self._encryption_key or not self._salt:

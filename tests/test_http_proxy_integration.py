@@ -94,7 +94,15 @@ class HttpProxyIntegrationTests(unittest.TestCase):
                 self.assertTrue(model_result["ok"], model_result)
                 self.assertEqual(model_result["sample"], "Stub model reply")
 
-                account_payload = {"account": {"provider": "custom-openai", "label": "test", "base_url": f"http://127.0.0.1:{upstream.server_port}/v1", "api_key": "test-secret"}}
+                temp_account = {"provider": "custom-openai", "label": "test", "base_url": f"http://127.0.0.1:{upstream.server_port}/v1", "api_key": "test-secret"}
+                connection_req = urllib.request.Request(f"http://127.0.0.1:{server.server_address[1]}/api/models/connection-test", data=json.dumps({"account": temp_account}).encode(), headers={"Content-Type": "application/json"}, method="POST")
+                with urllib.request.urlopen(connection_req, timeout=5) as response:
+                    connection_result = json.loads(response.read())
+                self.assertTrue(connection_result["ok"], connection_result)
+                self.assertEqual(connection_result["count"], 1)
+                self.assertNotIn("test-secret", json.dumps(connection_result))
+
+                account_payload = {"account": temp_account}
                 account_req = urllib.request.Request(f"http://127.0.0.1:{server.server_address[1]}/api/models/account/save", data=json.dumps(account_payload).encode(), headers={"Content-Type": "application/json"}, method="POST")
                 with urllib.request.urlopen(account_req, timeout=5) as response:
                     saved = json.loads(response.read())
@@ -105,6 +113,14 @@ class HttpProxyIntegrationTests(unittest.TestCase):
                 with urllib.request.urlopen(online_req, timeout=5) as response:
                     online_result = json.loads(response.read())
                 self.assertEqual(online_result["choices"][0]["message"]["content"], "Stub model reply")
+                deadline = time.time() + 3
+                while time.time() < deadline:
+                    with closing(sqlite3.connect(store.db_path)) as conn:
+                        if conn.execute("SELECT COUNT(*) FROM llm_requests").fetchone()[0] >= 2:
+                            break
+                    time.sleep(0.01)
+                with closing(sqlite3.connect(store.db_path)) as conn:
+                    self.assertGreaterEqual(conn.execute("SELECT COUNT(*) FROM llm_requests").fetchone()[0], 2)
                 delete_req = urllib.request.Request(f"http://127.0.0.1:{server.server_address[1]}/api/models/account/delete", data=json.dumps({"id": account_id}).encode(), headers={"Content-Type": "application/json"}, method="POST")
                 with urllib.request.urlopen(delete_req, timeout=5) as response:
                     deleted = json.loads(response.read())
