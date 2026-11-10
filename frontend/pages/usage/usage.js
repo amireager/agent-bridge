@@ -187,7 +187,7 @@ window.ABUsagePage = (() => {
     ).join('');
 
     const totAll = Math.max(1, w.total_tokens || 0);
-    const savedFa = w.saved_fa_tokens || 0;
+    const messageEstimates = u.message_estimates || {};
 
     host.innerHTML = `
       <div class="panel-wrap">
@@ -226,9 +226,15 @@ window.ABUsagePage = (() => {
           </div>
 
           <div class="stat-box">
-            <div class="stat-lbl"><span>صرفه‌جویی تخمینیِ ورودی فارسی→انگلیسی</span><span class="mono muted">برآورد نویسه‌ای</span></div>
-            <div class="stat-num" style="color:var(--phosphor)">~${savedFa.toLocaleString()}</div>
-            <div class="stat-sub">فقط ورودی ترجمه‌شده؛ خروجی جداگانه در شمارش واقعی کل آمده و صرفه‌جویی محسوب نمی‌شود.</div>
+            <div class="stat-lbl"><span>پیام کاربر · ورودی تخمینی</span><span class="mono muted">${Number(messageEstimates.user_messages || 0)} پیام</span></div>
+            <div class="stat-num" style="color:var(--phosphor)">~${Number(messageEstimates.input_source_tokens || 0).toLocaleString()} → ~${Number(messageEstimates.input_sent_tokens || 0).toLocaleString()}</div>
+            <div class="stat-sub">برآورد متن مبدأ → متن ارسالی · صرفه‌جویی ~${Number(messageEstimates.input_saved_tokens || 0).toLocaleString()} · افزایش ~${Number(messageEstimates.input_expansion_tokens || 0).toLocaleString()} توکن</div>
+          </div>
+
+          <div class="stat-box">
+            <div class="stat-lbl"><span>پیام مدل · خروجی و نمایش</span><span class="mono muted">${Number(messageEstimates.assistant_messages || 0)} پاسخ</span></div>
+            <div class="stat-num" style="color:var(--violet)">${(w.output_tokens || 0).toLocaleString()} actual</div>
+            <div class="stat-sub">متن مدل ~${Number(messageEstimates.model_output_text_tokens || 0).toLocaleString()} → نمایش فارسی ~${Number(messageEstimates.persian_display_tokens || 0).toLocaleString()} تخمینی · ترجمه‌شده ${Number(messageEstimates.assistant_translated_messages || 0)} پاسخ</div>
           </div>
 
           <div class="stat-box">
@@ -237,11 +243,12 @@ window.ABUsagePage = (() => {
             <div class="stat-sub">معادل تخمینی با نرخ پروفایل · یک‌ساعت اخیر: $${Number(u.last_1h?.shadow_cost_usd || 0).toFixed(4)}</div>
           </div>
         </div>
+        <div class="muted" style="font-size:11px;padding:0 4px 8px;">دو کارت برآورد نویسه‌ایِ پیام‌اند، نه tokenizer یا صورتحساب؛ ورودی فقط پیام کاربر است و متن سیستم/تاریخچه، ابزارها و Think در این تخمین نیستند. پاسخ فارسی متن نمایشی است و خروجی API واقعی جدا بالاست. تاریخچهٔ بی‌زمان در بازه‌های محدود قابل‌تفکیک نیست و فقط در ALL جمع می‌شود.</div>
 
         <div class="panel">
-          <div class="panel-head"><h3>مقایسه‌ی هزینه‌ی همین مصرف با قیمت هر مدل</h3><span class="muted">هزینه‌ی ورودی بدون کش / ورودی کش‌شده / خروجی · USD به‌ازای یک‌میلیون توکن</span></div>
+          <div class="panel-head"><h3>مقایسه‌ی هزینه‌ی همین مصرف با قیمت هر مدل</h3><span class="muted">نرخ ورودی / کش‌خوانی / خروجی · USD به‌ازای یک‌میلیون توکن؛ تخمین، نه صورتحساب</span></div>
           <div class="stat-strip cost-matrix">
-            ${(u.cost_matrix || []).map(p => `<button class="stat-box clickable ${u.pricing_profile === p.id ? 'selected' : ''}" onclick="ABUsagePage.setPricing('${esc(p.id)}')"><div class="stat-lbl">${esc(p.label)}</div><div class="stat-num">$${Number(p.cost_usd).toFixed(4)}</div><div class="stat-sub">نرخ ${p.rates || '—'} · بدون کش $${Number(p.nocache_usd).toFixed(4)} · ذخیره $${Number(p.saved_usd).toFixed(4)}</div></button>`).join('') || '<div class="muted">پروفایل قیمتی در دسترس نیست.</div>'}
+            ${(u.cost_matrix || []).map(p => `<button class="stat-box clickable ${u.pricing_profile === p.id ? 'selected' : ''}" title="منبع نرخ: ${esc(p.source || 'نامشخص')}" onclick="ABUsagePage.setPricing('${esc(p.id)}')"><div class="stat-lbl">${esc(p.label)}</div><div class="stat-num">$${Number(p.cost_usd).toFixed(4)}</div><div class="stat-sub">نرخ ${esc(p.rates || '—')} · بدون کش $${Number(p.nocache_usd).toFixed(4)} · اختلاف کش $${Number(p.saved_usd).toFixed(4)}</div><small class="muted">${esc(p.note || '')}</small></button>`).join('') || '<div class="muted">پروفایل قیمتی در دسترس نیست.</div>'}
           </div>
         </div>
 

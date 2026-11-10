@@ -551,10 +551,13 @@ window.ABSettingsPage = (() => {
     const storedFiles = state.storage?.files || [];
     const fileSize = path => Number(storedFiles.find(file => file.path === path)?.bytes || 0);
     const safeMirrorId = id => String(id || '').replace(/[^a-zA-Z0-9_.-]/g, '-') || 'agent';
-    const labs = (state.lab_sessions || []).map(item => ({ kind: 'lab', id: item.id, title: item.title || item.id, turns: item.turn_count || 0, updated: item.updated_at, bytes: item.bytes || fileSize(`sessions/lab/${item.id}.json`), live: false }));
-    const offline = (state.mirror_history || []).map(item => ({ kind: 'mirror', id: item.agent_id, title: item.title || item.agent_id, turns: item.turn_count || 0, updated: item.updated_at, bytes: item.bytes || fileSize(`mirrors/${safeMirrorId(item.agent_id)}.json`), live: false }));
-    const live = (state.mirrors || []).map(item => ({ kind: 'mirror', id: item.agent_id, title: item.title || item.agent_id, turns: item.turn_count || 0, updated: item.updated_at, bytes: item.bytes || fileSize(`mirrors/${safeMirrorId(item.agent_id)}.json`), live: !!item.pty_live }));
-    return [...labs, ...offline, ...live];
+    const labItem = (item, archived) => ({ kind: 'lab', id: item.id, title: item.title || item.id, turns: item.turn_count || 0, updated: item.updated_at, bytes: item.bytes || fileSize(`sessions/lab/${item.id}.json`), archived, live: !archived });
+    const labs = (state.lab_sessions || []).map(item => labItem(item, false));
+    const archivedLabs = (state.lab_history || []).map(item => labItem(item, true));
+    const mirrorItem = item => ({ kind: 'mirror', id: item.agent_id, title: item.title || item.agent_id, turns: item.turn_count || 0, updated: item.updated_at, bytes: item.bytes || fileSize(`mirrors/${safeMirrorId(item.agent_id)}.json`), live: !!item.pty_live, ptyLive: !!item.pty_live, archived: !!item.archived });
+    const offline = (state.mirror_history || []).map(mirrorItem);
+    const live = (state.mirrors || []).map(mirrorItem);
+    return [...labs, ...archivedLabs, ...offline, ...live];
   }
 
   function renderHistoryResults() {
@@ -571,11 +574,16 @@ window.ABSettingsPage = (() => {
       host.innerHTML = '<div class="cleanup-empty"><span>⌕</span><strong>چیزی پیدا نشد</strong><small>عبارت جست‌وجو یا فیلتر نوع تاریخچه را تغییر بده.</small></div>';
     } else {
       host.innerHTML = records.map(item => {
-        const type = item.kind === 'lab' ? 'آزمایش Lab' : item.live ? 'ترمینال زنده' : 'تاریخچهٔ ترمینال';
-        const badge = item.live ? '<span class="history-state live">زنده · محافظت‌شده</span>' : item.kind === 'lab' ? '<span class="history-state lab">LAB</span>' : '<span class="history-state offline">ذخیره‌شده</span>';
-        const openAction = `<button type="button" class="btn ghost" data-history-action="open" data-kind="${item.kind}" data-id="${esc(item.id)}">بازکردن</button>`;
-        const deleteAction = item.live ? '' : `<button type="button" class="btn ghost danger" data-history-action="delete" data-kind="${item.kind}" data-id="${esc(item.id)}" data-title="${esc(item.title)}">حذف</button>`;
-        return `<article class="history-card ${item.live ? 'is-live' : ''}"><div class="history-card-main"><div class="history-card-title">${badge}<strong>${esc(item.title)}</strong><small>${esc(type)}</small></div><div class="history-card-meta"><span>◷ ${formatHistoryDate(item.updated)}</span><span>↻ ${Number(item.turns)} دور</span><span>▤ ${formatStorageBytes(item.bytes)}</span></div></div><div class="history-card-actions">${openAction}${deleteAction}</div></article>`;
+        const type = item.kind === 'lab' ? (item.archived ? 'آزمایش Lab · تاریخچه' : 'آزمایش Lab · باز') : item.ptyLive ? 'ترمینال زنده' : 'تاریخچهٔ ترمینال';
+        const badge = item.kind === 'lab'
+          ? `<span class="history-state lab">${item.archived ? 'LAB · بایگانی' : 'LAB · باز'}</span>`
+          : item.ptyLive ? '<span class="history-state live">PTY زنده · محافظت‌شده</span>' : '<span class="history-state offline">ذخیره‌شده</span>';
+        const openLabel = item.archived ? 'بازگردانی' : 'بازکردن';
+        const openAction = `<button type="button" class="btn ghost" data-history-action="open" data-kind="${item.kind}" data-id="${esc(item.id)}">${openLabel}</button>`;
+        const archiveAction = (item.kind === 'lab' && !item.archived) || (item.kind === 'mirror' && item.ptyLive && !item.archived)
+          ? `<button type="button" class="btn ghost" data-history-action="archive" data-kind="${item.kind}" data-id="${esc(item.id)}">انتقال به تاریخچه</button>` : '';
+        const deleteAction = item.ptyLive ? '' : `<button type="button" class="btn ghost danger" data-history-action="delete" data-kind="${item.kind}" data-id="${esc(item.id)}" data-title="${esc(item.title)}">حذف</button>`;
+        return `<article class="history-card ${item.live ? 'is-live' : ''}"><div class="history-card-main"><div class="history-card-title">${badge}<strong>${esc(item.title)}</strong><small>${esc(type)}</small></div><div class="history-card-meta"><span>◷ ${formatHistoryDate(item.updated)}</span><span>↻ ${Number(item.turns)} دور</span><span>▤ ${formatStorageBytes(item.bytes)}</span></div></div><div class="history-card-actions">${openAction}${archiveAction}${deleteAction}</div></article>`;
       }).join('');
     }
     const count = $('historyResultCount');
@@ -592,11 +600,36 @@ window.ABSettingsPage = (() => {
   }
 
   function bindHistoryActions(root) {
-    root.querySelectorAll('[data-history-action]').forEach(button => button.addEventListener('click', () => {
+    if (!root || root.dataset?.historyActionsBound || !root.addEventListener) return;
+    root.dataset.historyActionsBound = 'true';
+    root.addEventListener('click', async event => {
+      const button = event.target?.closest?.('[data-history-action]');
+      if (!button || !root.contains(button)) return;
       const { historyAction: action, kind, id, title } = button.dataset;
       if (action === 'open') {
         if (kind === 'lab') window.ABApp.selectLab(id);
         else window.ABApp.selectMirror(id);
+      } else if (action === 'archive') {
+        button.disabled = true;
+        try {
+          const endpoint = kind === 'lab' ? '/api/lab/archive' : '/api/mirror/archive';
+          const result = await api(endpoint, kind === 'lab' ? { session_id: id } : { agent_id: id });
+          if (!result.ok) throw new Error('انتقال به تاریخچه انجام نشد.');
+          if (kind === 'lab') {
+            const item = (cleanupState.lab_sessions || []).find(entry => entry.id === id);
+            cleanupState.lab_sessions = (cleanupState.lab_sessions || []).filter(entry => entry.id !== id);
+            if (item) cleanupState.lab_history = [...(cleanupState.lab_history || []), { ...item, archived: true }];
+          } else {
+            const item = (cleanupState.mirrors || []).find(entry => entry.agent_id === id);
+            cleanupState.mirrors = (cleanupState.mirrors || []).filter(entry => entry.agent_id !== id);
+            if (item) cleanupState.mirror_history = [...(cleanupState.mirror_history || []), { ...item, archived: true }];
+          }
+          historyNotice = 'به تاریخچه منتقل شد؛ داده‌ها حفظ شدند.';
+          renderHistoryResults();
+        } catch (error) {
+          historyNotice = `انتقال انجام نشد · ${error.message}`;
+          renderHistoryResults();
+        }
       } else if (action === 'delete') {
         pendingHistoryDelete = { kind, id, title: title || id };
         const message = $('historyDeleteMessage');
@@ -604,7 +637,7 @@ window.ABSettingsPage = (() => {
         const dialog = $('historyDeleteDialog');
         if (dialog) dialog.hidden = false;
       }
-    }));
+    });
   }
 
   function cancelHistoryDelete() {
@@ -624,8 +657,13 @@ window.ABSettingsPage = (() => {
         : await api('/api/mirror/delete', { agent_id: item.id });
       if (!result.ok) throw new Error('مورد پیدا نشد یا ترمینال هنوز فعال است؛ حذف انجام نشد.');
       historyNotice = 'تاریخچه حذف شد.';
-      if (item.kind === 'lab') cleanupState.lab_sessions = (cleanupState.lab_sessions || []).filter(entry => entry.id !== item.id);
-      else cleanupState.mirror_history = (cleanupState.mirror_history || []).filter(entry => entry.agent_id !== item.id);
+      if (item.kind === 'lab') {
+        cleanupState.lab_sessions = (cleanupState.lab_sessions || []).filter(entry => entry.id !== item.id);
+        cleanupState.lab_history = (cleanupState.lab_history || []).filter(entry => entry.id !== item.id);
+      } else {
+        cleanupState.mirror_history = (cleanupState.mirror_history || []).filter(entry => entry.agent_id !== item.id);
+        cleanupState.mirrors = (cleanupState.mirrors || []).filter(entry => entry.agent_id !== item.id);
+      }
       pendingHistoryDelete = null;
       const dialog = $('historyDeleteDialog');
       if (dialog) dialog.hidden = true;
@@ -773,13 +811,14 @@ window.ABSettingsPage = (() => {
   function renderCleanupPage(host, state, config) {
     cleanupState = state;
     if (cleanupUi.days === null) cleanupUi.days = Math.max(0, Number(config.retention?.days) || 7);
-    const activeMirrors = (state.mirrors || []).filter(item => item.pty_live).length;
+    const activeMirrors = [...(state.mirrors || []), ...(state.mirror_history || [])].filter(item => item.pty_live).length;
     const historyCount = (state.mirror_history || []).length;
-    const labCount = (state.lab_sessions || []).length;
+    const labCount = (state.lab_sessions || []).length + (state.lab_history || []).length;
+    const totalHistoryRecords = labCount + historyCount + (state.mirrors || []).length;
     const storageMiB = Number(state.storage?.total_kib || 0) / 1024;
     host.innerHTML = `<div id="cleanupRoot" class="panel-wrap cleanup-page rtl">
       <header class="cleanup-hero"><div><span class="cleanup-eyebrow">DATA CARE · .DATA/</span><h2>تاریخچه و پاکسازی</h2><p>تاریخچه را پیدا و مرور کن؛ پاکسازی هم فقط بعد از پیش‌نمایش و تأیید انجام می‌شود.</p></div><div class="cleanup-storage"><span>فضای داده</span><strong>${storageMiB.toFixed(1)} <small>MiB</small></strong><small>${Number(state.storage?.file_count || 0).toLocaleString('fa-IR')} فایل در .data/</small></div></header>
-      <nav class="cleanup-tabs" aria-label="مدیریت تاریخچه و داده"><button type="button" data-cleanup-tab="history" class="${cleanupTab === 'history' ? 'active' : ''}" onclick="ABSettingsPage.switchCleanupTab('history')">⌕ تاریخچه <span>${labCount + historyCount}</span></button><button type="button" data-cleanup-tab="cleanup" class="${cleanupTab === 'cleanup' ? 'active' : ''}" onclick="ABSettingsPage.switchCleanupTab('cleanup')">⌫ پاکسازی</button></nav>
+      <nav class="cleanup-tabs" aria-label="مدیریت تاریخچه و داده"><button type="button" data-cleanup-tab="history" class="${cleanupTab === 'history' ? 'active' : ''}" onclick="ABSettingsPage.switchCleanupTab('history')">⌕ تاریخچه <span>${totalHistoryRecords}</span></button><button type="button" data-cleanup-tab="cleanup" class="${cleanupTab === 'cleanup' ? 'active' : ''}" onclick="ABSettingsPage.switchCleanupTab('cleanup')">⌫ پاکسازی</button></nav>
       <section class="cleanup-pane" data-cleanup-pane="history" ${cleanupTab === 'history' ? '' : 'hidden'}>
         <div class="cleanup-stats"><div><span>آزمایش‌های Lab</span><strong>${labCount}</strong></div><div><span>تاریخچهٔ ترمینال</span><strong>${historyCount}</strong></div><div><span>ترمینال زنده · محافظت‌شده</span><strong>${activeMirrors}</strong></div></div>
         <div class="history-toolbar"><div class="history-search"><span>⌕</span><input id="historySearch" type="search" placeholder="جست‌وجو بر اساس عنوان یا شناسه…" value="${esc(cleanupUi.query)}" oninput="ABSettingsPage.filterHistory()"></div><select id="historyKind" aria-label="نوع تاریخچه" onchange="ABSettingsPage.filterHistory()"><option value="all" ${cleanupUi.kind === 'all' ? 'selected' : ''}>همهٔ موارد</option><option value="lab" ${cleanupUi.kind === 'lab' ? 'selected' : ''}>Lab</option><option value="mirror" ${cleanupUi.kind === 'mirror' ? 'selected' : ''}>ترمینال‌های ذخیره‌شده</option><option value="live" ${cleanupUi.kind === 'live' ? 'selected' : ''}>ترمینال‌های زنده</option></select><select id="historySort" aria-label="مرتب‌سازی" onchange="ABSettingsPage.filterHistory()"><option value="recent" ${cleanupUi.sort === 'recent' ? 'selected' : ''}>تازه‌ترین</option><option value="oldest" ${cleanupUi.sort === 'oldest' ? 'selected' : ''}>قدیمی‌ترین</option><option value="turns" ${cleanupUi.sort === 'turns' ? 'selected' : ''}>بیشترین دور</option><option value="size" ${cleanupUi.sort === 'size' ? 'selected' : ''}>بزرگ‌ترین</option></select></div>

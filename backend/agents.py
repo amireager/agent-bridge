@@ -28,6 +28,7 @@ from .model_accounts import ModelAccountVault, PROVIDERS
 from .translator import (
     LOOPBACK_OPENER,
     estimate_persian_token_savings,
+    estimate_text_tokens,
     probe_translator_health,
     split_markdown_into_blocks,
     translate_prose,
@@ -168,6 +169,7 @@ class BridgeHub:
         return {
             "id": sid,
             "title": title,
+            "archived": False,
             "created_at": now,
             "updated_at": now,
             "turns": [],
@@ -223,6 +225,18 @@ class BridgeHub:
         self.agent_activity[agent_id] = {"status": "IDLE", "started_at": 0}
         self.broadcast_state()
 
+    def archive_mirror(self, agent_id: str) -> bool:
+        """Hide a mirror from the live list without closing its PTY or deleting any history."""
+        mirror = self.mirrors.get(agent_id)
+        if not mirror:
+            return False
+        mirror["archived"] = True
+        self._persist_mirror(mirror)
+        if self.view_kind == "mirror" and self.view_id == agent_id:
+            self.view_id = ""
+        self.broadcast_state()
+        return True
+
     def delete_mirror(self, agent_id: str) -> bool:
         """Explicitly remove an offline terminal history; active channels cannot be deleted."""
         if time.time() - self.pty_heartbeats.get(agent_id, 0.0) <= 25.0:
@@ -251,9 +265,17 @@ class BridgeHub:
         if kind == "mirror":
             if target_id not in self.mirrors:
                 self.mirrors[target_id] = self._new_mirror_obj(target_id)
+            mirror = self.mirrors[target_id]
+            if mirror.get("archived"):
+                mirror["archived"] = False
+                self._persist_mirror(mirror)
             self.view_kind = "mirror"
             self.view_id = target_id
         elif kind == "lab" and target_id in self.lab_sessions:
+            sess = self.lab_sessions[target_id]
+            if sess.get("archived"):
+                sess["archived"] = False
+                self._persist_lab_session(sess)
             self.view_kind = "lab"
             self.view_id = target_id
         self.broadcast_state()
@@ -432,6 +454,21 @@ class BridgeHub:
         self.broadcast_state()
         return s
 
+    def archive_lab_session(self, session_id: str) -> bool:
+        sess = self.lab_sessions.get(session_id)
+        if not sess:
+            return False
+        sess["archived"] = True
+        self._persist_lab_session(sess)
+        if self.view_kind == "lab" and self.view_id == session_id:
+            active_ids = [sid for sid, item in self.lab_sessions.items() if sid != session_id and not item.get("archived")]
+            if active_ids:
+                self.view_id = active_ids[0]
+            else:
+                self.view_kind, self.view_id = "mirror", ""
+        self.broadcast_state()
+        return True
+
     def delete_lab_session(self, session_id: str) -> bool:
         if session_id not in self.lab_sessions:
             return False
@@ -440,8 +477,9 @@ class BridgeHub:
         if f.exists():
             f.unlink()
         if self.view_kind == "lab" and self.view_id == session_id:
-            if self.lab_sessions:
-                self.view_id = next(iter(self.lab_sessions.keys()))
+            active_ids = [sid for sid, item in self.lab_sessions.items() if not item.get("archived")]
+            if active_ids:
+                self.view_id = active_ids[0]
             else:
                 self.view_kind, self.view_id = "mirror", ""
         self.broadcast_state()
@@ -503,6 +541,22 @@ class BridgeHub:
             turn["thinking_fa"] = th_res.get("translation", "")
         elif raw_think:
             turn["think_blocks"] = split_markdown_into_blocks(raw_think)
+
+        input_est = estimate_persian_token_savings(
+            turn.get("user_raw", ""), turn.get("prompt_sent", turn.get("user_raw", ""))
+        )
+        reply_en = turn.get("reply_en", "")
+        reply_fa = turn.get("reply_fa", "")
+        metrics = turn.get("metrics", {}) or {}
+        turn["token_estimates"] = {
+            "input_source_tokens": input_est["fa_est"],
+            "input_sent_tokens": input_est["en_est"],
+            "input_saved_tokens": input_est["saved"],
+            "input_delta_tokens": input_est["delta"],
+            "model_output_text_tokens": estimate_text_tokens(reply_en),
+            "persian_display_tokens": estimate_text_tokens(reply_fa),
+            "model_output_reported_tokens": int(metrics.get("out_tok", 0) or 0),
+        }
 
     def retranslate_turn(self, turn_id: str, scope: str = "all", step_index: int = -1) -> bool:
         turns = self._active_turns_list()
@@ -750,6 +804,7 @@ class BridgeHub:
             "model": model_name,
             "source": "tty",
             "ts": time.strftime("%H:%M:%S"),
+            "ts_epoch": time.time(),
             "user_raw": user_display,
             "prompt_sent": last_user_txt,
             "saved_fa_tokens": saved_tok,
@@ -870,6 +925,7 @@ class BridgeHub:
         agent_tag = f"lab-{sess['id'][-4:]}"
         t_start = time.perf_counter()
 
+        cumulative_metrics = {"uncached_in": 0, "cached_in": 0, "out_tok": 0, "pp_tps": 0.0, "tg_tps": 0.0}
         try:
             for _step in range(5):
                 if self.lab_abort_flag or self.shutting_down:
@@ -894,6 +950,7 @@ class BridgeHub:
 
                 step_content: list[str] = []
                 step_think: list[str] = []
+                step_metrics: dict | None = None
                 step_no = len(turn.setdefault("steps", [])) + 1
                 step_record = {"index": step_no, "thinking": "", "tools": [], "reply_en": "", "status": "thinking"}
                 turn["steps"].append(step_record)
@@ -908,15 +965,27 @@ class BridgeHub:
                         if not ls.startswith("data:") or ls[5:].strip() == "[DONE]":
                             continue
                         chunk = json.loads(ls[5:].strip())
-                        if chunk.get("timings"):
-                            tm = chunk["timings"]
-                            turn["metrics"] = {
-                                "uncached_in": int(tm.get("prompt_n", 0)),
-                                "cached_in": int(tm.get("cache_n", 0)),
-                                "out_tok": int(tm.get("predicted_n", 0)),
+                        if chunk.get("timings") or chunk.get("usage"):
+                            tm = chunk.get("timings") or {}
+                            usage_obj = chunk.get("usage") or {}
+                            details = usage_obj.get("prompt_tokens_details") or {}
+                            cached_value = tm.get("cache_n", details.get("cached_tokens", 0))
+                            cached_count = max(0, int(cached_value or 0))
+                            if "prompt_n" in tm and int(tm.get("prompt_n") or 0) > 0:
+                                uncached_count = max(0, int(tm["prompt_n"]))
+                            elif "prompt_tokens" in usage_obj:
+                                uncached_count = max(0, int(usage_obj.get("prompt_tokens") or 0) - cached_count)
+                            else:
+                                uncached_count = max(0, int(tm.get("prompt_n", 0) or 0))
+                            output_count = int(tm.get("predicted_n", 0) or 0) or int(usage_obj.get("completion_tokens", 0) or 0)
+                            step_metrics = {
+                                "uncached_in": uncached_count,
+                                "cached_in": cached_count,
+                                "out_tok": max(0, output_count),
                                 "pp_tps": round(float(tm.get("prompt_per_second", 0.0)), 1),
                                 "tg_tps": round(float(tm.get("predicted_per_second", 0.0)), 1),
                             }
+                            turn["metrics"] = step_metrics
                         for ch in chunk.get("choices", []):
                             d = ch.get("delta", {})
                             if d.get("reasoning_content"):
@@ -943,6 +1012,14 @@ class BridgeHub:
                         if now_m - last_bcast > 0.28:
                             last_bcast = now_m
                             self.broadcast_state()
+
+                if step_metrics:
+                    for key in ("uncached_in", "cached_in", "out_tok"):
+                        cumulative_metrics[key] += int(step_metrics.get(key, 0) or 0)
+                    for key in ("pp_tps", "tg_tps"):
+                        if step_metrics.get(key):
+                            cumulative_metrics[key] = step_metrics[key]
+                    turn["metrics"] = dict(cumulative_metrics)
 
                 full_txt = "".join(step_content)
                 m_th = THINK_TAG_RE.search(full_txt)
@@ -1039,6 +1116,7 @@ class BridgeHub:
                 "model": up["detected_model"],
                 "source": "lab",
                 "ts": time.strftime("%H:%M:%S"),
+                "ts_epoch": time.time(),
                 "user_raw": user_raw,
                 "prompt_sent": prompt_sent,
                 "saved_fa_tokens": savings["saved"],
@@ -1125,35 +1203,101 @@ class BridgeHub:
                 mirror_bytes = mirror_path.stat().st_size
             except OSError:
                 mirror_bytes = 0
+            pty_live = (now - self.pty_heartbeats.get(aid, 0.0)) < 25.0
             item = {
                 "agent_id": aid,
                 "title": m.get("title") or aid,
                 "turn_count": len(m.get("turns", [])),
                 "updated_at": float(m.get("updated_at", 0.0) or 0.0),
                 "bytes": mirror_bytes,
-                "pty_live": (now - self.pty_heartbeats.get(aid, 0.0)) < 25.0,
+                "pty_live": pty_live,
+                "archived": bool(m.get("archived", False)),
             }
-            (mirrors_list if item["pty_live"] else history_list).append(item)
+            (mirrors_list if pty_live and not item["archived"] else history_list).append(item)
 
         lab_list = []
+        lab_history_list = []
         for sess in sorted(self.lab_sessions.values(), key=lambda x: x.get("updated_at", 0), reverse=True):
             session_path = self.store.sessions_dir / "lab" / f"{sess['id']}.json"
             try:
                 session_bytes = session_path.stat().st_size
             except OSError:
                 session_bytes = 0
-            lab_list.append({
+            lab_item = {
                 "id": sess["id"], "title": sess["title"],
                 "turn_count": len(sess.get("turns", [])),
                 "created_at": float(sess.get("created_at", 0.0) or 0.0),
                 "updated_at": float(sess.get("updated_at", 0.0) or 0.0),
                 "bytes": session_bytes,
-            })
+                "archived": bool(sess.get("archived", False)),
+            }
+            (lab_history_list if lab_item["archived"] else lab_list).append(lab_item)
+
+        # Message-level estimates are kept separate from provider-billed input/output totals.
+        # History without timestamps is included only for the ALL window because its date is unknown.
+        estimate_totals = {
+            "user_messages": 0, "input_source_tokens": 0, "input_sent_tokens": 0,
+            "input_saved_tokens": 0, "input_expansion_tokens": 0,
+            "assistant_messages": 0, "assistant_translated_messages": 0,
+            "model_output_text_tokens": 0, "persian_display_tokens": 0,
+            "output_translation_delta_tokens": 0, "untracked_history_turns": 0,
+        }
+        estimate_since = 0.0 if self.usage_window_hours <= 0 else now - self.usage_window_hours * 3600.0
+        seen_turn_ids: set[str] = set()
+        conversation_sets = [
+            (str(m.get("agent_id", "")), m.get("turns", [])) for m in self.mirrors.values()
+        ] + [
+            (f"lab-{str(sess.get('id', ''))[-4:]}", sess.get("turns", []))
+            for sess in self.lab_sessions.values()
+        ]
+        for fallback_agent, turns in conversation_sets:
+            for turn in turns if isinstance(turns, list) else []:
+                turn_id = str(turn.get("id", ""))
+                if turn_id and turn_id in seen_turn_ids:
+                    continue
+                if turn_id:
+                    seen_turn_ids.add(turn_id)
+                turn_ts = float(turn.get("ts_epoch", 0.0) or 0.0)
+                if not turn_ts:
+                    estimate_totals["untracked_history_turns"] += 1
+                    if self.usage_window_hours > 0:
+                        continue
+                elif turn_ts < estimate_since:
+                    continue
+                turn_agent = str(turn.get("agent") or fallback_agent)
+                turn_model = str(turn.get("model") or "")
+                if self.usage_model_filter != "all" and turn_model != self.usage_model_filter:
+                    continue
+                if self.usage_agent_filter != "all" and turn_agent != self.usage_agent_filter:
+                    continue
+                estimates = turn.get("token_estimates") or {}
+                input_est = estimate_persian_token_savings(
+                    turn.get("user_raw", ""), turn.get("prompt_sent", turn.get("user_raw", ""))
+                )
+                reply_en = turn.get("reply_en", "")
+                reply_fa = turn.get("reply_fa", "")
+                if turn.get("user_raw"):
+                    estimate_totals["user_messages"] += 1
+                    estimate_totals["input_source_tokens"] += int(estimates.get("input_source_tokens", input_est["fa_est"]))
+                    estimate_totals["input_sent_tokens"] += int(estimates.get("input_sent_tokens", input_est["en_est"]))
+                    estimate_totals["input_saved_tokens"] += int(estimates.get("input_saved_tokens", input_est["saved"]))
+                    estimate_totals["input_expansion_tokens"] += max(0, -int(estimates.get("input_delta_tokens", input_est["delta"])))
+                if reply_en:
+                    estimate_totals["assistant_messages"] += 1
+                    output_en_est = int(estimates.get("model_output_text_tokens", estimate_text_tokens(reply_en)))
+                    output_fa_est = int(estimates.get("persian_display_tokens", estimate_text_tokens(reply_fa)))
+                    estimate_totals["model_output_text_tokens"] += output_en_est
+                    estimate_totals["persian_display_tokens"] += output_fa_est
+                    estimate_totals["output_translation_delta_tokens"] += (output_fa_est - output_en_est)
+                    if reply_fa:
+                        estimate_totals["assistant_translated_messages"] += 1
+        usage["message_estimates"] = estimate_totals
 
         if self.view_kind == "lab":
-            if self.view_id not in self.lab_sessions:
-                if self.lab_sessions:
-                    self.view_id = next(iter(self.lab_sessions.keys()))
+            if self.view_id not in self.lab_sessions or self.lab_sessions[self.view_id].get("archived"):
+                active_ids = [sid for sid, item in self.lab_sessions.items() if not item.get("archived")]
+                if active_ids:
+                    self.view_id = active_ids[0]
                 else:
                     self.view_kind, self.view_id = "mirror", ""
             active_conv = self.lab_sessions[self.view_id] if self.view_kind == "lab" else self._new_mirror_obj("")
@@ -1185,6 +1329,7 @@ class BridgeHub:
             "mirrors": mirrors_list,
             "mirror_history": history_list,
             "lab_sessions": lab_list,
+            "lab_history": lab_history_list,
             "active_conversation": active_conv,
             "upstream": up,
             "translator_online": tr_ok,

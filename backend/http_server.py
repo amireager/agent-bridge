@@ -301,6 +301,11 @@ def make_handler(hub: BridgeHub):
                 hub.clear_mirror_view(body.get("agent_id", hub.view_id))
                 return self._send_json({"ok": True})
 
+            if path == "/api/mirror/archive":
+                body = self._read_json()
+                ok = hub.archive_mirror(body.get("agent_id", ""))
+                return self._send_json({"ok": ok})
+
             if path == "/api/mirror/delete":
                 body = self._read_json()
                 ok = hub.delete_mirror(body.get("agent_id", ""))
@@ -310,6 +315,11 @@ def make_handler(hub: BridgeHub):
                 body = self._read_json()
                 s = hub.create_lab_session(body.get("title"))
                 return self._send_json({"ok": True, "session": s})
+
+            if path == "/api/lab/archive":
+                body = self._read_json()
+                ok = hub.archive_lab_session(body.get("session_id", ""))
+                return self._send_json({"ok": ok})
 
             if path == "/api/lab/delete":
                 body = self._read_json()

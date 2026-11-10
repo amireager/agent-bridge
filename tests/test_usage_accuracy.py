@@ -2,7 +2,8 @@ import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
-from backend.store import DataStore
+from backend.store import CLOUD_PRICING_PROFILES, DataStore
+from backend.translator import estimate_persian_token_savings, estimate_text_tokens
 
 
 class UsageAccuracyTests(unittest.TestCase):
@@ -34,7 +35,7 @@ class UsageAccuracyTests(unittest.TestCase):
 
     def test_total_includes_input_cache_and_output_and_peak_includes_output(self):
         self.record(uncached=80, cached=20, output=40)
-        usage = self.store.query_usage("claude-sonnet-4.6", 24)
+        usage = self.store.query_usage("deepseek-v4.1-flash", 24)
         window = usage["window"]
         self.assertEqual(window["total_input"], 100)
         self.assertEqual(window["output_tokens"], 40)
@@ -50,15 +51,25 @@ class UsageAccuracyTests(unittest.TestCase):
 
     def test_unreported_counts_are_not_silently_presented_as_reported(self):
         self.record(uncached=0, cached=0, output=0, input_reported=False, output_reported=False)
-        window = self.store.query_usage("claude-sonnet-4.6", 24)["window"]
+        window = self.store.query_usage("deepseek-v4.1-flash", 24)["window"]
         self.assertEqual(window["missing_input_count_requests"], 1)
         self.assertEqual(window["missing_cache_count_requests"], 1)
         self.assertEqual(window["missing_output_count_requests"], 1)
 
+    def test_input_estimate_reports_source_and_sent_text_and_model_prices(self):
+        estimate = estimate_persian_token_savings("سلام، لطفاً این را توضیح بده", "Please explain this.")
+        self.assertGreater(estimate["fa_est"], 0)
+        self.assertGreater(estimate["en_est"], 0)
+        self.assertEqual(estimate["delta"], estimate["fa_est"] - estimate["en_est"])
+        self.assertGreater(estimate_text_tokens("سلام دنیا"), estimate_text_tokens("hello world"))
+        self.assertEqual(set(CLOUD_PRICING_PROFILES), {
+            "deepseek-v4.1-flash", "glm-5.3-flash", "gpt-6-luna", "gpt-6-astra"
+        })
+
     def test_chart_granularity_tracks_selected_window(self):
         for hours, expected in ((1, "hour"), (24, "hour"), (168, "day"), (720, "day"), (0, "week")):
             with self.subTest(hours=hours):
-                usage = self.store.query_usage("claude-sonnet-4.6", hours)
+                usage = self.store.query_usage("deepseek-v4.1-flash", hours)
                 self.assertEqual(usage["chart_granularity"], expected)
 
     def test_cache_drop_is_heuristic_and_requires_previously_warm_cache(self):

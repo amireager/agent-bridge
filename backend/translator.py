@@ -38,19 +38,25 @@ _LRU_CACHE: OrderedDict[str, tuple[str, str]] = OrderedDict()
 _LRU_MAX = 3000
 
 
-def estimate_persian_token_savings(raw_fa_text: str, sent_en_text: str) -> dict:
-    """Zero-overhead O(1) BPE token estimate (pure multiplication, zero CPU load)."""
-    if not raw_fa_text or not PERSIAN_RE.search(raw_fa_text):
-        en_t = max(1, round(len(sent_en_text or "") * 0.25)) if sent_en_text else 0
-        return {"fa_est": en_t, "en_est": en_t, "saved": 0, "saved_pct": 0.0}
+def estimate_text_tokens(text: str) -> int:
+    """Cheap character-based token estimate; a directional heuristic, not a tokenizer."""
+    text = str(text or "")
+    if not text:
+        return 0
+    fa_chars = len(PERSIAN_RE.findall(text))
+    latin_chars = len(LATIN_RE.findall(text))
+    other_chars = max(0, len(text) - fa_chars - latin_chars)
+    return max(1, round(fa_chars * 0.68 + latin_chars * 0.25 + other_chars * 0.25))
 
-    fa_chars = len(PERSIAN_RE.findall(raw_fa_text))
-    other_chars = max(0, len(raw_fa_text) - fa_chars)
-    fa_est = max(1, round(fa_chars * 0.68 + other_chars * 0.25))
-    en_est = max(1, round(len(sent_en_text or "") * 0.25))
-    saved = max(0, fa_est - en_est)
+
+def estimate_persian_token_savings(raw_fa_text: str, sent_en_text: str) -> dict:
+    """Estimate message-level FA→EN input token delta; never treat it as provider billing."""
+    fa_est = estimate_text_tokens(raw_fa_text)
+    en_est = estimate_text_tokens(sent_en_text)
+    delta = fa_est - en_est
+    saved = max(0, delta)
     pct = round((saved / fa_est) * 100.0, 1) if fa_est > 0 else 0.0
-    return {"fa_est": fa_est, "en_est": en_est, "saved": saved, "saved_pct": pct}
+    return {"fa_est": fa_est, "en_est": en_est, "saved": saved, "delta": delta, "saved_pct": pct}
 
 
 def _cache_get(key: str) -> tuple[str, str] | None:

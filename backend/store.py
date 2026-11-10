@@ -13,33 +13,41 @@ import time
 from pathlib import Path
 
 CLOUD_PRICING_PROFILES = {
-    "claude-sonnet-4.6": {
-        "label": "Claude Sonnet 4.6",
-        "rates": "$3 / $0.30 / $15",
-        "input_per_m": 3.00,
-        "cached_per_m": 0.30,
-        "output_per_m": 15.00,
+    "deepseek-v4.1-flash": {
+        "label": "DeepSeek V4.1 Flash (off-peak baseline)",
+        "rates": "$0.15 / $0.003 / $0.60 · peak x2",
+        "input_per_m": 0.15,
+        "cached_per_m": 0.003,
+        "output_per_m": 0.60,
+        "source": "https://api-docs.deepseek.com/quick_start/pricing/",
+        "note": "نرخ پایهٔ off-peak؛ در ساعات peak قیمت ورودی/کش/خروجی دوبرابر است.",
     },
-    "claude-opus-4.6": {
-        "label": "Claude Opus 4.6",
-        "rates": "$15 / $1.50 / $75",
-        "input_per_m": 15.00,
-        "cached_per_m": 1.50,
-        "output_per_m": 75.00,
+    "glm-5.3-flash": {
+        "label": "GLM-5.3 Flash (USD list via Z.ai/OpenRouter)",
+        "rates": "$0.15 / $0.03 / $0.50",
+        "input_per_m": 0.15,
+        "cached_per_m": 0.03,
+        "output_per_m": 0.50,
+        "source": "https://openrouter.ai/z-ai/glm-5.3-flash",
+        "note": "نرخ USD فهرست Z.ai در OpenRouter؛ ارائه‌دهنده‌های دیگر ممکن است فرق کنند.",
     },
-    "gpt-5.4": {
-        "label": "OpenAI GPT-5.4",
-        "rates": "$2.50 / $0.25 / $10",
-        "input_per_m": 2.50,
-        "cached_per_m": 0.25,
-        "output_per_m": 10.00,
+    "gpt-6-luna": {
+        "label": "OpenAI GPT-6 Luna (standard)",
+        "rates": "$0.10 / $0.01 / $0.50",
+        "input_per_m": 0.10,
+        "cached_per_m": 0.01,
+        "output_per_m": 0.50,
+        "source": "https://developers.openai.com/api/docs/pricing",
+        "note": "نرخ standard؛ نرخ‌های Batch/Fast و ضریب long-context جداگانه‌اند.",
     },
-    "deepseek-v3": {
-        "label": "DeepSeek V3.2",
-        "rates": "$0.27 / $0.07 / $1.10",
-        "input_per_m": 0.27,
-        "cached_per_m": 0.07,
-        "output_per_m": 1.10,
+    "gpt-6-astra": {
+        "label": "OpenAI GPT-6 Astra (standard · premium)",
+        "rates": "$10 / $1 / $50",
+        "input_per_m": 10.00,
+        "cached_per_m": 1.00,
+        "output_per_m": 50.00,
+        "source": "https://developers.openai.com/api/docs/pricing",
+        "note": "نرخ standard برای مقایسهٔ ردهٔ گران؛ Batch/Fast و هزینهٔ نوشتن cache اعمال نشده.",
     },
 }
 
@@ -185,7 +193,7 @@ class DataStore:
                 "lab_system_prompt": "You are a sharp, concise coding and systems assistant. Think clearly and write clean code.",
             },
             "pricing": {
-                "active_profile": "claude-sonnet-4.6",
+                "active_profile": "deepseek-v4.1-flash",
             },
             "retention": {
                 "days": 7,
@@ -209,7 +217,7 @@ class DataStore:
         else:
             merged = self._deep_merge(defaults, self.load_config_raw())
             if merged["pricing"].get("active_profile") not in CLOUD_PRICING_PROFILES:
-                merged["pricing"]["active_profile"] = "claude-sonnet-4.6"
+                merged["pricing"]["active_profile"] = "deepseek-v4.1-flash"
             self.save_config(merged)
 
         if not self.glossary_path.exists():
@@ -252,7 +260,7 @@ class DataStore:
         self, uncached_in: int, cached_in: int, out_tok: int, profile_key: str
     ) -> float:
         p = CLOUD_PRICING_PROFILES.get(
-            profile_key, CLOUD_PRICING_PROFILES["claude-sonnet-4.6"]
+            profile_key, CLOUD_PRICING_PROFILES["deepseek-v4.1-flash"]
         )
         return (
             (uncached_in / 1_000_000.0) * p["input_per_m"]
@@ -264,7 +272,7 @@ class DataStore:
         self, uncached_in: int, cached_in: int, out_tok: int, profile_key: str
     ) -> float:
         p = CLOUD_PRICING_PROFILES.get(
-            profile_key, CLOUD_PRICING_PROFILES["claude-sonnet-4.6"]
+            profile_key, CLOUD_PRICING_PROFILES["deepseek-v4.1-flash"]
         )
         return (
             ((uncached_in + cached_in) / 1_000_000.0) * p["input_per_m"]
@@ -405,7 +413,7 @@ class DataStore:
         recent_limit: int = 10,
     ) -> dict:
         if pricing_profile not in CLOUD_PRICING_PROFILES:
-            pricing_profile = "claude-sonnet-4.6"
+            pricing_profile = "deepseek-v4.1-flash"
         now = time.time()
         win_since = 0.0 if window_hours <= 0 else (now - window_hours * 3600.0)
 
@@ -561,6 +569,8 @@ class DataStore:
                     "id": pk,
                     "label": pinfo["label"],
                     "rates": pinfo["rates"],
+                    "source": pinfo.get("source", ""),
+                    "note": pinfo.get("note", ""),
                     "cost_usd": round(with_kv, 4),
                     "nocache_usd": round(no_kv, 4),
                     "saved_usd": round(max(0.0, no_kv - with_kv), 4),

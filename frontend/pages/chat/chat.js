@@ -17,15 +17,24 @@ window.ABChatPage = (() => {
     return `<span class="think-modes"><button class="${current==='closed'?'selected':''}" onclick="ABChatPage.setThinkMode('${esc(key)}','closed',event)" title="بستن کامل">×</button><button class="${current==='half'?'selected':''}" onclick="ABChatPage.setThinkMode('${esc(key)}','half',event)" title="نمایش نیمه، شش خط">۶ خط</button><button class="${current==='full'?'selected':''}" onclick="ABChatPage.setThinkMode('${esc(key)}','full',event)" title="نمایش کامل">باز</button></span>`;
   }
 
-  // O(1) Zero-CPU Multiplication Estimate: Persian ~0.68 tok/char vs English ~0.25 tok/char
+  // Heuristic only: per-character ratios, not the active model's tokenizer.
+  function estimateTextTokens(text) {
+    const value = String(text || '');
+    if (!value) return 0;
+    const fa = (value.match(/[\u0600-\u06FF]/g) || []).length;
+    const latin = (value.match(/[A-Za-z]/g) || []).length;
+    const other = Math.max(0, value.length - fa - latin);
+    return Math.max(1, Math.round(fa * 0.68 + latin * 0.25 + other * 0.25));
+  }
+
   function estimateSavings(faText, enText) {
-    const faChars = (String(faText || '').match(/[\u0600-\u06FF]/g) || []).length;
-    if (faChars < 4) return null;
-    const rawFaEst = Math.max(1, Math.round(faChars * 0.68 + (String(faText).length - faChars) * 0.25));
-    const enEst = Math.max(1, Math.round(String(enText || '').length * 0.25));
-    const saved = Math.max(0, rawFaEst - enEst);
+    const rawFaEst = estimateTextTokens(faText);
+    const enEst = estimateTextTokens(enText);
+    if (!rawFaEst) return null;
+    const delta = rawFaEst - enEst;
+    const saved = Math.max(0, delta);
     const pct = Math.round((saved / Math.max(1, rawFaEst)) * 100);
-    return { rawFaEst, enEst, saved, pct };
+    return { rawFaEst, enEst, saved, delta, pct };
   }
 
   function ensureSkeleton(host) {
@@ -162,9 +171,11 @@ window.ABChatPage = (() => {
     const pill = document.getElementById('trSavingsBadge');
     if (!pill) return;
     const sv = estimateSavings(faTxt, enTxt);
-    if (sv && sv.saved > 0) {
+    if (sv && (sv.saved > 0 || sv.delta < 0)) {
       pill.style.display = 'inline-flex';
-      pill.textContent = `⚡ ~${sv.saved} tok saved (-${sv.pct}% vs FA)`;
+      pill.textContent = sv.delta > 0
+        ? `ورودی کاربر: ~${sv.rawFaEst} → ~${sv.enEst} · کاهش تخمینی ~${sv.saved} توکن`
+        : `ورودی کاربر: ~${sv.rawFaEst} → ~${sv.enEst} · افزایش تخمینی ~${Math.abs(sv.delta)} توکن`;
     } else {
       pill.style.display = 'none';
     }
@@ -569,9 +580,16 @@ window.ABChatPage = (() => {
         : (t.tools?.length ? '' : '<div class="mono muted">[در حال دریافت پاسخ مدل...]</div>');
 
       const src = (t.source || 'web').toUpperCase();
-      const savedPill = (t.saved_fa_tokens > 0)
-        ? `<span style="color:var(--phosphor)">⚡ ~${t.saved_fa_tokens} tok saved</span>`
+      const inputEst = t.token_estimates || {};
+      const inputSourceTokens = Number(inputEst.input_source_tokens ?? estimateTextTokens(t.user_raw));
+      const inputSentTokens = Number(inputEst.input_sent_tokens ?? estimateTextTokens(t.prompt_sent || t.user_raw));
+      const inputDelta = Number(inputEst.input_delta_tokens ?? (inputSourceTokens - inputSentTokens));
+      const inputDeltaLabel = inputDelta > 0 ? `صرفه‌جویی ~${inputDelta}` : inputDelta < 0 ? `افزایش ~${Math.abs(inputDelta)}` : 'بدون اختلاف تخمینی';
+      const savedPill = t.user_raw
+        ? `<span title="برآورد نویسه‌ای، نه شمارندهٔ tokenizer مدل">ورودی کاربر: ~${inputSourceTokens} → ~${inputSentTokens} · ${inputDeltaLabel} tok</span>`
         : `<span>${esc(t.ts)}</span>`;
+      const outputTextEstimate = Number(inputEst.model_output_text_tokens ?? estimateTextTokens(t.reply_en));
+      const outputPersianEstimate = Number(inputEst.persian_display_tokens ?? estimateTextTokens(t.reply_fa));
 
       return `
         <article class="turn-card">
@@ -596,6 +614,7 @@ window.ABChatPage = (() => {
             <summary class="assistant-fold-head"><span>پاسخ ${esc(t.model || t.agent || 'مدل')} · ${esc(tokStr)}</span><span class="kv-pill ${esc(kvState)}">${esc(kvLabel)} · باز/بسته</span></summary>
             <div class="assistant-stream">
               <div class="turn-meta-bar"><strong>${esc(t.agent)}</strong><span>${esc(t.model || '')}</span></div>
+              <small class="muted" title="تعداد actual از گزارش مدل؛ دو عدد دیگر تخمین نویسه‌ای هستند و صورتحساب نیستند.">پاسخ مدل: ${Number(m.out_tok || 0) ? `${Number(m.out_tok).toLocaleString()} توکن ثبت‌شده` : 'تعداد ثبت‌نشده'} · متن انگلیسی ~${outputTextEstimate.toLocaleString()} · نمایش فارسی ${t.reply_fa ? `~${outputPersianEstimate.toLocaleString()}` : 'ترجمه نشده'} تخمینی</small>
               ${stepTimeline || `${thinkAcc}${toolsAcc}`}
               ${bodyContent}
               ${t.reply_en ? `<div class="turn-foot-actions"><span>engine: ${esc(t.tr_engine || (trEnabled ? 'online' : 'proxy-only'))}</span><button class="btn ghost" onclick="ABChatPage.retranslate('${esc(t.id)}')">ترجمه مجدد ↻</button></div>` : ''}

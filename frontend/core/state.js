@@ -55,10 +55,20 @@ window.ABApp = (() => {
     if (title && title.trim()) await api('/api/lab/rename', { session_id: sessionId, title: title.trim() });
   }
 
+  async function archiveMirror(agentId, ev) {
+    if (ev) ev.stopPropagation();
+    await api('/api/mirror/archive', { agent_id: agentId });
+  }
+
   async function deleteMirror(agentId, ev) {
     if (ev) ev.stopPropagation();
     if (!confirm(`حذف تاریخچه‌ی کانال آفلاین «${agentId}»؟`)) return;
     await api('/api/mirror/delete', { agent_id: agentId });
+  }
+
+  async function archiveLabSession(sessionId, ev) {
+    if (ev) ev.stopPropagation();
+    await api('/api/lab/archive', { session_id: sessionId });
   }
 
   async function deleteLabSession(sessionId, ev) {
@@ -104,14 +114,21 @@ window.ABApp = (() => {
             <i class="${dotCls}"></i>
             <strong class="mono">${esc(m.agent_id)}</strong>
           </span>
-          <span class="tiny-tag ${m.pty_live ? 'on' : ''}">${m.pty_live ? 'زنده' : m.turn_count}</span>
+          <span style="display:flex;align-items:center;gap:4px;"><span class="tiny-tag ${m.pty_live ? 'on' : ''}">${m.pty_live ? 'زنده' : m.turn_count}</span><button class="mini-action" title="انتقال به تاریخچه؛ ترمینال خارجی متوقف نمی‌شود" onclick="ABApp.archiveMirror('${esc(m.agent_id)}',event)">↘</button></span>
         </div>`;
     }).join('') || '<div class="tree-empty">ترمینال زنده‌ای نیست</div>';
 
-    const historyHtml = (state.mirror_history || []).map(m => {
+    const mirrorHistoryHtml = (state.mirror_history || []).map(m => {
       const isAct = route === 'chat' && state.view_kind === 'mirror' && state.view_id === m.agent_id;
-      return `<div class="tree-node ${isAct ? 'active' : ''}" onclick="ABApp.selectMirror('${esc(m.agent_id)}')"><span>◷ <strong class="mono">${esc(m.agent_id)}</strong> <small>${m.turn_count} turn</small></span><button class="mini-action danger" title="حذف تاریخچه" onclick="ABApp.deleteMirror('${esc(m.agent_id)}',event)">×</button></div>`;
-    }).join('') || '<div class="tree-empty">تاریخچه‌ای نیست</div>';
+      const status = m.pty_live ? 'PTY زنده · در تاریخچه' : 'ترمینال بسته';
+      const deleteAction = m.pty_live ? '' : `<button class="mini-action danger" title="حذف تاریخچه" onclick="ABApp.deleteMirror('${esc(m.agent_id)}',event)">×</button>`;
+      return `<div class="tree-node ${isAct ? 'active' : ''}" onclick="ABApp.selectMirror('${esc(m.agent_id)}')"><span>◷ <strong class="mono">${esc(m.agent_id)}</strong> <small>${m.turn_count} دور · ${status}</small></span>${deleteAction}</div>`;
+    }).join('');
+    const labHistoryHtml = (state.lab_history || []).map(s => {
+      const isAct = route === 'chat' && state.view_kind === 'lab' && state.view_id === s.id;
+      return `<div class="tree-node ${isAct ? 'active' : ''}" onclick="ABApp.selectLab('${esc(s.id)}')"><span>⚡ <strong>${esc(s.title)}</strong> <small>${s.turn_count} دور · بایگانی‌شده</small></span><span class="tiny-tag">بازگردانی</span></div>`;
+    }).join('');
+    const historyHtml = [labHistoryHtml, mirrorHistoryHtml].filter(Boolean).join('') || '<div class="tree-empty">تاریخچه‌ای نیست</div>';
 
     // 2. Built-in Direct Model & Tool Lab (for KV/translation testing & growing our own agent!)
     const labHtml = (state.lab_sessions || []).map(s => {
@@ -124,7 +141,7 @@ window.ABApp = (() => {
           <span style="display:flex;align-items:center;gap:4px;">
             <span class="tiny-tag">${s.turn_count}</span>
             <button class="mini-action" title="تغییر نام" onclick="ABApp.renameLabSession('${esc(s.id)}',event)">✎</button>
-            <button class="mini-action danger" title="بستن/حذف چت" onclick="ABApp.deleteLabSession('${esc(s.id)}',event)">×</button>
+            <button class="mini-action" title="انتقال به تاریخچه؛ پیام‌ها حفظ می‌شوند" onclick="ABApp.archiveLabSession('${esc(s.id)}',event)">↘</button>
           </span>
         </div>`;
     }).join('') || '<div class="tree-empty">چتی ساخته نشده؛ برای شروع «+ جدید» را بزن.</div>';
@@ -154,7 +171,7 @@ window.ABApp = (() => {
 
     treeEl.innerHTML = [
       mkRoot('mirrors', ICONS.terminal, 'ترمینال‌های زنده', mirrorHtml),
-      mkRoot('history', ICONS.clock || ICONS.terminal, 'تاریخچه‌ی ترمینال‌ها', historyHtml),
+      mkRoot('history', ICONS.clock || ICONS.terminal, 'تاریخچهٔ چت‌ها', historyHtml),
       mkRoot(
         'lab',
         ICONS.cpu,
@@ -312,7 +329,7 @@ window.ABApp = (() => {
 
   return {
     getState, getRoute, navigate, toggleBranch,
-    selectMirror, selectLab, createLabSession, renameLabSession, deleteLabSession, deleteMirror,
+    selectMirror, selectLab, createLabSession, renameLabSession, archiveLabSession, archiveMirror, deleteLabSession, deleteMirror,
     filterByObservedModel, toggleSidebarSide, toggleProxyMode,
     toggleSidebarCollapse, unlockModelVault, boot
   };

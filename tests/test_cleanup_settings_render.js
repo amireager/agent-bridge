@@ -20,22 +20,31 @@ global.window = {
   ABApp: { getState: () => state, selectLab(){}, selectMirror(){} }
 };
 vm.runInThisContext(fs.readFileSync('frontend/pages/settings/settings.js', 'utf8'));
-const state = { config:{ui:{},translation:{},tap:{},retention:{days:14,auto_prune_on_boot:true}}, storage:{total_kib:2048,file_count:8}, lab_sessions:[{id:'lab-1',title:'Lab session',turn_count:3,updated_at:1,bytes:1024}], mirror_history:[{agent_id:'offline-1',title:'Offline history',turn_count:2,updated_at:2,bytes:700}], mirrors:[{agent_id:'live-1',title:'Live PTY',turn_count:1,updated_at:3,bytes:500,pty_live:true}] };
-const host = { innerHTML:'', querySelectorAll: () => [] };
+const state = { config:{ui:{},translation:{},tap:{},retention:{days:14,auto_prune_on_boot:true}}, storage:{total_kib:2048,file_count:8}, lab_sessions:[{id:'lab-1',title:'Lab session',turn_count:3,updated_at:1,bytes:1024}], lab_history:[{id:'lab-old',title:'Archived Lab',turn_count:4,updated_at:0,bytes:800,archived:true}], mirror_history:[{agent_id:'offline-1',title:'Offline history',turn_count:2,updated_at:2,bytes:700,pty_live:false}], mirrors:[{agent_id:'live-1',title:'Live PTY',turn_count:1,updated_at:3,bytes:500,pty_live:true}] };
+const hostListeners = {};
+const host = { innerHTML:'', dataset:{}, addEventListener(type, callback){hostListeners[type]=callback;}, contains(){return true;}, querySelectorAll: () => [] };
 window.ABSettingsPage.render(host, state, 'set-retention');
 assert.match(host.innerHTML, /data-cleanup-tab="history"/);
 assert.match(host.innerHTML, /data-cleanup-tab="cleanup"/);
 assert.match(host.innerHTML, /جست‌وجو بر اساس عنوان یا شناسه/);
 assert.match(elements.historyResults.innerHTML, /زنده · محافظت‌شده/);
+assert.match(elements.historyResults.innerHTML, /Archived Lab/);
+assert.match(elements.historyResults.innerHTML, /بازگردانی/);
 assert.doesNotMatch(elements.historyResults.innerHTML, /data-history-action="delete" data-kind="mirror" data-id="live-1"/);
 assert.match(host.innerHTML, /retentionAuto/);
 assert.match(host.innerHTML, /data-cleanup-days="90"/);
 window.ABSettingsPage.setCleanupRange(0);
 window.ABSettingsPage.setCleanupScope('xray', true);
 (async () => {
+  assert.match(elements.historyResults.innerHTML, /data-history-action="archive" data-kind="lab" data-id="lab-1"/);
+  await hostListeners.click({ target:{ closest:()=>({ dataset:{historyAction:'archive',kind:'lab',id:'lab-1'}, disabled:false }) } });
+  assert.equal(state.lab_sessions.length, 0);
+  assert.equal(state.lab_history.length, 2);
+  assert(apiCalls.some(call => call.path === '/api/lab/archive'));
   const preview = await window.ABSettingsPage.previewCleanup();
   assert.equal(preview.days, 0);
-  assert.deepEqual(apiCalls[0].body.scopes.sort(), ['lab','mirrors','telemetry','xray']);
+  const previewCall = apiCalls.find(call => call.path === '/api/cleanup/preview');
+  assert.deepEqual(previewCall.body.scopes.sort(), ['lab','mirrors','telemetry','xray']);
   assert.match(elements.cleanupPreview.innerHTML, /پیش‌نمایش آماده است/);
   await window.ABSettingsPage.runSelectedCleanup();
   assert.equal(elements.cleanupConfirmDialog.hidden, false);
