@@ -102,6 +102,9 @@ class DataStore:
                     uncached_input INTEGER NOT NULL,
                     cached_input INTEGER NOT NULL,
                     output_tokens INTEGER NOT NULL,
+                    input_count_reported INTEGER NOT NULL DEFAULT 0,
+                    cache_count_reported INTEGER NOT NULL DEFAULT 0,
+                    output_count_reported INTEGER NOT NULL DEFAULT 0,
                     saved_fa_tokens INTEGER NOT NULL DEFAULT 0,
                     kv_status TEXT NOT NULL DEFAULT 'cold',
                     prompt_ms REAL NOT NULL,
@@ -114,6 +117,12 @@ class DataStore:
                 """
             )
             cols = {r[1] for r in conn.execute("PRAGMA table_info(llm_requests);").fetchall()}
+            if "input_count_reported" not in cols:
+                conn.execute("ALTER TABLE llm_requests ADD COLUMN input_count_reported INTEGER NOT NULL DEFAULT 0;")
+            if "cache_count_reported" not in cols:
+                conn.execute("ALTER TABLE llm_requests ADD COLUMN cache_count_reported INTEGER NOT NULL DEFAULT 0;")
+            if "output_count_reported" not in cols:
+                conn.execute("ALTER TABLE llm_requests ADD COLUMN output_count_reported INTEGER NOT NULL DEFAULT 0;")
             if "saved_fa_tokens" not in cols:
                 conn.execute("ALTER TABLE llm_requests ADD COLUMN saved_fa_tokens INTEGER NOT NULL DEFAULT 0;")
             if "kv_status" not in cols:
@@ -272,6 +281,9 @@ class DataStore:
         cached_input: int,
         output_tokens: int,
         saved_fa_tokens: int = 0,
+        input_count_reported: bool = False,
+        cache_count_reported: bool = False,
+        output_count_reported: bool = False,
         prompt_ms: float,
         decode_ms: float,
         prompt_tps: float,
@@ -297,7 +309,16 @@ class DataStore:
 
             if prev and (now - float(prev[2])) < 1200:
                 prev_tot = int(prev[0]) + int(prev[1])
-                if prev_tot >= 400 and cached_input < (prev_tot * 0.35) and uncached_input > 300:
+                prev_cached = int(prev[1])
+                current_tot = int(uncached_input) + int(cached_input)
+                likely_cache_drop = (
+                    prev_tot >= 400
+                    and prev_cached >= prev_tot * 0.35
+                    and current_tot >= prev_tot * 0.70
+                    and cached_input < prev_cached * 0.35
+                    and uncached_input > 300
+                )
+                if likely_cache_drop:
                     kv_status = "flush"
                 elif hit_ratio >= 0.75:
                     kv_status = "warm"
@@ -313,10 +334,11 @@ class DataStore:
                 INSERT INTO llm_requests (
                     ts, hour_bucket, agent, session_id, model,
                     uncached_input, cached_input, output_tokens,
+                    input_count_reported, cache_count_reported, output_count_reported,
                     saved_fa_tokens, kv_status,
                     prompt_ms, decode_ms, prompt_tps, decode_tps,
                     shadow_cost_usd, preview
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     now,
@@ -324,10 +346,13 @@ class DataStore:
                     agent,
                     session_id,
                     model,
-                    int(uncached_input),
-                    int(cached_input),
-                    int(output_tokens),
-                    int(saved_fa_tokens),
+                    max(0, int(uncached_input)),
+                    max(0, int(cached_input)),
+                    max(0, int(output_tokens)),
+                    int(bool(input_count_reported)),
+                    int(bool(cache_count_reported)),
+                    int(bool(output_count_reported)),
+                    max(0, int(saved_fa_tokens)),
                     kv_status,
                     float(prompt_ms),
                     float(decode_ms),
@@ -412,12 +437,15 @@ class DataStore:
                     f"""
                     SELECT
                         COUNT(*) AS reqs,
+                        COALESCE(SUM(CASE WHEN input_count_reported = 0 THEN 1 ELSE 0 END), 0) AS missing_input_counts,
+                        COALESCE(SUM(CASE WHEN cache_count_reported = 0 THEN 1 ELSE 0 END), 0) AS missing_cache_counts,
+                        COALESCE(SUM(CASE WHEN output_count_reported = 0 THEN 1 ELSE 0 END), 0) AS missing_output_counts,
                         COALESCE(SUM(uncached_input), 0) AS u_in,
                         COALESCE(SUM(cached_input), 0) AS c_in,
                         COALESCE(SUM(output_tokens), 0) AS out_t,
                         COALESCE(SUM(saved_fa_tokens), 0) AS saved_fa,
                         COALESCE(SUM(CASE WHEN kv_status = 'flush' THEN 1 ELSE 0 END), 0) AS flushes,
-                        COALESCE(MAX(uncached_input + cached_input), 0) AS peak_ctx,
+                        COALESCE(MAX(uncached_input + cached_input + output_tokens), 0) AS peak_ctx,
                         COALESCE(AVG(NULLIF(decode_tps, 0)), 0) AS avg_tg,
                         COALESCE(AVG(NULLIF(prompt_tps, 0)), 0) AS avg_pp
                     FROM llm_requests
@@ -429,6 +457,9 @@ class DataStore:
                 tot_in = u_in + c_in
                 return {
                     "requests": int(row["reqs"]),
+                    "missing_input_count_requests": int(row["missing_input_counts"]),
+                    "missing_cache_count_requests": int(row["missing_cache_counts"]),
+                    "missing_output_count_requests": int(row["missing_output_counts"]),
                     "uncached_input": u_in,
                     "cached_input": c_in,
                     "total_input": tot_in,
@@ -436,7 +467,8 @@ class DataStore:
                     "total_tokens": tot_in + out_t,
                     "saved_fa_tokens": int(row["saved_fa"]),
                     "flush_count": int(row["flushes"]),
-                    "peak_ctx_tokens": int(row["peak_ctx"]),
+                    "peak_request_tokens": int(row["peak_ctx"]),
+                    "peak_ctx_tokens": int(row["peak_ctx"]),  # legacy API alias
                     "cache_hit_pct": round((c_in / tot_in * 100.0), 1) if tot_in > 0 else 0.0,
                     "avg_decode_tps": round(float(row["avg_tg"]), 1),
                     "avg_prompt_tps": round(float(row["avg_pp"]), 1),
@@ -467,7 +499,7 @@ class DataStore:
                        COALESCE(SUM(cached_input), 0) AS c_in,
                        COALESCE(SUM(output_tokens), 0) AS out_t,
                        COALESCE(SUM(CASE WHEN kv_status = 'flush' THEN 1 ELSE 0 END), 0) AS flushes,
-                       COALESCE(MAX(uncached_input + cached_input), 0) AS peak_ctx,
+                       COALESCE(MAX(uncached_input + cached_input + output_tokens), 0) AS peak_ctx,
                        COALESCE(AVG(NULLIF(prompt_tps, 0)), 0) AS avg_pp,
                        COALESCE(AVG(NULLIF(decode_tps, 0)), 0) AS avg_tg
                 FROM llm_requests WHERE ts >= ?
@@ -476,22 +508,35 @@ class DataStore:
                 (win_since,),
             ).fetchall()
 
-            hourly_rows = conn.execute(
+            if 0 < window_hours <= 24:
+                chart_granularity = "hour"
+                bucket_expr = "hour_bucket"
+                chart_limit = 24
+            elif 0 < window_hours <= 24 * 30:
+                chart_granularity = "day"
+                bucket_expr = "date(hour_bucket)"
+                chart_limit = 31
+            else:
+                chart_granularity = "week"
+                bucket_expr = "strftime('%Y-W%W', hour_bucket)"
+                chart_limit = 54
+            chart_rows = conn.execute(
                 f"""
-                SELECT hour_bucket, COUNT(*) AS reqs,
+                SELECT {bucket_expr} AS bucket, COUNT(*) AS reqs,
                        COALESCE(SUM(uncached_input), 0) AS u_in,
                        COALESCE(SUM(cached_input), 0) AS c_in,
                        COALESCE(SUM(output_tokens), 0) AS out_t
                 FROM llm_requests WHERE ts >= ? {extra_sql}
-                GROUP BY hour_bucket ORDER BY hour_bucket ASC LIMIT 24
+                GROUP BY bucket ORDER BY bucket ASC LIMIT ?
                 """,
-                [now - 86400.0, *params_extra],
+                [win_since, *params_extra, chart_limit],
             ).fetchall()
 
             recent_rows = conn.execute(
                 f"""
                 SELECT id, ts, agent, session_id, model, uncached_input, cached_input,
-                       output_tokens, saved_fa_tokens, kv_status, prompt_tps, decode_tps, preview
+                       output_tokens, input_count_reported, cache_count_reported, output_count_reported,
+                       saved_fa_tokens, kv_status, prompt_tps, decode_tps, preview
                 FROM llm_requests WHERE ts >= ? {extra_sql}
                 ORDER BY id DESC LIMIT ?
                 """,
@@ -545,19 +590,20 @@ class DataStore:
                     "nocache_cost_usd": round(self.compute_nocache_cost(u_in, c_in, out_t, pricing_profile), 4),
                 }
                 if "peak_ctx" in rk:
-                    item["peak_ctx"] = int(r["peak_ctx"])
+                    item["peak_request_tokens"] = int(r["peak_ctx"])
+                    item["peak_ctx"] = int(r["peak_ctx"])  # legacy API alias
                 out.append(item)
             return out
 
         hourly = [
             {
-                "hour": r["hour_bucket"],
+                "hour": r["bucket"],
                 "requests": int(r["reqs"]),
                 "uncached_input": int(r["u_in"]),
                 "cached_input": int(r["c_in"]),
                 "output_tokens": int(r["out_t"]),
             }
-            for r in hourly_rows
+            for r in chart_rows
         ]
 
         recent = []
@@ -577,6 +623,9 @@ class DataStore:
                     "total_in": tot_in,
                     "cache_pct": pct,
                     "out_tok": out_t,
+                    "input_count_reported": bool(r["input_count_reported"]),
+                    "cache_count_reported": bool(r["cache_count_reported"]),
+                    "output_count_reported": bool(r["output_count_reported"]),
                     "saved_fa": int(r["saved_fa_tokens"]),
                     "kv_status": r["kv_status"],
                     "prompt_tps": round(float(r["prompt_tps"]), 1),
@@ -603,6 +652,7 @@ class DataStore:
             "by_agent": pack_group(by_agent_rows, "agent"),
             "by_model": pack_group(by_model_rows, "model"),
             "hourly": hourly,
+            "chart_granularity": chart_granularity,
             "recent": recent,
         }
 

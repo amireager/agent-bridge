@@ -675,17 +675,45 @@ def make_handler(hub: BridgeHub):
                 self.wfile.write(body_bytes)
 
             elapsed_s = time.perf_counter() - t0
-            cached_in = int(
-                timings.get("cache_n")
-                or (usage_obj.get("prompt_tokens_details") or {}).get("cached_tokens")
-                or 0
-            )
-            if "prompt_n" in timings:
-                uncached_in = int(timings["prompt_n"])
-            else:
-                uncached_in = max(0, int(usage_obj.get("prompt_tokens", 0)) - cached_in)
+            prompt_details = usage_obj.get("prompt_tokens_details") or {}
+            cache_count_reported = "cache_n" in timings or "cached_tokens" in prompt_details
+            cached_value = timings.get("cache_n", 0)
+            if not cached_value and "cached_tokens" in prompt_details:
+                cached_value = prompt_details.get("cached_tokens", 0)
+            try:
+                cached_in = max(0, int(cached_value or 0))
+            except (TypeError, ValueError):
+                cached_in = 0
 
-            out_tok = int(timings.get("predicted_n") or usage_obj.get("completion_tokens") or 0)
+            input_count_reported = "prompt_n" in timings or "prompt_tokens" in usage_obj
+            if "prompt_n" in timings:
+                try:
+                    timing_prompt = max(0, int(timings["prompt_n"] or 0))
+                    provider_prompt = usage_obj.get("prompt_tokens")
+                    if timing_prompt > 0 or provider_prompt is None:
+                        uncached_in = timing_prompt
+                    else:
+                        # A zero timing field can mean unpopulated metadata. Prefer the
+                        # provider total, subtracting only cached tokens explicitly reported.
+                        uncached_in = max(0, int(provider_prompt or 0) - cached_in)
+                except (TypeError, ValueError):
+                    uncached_in = 0
+            elif "prompt_tokens" in usage_obj:
+                try:
+                    uncached_in = max(0, int(usage_obj["prompt_tokens"] or 0) - cached_in)
+                except (TypeError, ValueError):
+                    uncached_in = 0
+            else:
+                uncached_in = 0
+
+            output_count_reported = "predicted_n" in timings or "completion_tokens" in usage_obj
+            out_value = timings.get("predicted_n", 0)
+            if not out_value and "completion_tokens" in usage_obj:
+                out_value = usage_obj.get("completion_tokens", 0)
+            try:
+                out_tok = max(0, int(out_value or 0))
+            except (TypeError, ValueError):
+                out_tok = 0
             p_ms = float(timings.get("prompt_ms", 0.0))
             d_ms = float(timings.get("predicted_ms", elapsed_s * 1000.0))
             p_tps = float(timings.get("prompt_per_second", 0.0))
@@ -704,6 +732,9 @@ def make_handler(hub: BridgeHub):
                 cached_input=cached_in,
                 output_tokens=out_tok,
                 saved_fa_tokens=saved_fa,
+                input_count_reported=input_count_reported,
+                cache_count_reported=cache_count_reported,
+                output_count_reported=output_count_reported,
                 prompt_ms=p_ms,
                 decode_ms=d_ms,
                 prompt_tps=p_tps,

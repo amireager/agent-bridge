@@ -36,6 +36,7 @@ class LocalModelStub(BaseHTTPRequestHandler):
         body = json.dumps({
             "model": "local-stub",
             "choices": [{"message": {"role": "assistant", "content": "Stub model reply"}}],
+            "timings": {"prompt_n": 0, "cache_n": 0, "predicted_n": 0},
             "usage": {"prompt_tokens": 12, "completion_tokens": 4},
         }).encode()
         self.send_response(200)
@@ -81,7 +82,11 @@ class HttpProxyIntegrationTests(unittest.TestCase):
                 self.assertEqual(hub.mirrors["pi"]["turns"][0]["reply_en"], "Stub model reply")
                 with closing(sqlite3.connect(store.db_path)) as conn:
                     request_count = conn.execute("SELECT COUNT(*) FROM llm_requests").fetchone()[0]
+                    token_row = conn.execute(
+                        "SELECT uncached_input, cached_input, output_tokens, input_count_reported, cache_count_reported, output_count_reported FROM llm_requests ORDER BY id DESC LIMIT 1"
+                    ).fetchone()
                 self.assertGreaterEqual(request_count, 1)
+                self.assertEqual(token_row, (12, 0, 4, 1, 1, 1))
 
                 with urllib.request.urlopen(f"http://127.0.0.1:{server.server_address[1]}/api/models/local", timeout=5) as response:
                     catalog = json.loads(response.read())

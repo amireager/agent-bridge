@@ -1112,7 +1112,7 @@ class BridgeHub:
 
         for mrow in usage.get("by_model", []):
             mrow["est_kv_mb_q8"] = estimate_kv_mb_for_tokens(
-                mrow["model"], mrow.get("peak_ctx", 0), "q8_0"
+                mrow["model"], mrow.get("peak_request_tokens", mrow.get("peak_ctx", 0)), "q8_0"
             )
 
         now = time.time()

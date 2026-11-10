@@ -32,7 +32,7 @@ window.ABUsagePage = (() => {
 
   function renderKvPill(status, pct) {
     const st = status || (pct >= 75 ? 'warm' : (pct >= 25 ? 'partial' : 'cold'));
-    const lbl = st === 'flush' ? `FLUSH (${pct}%)` : `${st.toUpperCase()} ${pct}%`;
+    const lbl = st === 'flush' ? `افت احتمالی کش · ${pct}%` : `${st.toUpperCase()} ${pct}%`;
     return `<span class="kv-pill ${esc(st)}">${esc(lbl)}</span>`;
   }
 
@@ -116,11 +116,11 @@ window.ABUsagePage = (() => {
                       <td class="m" style="color:var(--phosphor)">${m.cached_input.toLocaleString()}</td>
                       <td class="m">
                         ${renderKvPill(m.flushes > 0 ? 'flush' : '', m.cache_hit_pct)}
-                        ${m.flushes > 0 ? `<span class="muted">(${m.flushes} flush)</span>` : ''}
+                        ${m.flushes > 0 ? `<span class="muted">(${m.flushes} افت احتمالی)</span>` : ''}
                       </td>
                       <td class="m" style="color:var(--violet)">${m.output_tokens.toLocaleString()}</td>
                       <td style="min-width:110px;">${renderTokBar(m.cached_input, m.uncached_input, m.output_tokens)}</td>
-                      <td class="m">~${m.est_kv_mb_q8 || 0} MB (peak ${(m.peak_ctx || 0).toLocaleString()})</td>
+                      <td class="m" title="تخمین تقریبی بر اساس فرض KV نوع q8_0 و دسته‌بندی مدل؛ مقدار واقعی سرور نیست.">~${m.est_kv_mb_q8 || 0} MB · بیشترین ورودی+خروجی مشاهده‌شده: ${(m.peak_request_tokens || m.peak_ctx || 0).toLocaleString()} tok</td>
                       <td class="m">${m.avg_decode_tps} t/s</td>
                     </tr>
                   `).join('') || '<tr><td colspan="9" class="muted">هنوز مدلی ثبت نشده است.</td></tr>'}
@@ -203,12 +203,14 @@ window.ABUsagePage = (() => {
           </div>
         </div>
 
-        <!-- ۵ ستون تفکیک‌شده و استاندارد برای شکارچی کش و توکن -->
+        ${(w.missing_input_count_requests || w.missing_cache_count_requests || w.missing_output_count_requests) ? `<div class="panel" style="border-color:var(--amber);color:var(--amber);padding:10px 14px;">کامل‌بودن آمار در ${w.requests || 0} درخواست: شمارش ورودی در ${w.missing_input_count_requests || 0}، تفکیک کش در ${w.missing_cache_count_requests || 0} و شمارش خروجی در ${w.missing_output_count_requests || 0} درخواست گزارش نشده است. بخش‌های گزارش‌نشده در جمع‌ها صفر فرض می‌شوند؛ آمار قدیمی نیز ممکن است منبع شمارش نداشته باشد.</div>` : ''}
+
+        <!-- توکن‌های ورودی، کش و خروجی جدا نگه داشته می‌شوند؛ جمع کل شامل هر سه است. -->
         <div class="stat-strip">
           <div class="stat-box">
             <div class="stat-lbl"><span>کش بازیافتی (Cached KV)</span><span class="kv-pill warm">${w.cache_hit_pct || 0}%</span></div>
             <div class="stat-num" style="color:var(--phosphor)">${(w.cached_input || 0).toLocaleString()}</div>
-            <div class="stat-sub">flushes: ${w.flush_count || 0} · peak_ctx: ${(w.peak_ctx_tokens || 0).toLocaleString()}</div>
+            <div class="stat-sub">افت احتمالی کش: ${w.flush_count || 0} مورد · بیشترین ورودی+خروجی یک درخواست: ${(w.peak_request_tokens || w.peak_ctx_tokens || 0).toLocaleString()} توکن</div>
           </div>
 
           <div class="stat-box">
@@ -224,15 +226,15 @@ window.ABUsagePage = (() => {
           </div>
 
           <div class="stat-box">
-            <div class="stat-lbl"><span>صرفه‌جویی تخمینی انگلیسی بر فارسی</span><span class="mono muted">O(1) ×</span></div>
-            <div class="stat-num" style="color:var(--phosphor)">+${savedFa.toLocaleString()}</div>
-            <div class="stat-sub">ضریب سبک: FA ~0.68 vs EN ~0.25 tok/ch</div>
+            <div class="stat-lbl"><span>صرفه‌جویی تخمینیِ ورودی فارسی→انگلیسی</span><span class="mono muted">برآورد نویسه‌ای</span></div>
+            <div class="stat-num" style="color:var(--phosphor)">~${savedFa.toLocaleString()}</div>
+            <div class="stat-sub">فقط ورودی ترجمه‌شده؛ خروجی جداگانه در شمارش واقعی کل آمده و صرفه‌جویی محسوب نمی‌شود.</div>
           </div>
 
           <div class="stat-box">
             <div class="stat-lbl"><span>ارزش معادل کلود (Shadow $)</span><span class="mono muted">USD</span></div>
             <div class="stat-num">$${Number(w.shadow_cost_usd || 0).toFixed(4)}</div>
-            <div class="stat-sub">last 1h: $${Number(u.last_1h?.shadow_cost_usd || 0).toFixed(4)}</div>
+            <div class="stat-sub">معادل تخمینی با نرخ پروفایل · یک‌ساعت اخیر: $${Number(u.last_1h?.shadow_cost_usd || 0).toFixed(4)}</div>
           </div>
         </div>
 
@@ -256,10 +258,10 @@ window.ABUsagePage = (() => {
           ${renderTokBar(w.cached_input || 0, w.uncached_input || 0, w.output_tokens || 0)}
         </div>
 
-        <!-- نمودار ساعتی تفکیک‌شده -->
+        <!-- تفکیک زمانی نمودار با بازه انتخاب‌شده تغییر می‌کند -->
         <div class="panel">
           <div class="panel-head">
-            <h3>نمودار ساعتی بار کش و توکن‌ها (Stacked Hourly Traffic)</h3>
+            <h3>روند توکن‌ها · ${{ hour: 'ساعتی', day: 'روزانه', week: 'هفتگی' }[u.chart_granularity] || 'زمانی'}</h3>
             <span class="mono muted">سبز = کش KV · آبی = ورودی جدید · بنفش = خروجی</span>
           </div>
           <div style="display:flex;align-items:flex-end;gap:10px;height:125px;direction:ltr;padding-top:12px;">
@@ -277,7 +279,7 @@ window.ABUsagePage = (() => {
                     <i style="height:${inH}px;background:var(--cyan);display:block;"></i>
                     <i style="height:${kvH}px;background:var(--phosphor);display:block;"></i>
                   </div>
-                  <span class="mono muted" style="font-size:10px;">${esc(String(h.hour).slice(-5))}</span>
+                  <span class="mono muted" style="font-size:10px;">${esc(u.chart_granularity === 'hour' ? String(h.hour).slice(-5) : (u.chart_granularity === 'day' ? String(h.hour).slice(5) : String(h.hour).slice(-3)))}</span>
                 </div>`;
             }).join('')}
           </div>
@@ -287,7 +289,7 @@ window.ABUsagePage = (() => {
         <div class="panel">
           <div class="panel-head">
             <h3>جدول شکارچی کش — آخرین درخواست‌های عبوری از <code>/v1</code></h3>
-            <span class="mono muted">ردیابی زنده پرش یا افت ناگهانی کش (KV Flush Detector)</span>
+            <span class="mono muted">هشدار احتمالی افت کش با مقایسهٔ درخواست‌های پیاپی؛ تشخیص قطعی رخداد GPU نیست.</span>
           </div>
           <div class="table-scroll">
             <table class="grid-table">
@@ -297,6 +299,7 @@ window.ABUsagePage = (() => {
                   <th>عامل</th>
                   <th>مدل</th>
                   <th>وضعیت کش</th>
+                  <th>گزارش شمارش</th>
                   <th>کش KV</th>
                   <th>ورودی جدید</th>
                   <th>خروجی</th>
@@ -313,6 +316,7 @@ window.ABUsagePage = (() => {
                     <td class="m"><strong>${esc(r.agent)}</strong></td>
                     <td class="m" style="color:var(--cyan)">${esc(r.model)}</td>
                     <td class="m">${renderKvPill(r.kv_status, r.cache_pct)}</td>
+                    <td class="m" title="منبع شمارش از پاسخ مدل/provider">ورودی ${r.input_count_reported ? 'گزارش‌شده' : 'ناموجود'} · تفکیک کش ${r.cache_count_reported ? 'گزارش‌شده' : 'ناموجود'} · خروجی ${r.output_count_reported ? 'گزارش‌شده' : 'ناموجود'}</td>
                     <td class="m" style="color:var(--phosphor)">${r.cached_in.toLocaleString()}</td>
                     <td class="m" style="color:var(--cyan)">${r.uncached_in.toLocaleString()}</td>
                     <td class="m" style="color:var(--violet)">${r.out_tok.toLocaleString()}</td>
@@ -321,7 +325,7 @@ window.ABUsagePage = (() => {
                     <td class="m" style="color:var(--phosphor)">${r.saved_fa > 0 ? '+' + r.saved_fa : '—'}</td>
                     <td style="max-width:210px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${esc(r.preview)}</td>
                   </tr>
-                `).join('') || '<tr><td colspan="11" class="muted">هنوز درخواستی ثبت نشده است.</td></tr>'}
+                `).join('') || '<tr><td colspan="12" class="muted">هنوز درخواستی ثبت نشده است.</td></tr>'}
               </tbody>
             </table>
           </div>
