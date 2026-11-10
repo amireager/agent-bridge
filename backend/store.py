@@ -20,6 +20,7 @@ CLOUD_PRICING_PROFILES = {
         "cached_per_m": 0.003,
         "output_per_m": 0.60,
         "source": "https://api-docs.deepseek.com/quick_start/pricing/",
+        "checked_at": "2026-10-25",
         "note": "نرخ پایهٔ off-peak؛ در ساعات peak قیمت ورودی/کش/خروجی دوبرابر است.",
     },
     "glm-5.3-flash": {
@@ -29,7 +30,8 @@ CLOUD_PRICING_PROFILES = {
         "cached_per_m": 0.03,
         "output_per_m": 0.50,
         "source": "https://openrouter.ai/z-ai/glm-5.3-flash",
-        "note": "نرخ USD فهرست Z.ai در OpenRouter؛ ارائه‌دهنده‌های دیگر ممکن است فرق کنند.",
+        "checked_at": "2026-10-25",
+        "note": "نرخ USD مسیر Z.ai در OpenRouter؛ قیمت مستقیم Z.ai به CNY است و نرخ providerهای دیگر فرق می‌کند.",
     },
     "gpt-6-luna": {
         "label": "OpenAI GPT-6 Luna (standard)",
@@ -38,6 +40,7 @@ CLOUD_PRICING_PROFILES = {
         "cached_per_m": 0.01,
         "output_per_m": 0.50,
         "source": "https://developers.openai.com/api/docs/pricing",
+        "checked_at": "2026-10-25",
         "note": "نرخ standard؛ نرخ‌های Batch/Fast و ضریب long-context جداگانه‌اند.",
     },
     "gpt-6-astra": {
@@ -47,6 +50,7 @@ CLOUD_PRICING_PROFILES = {
         "cached_per_m": 1.00,
         "output_per_m": 50.00,
         "source": "https://developers.openai.com/api/docs/pricing",
+        "checked_at": "2026-10-25",
         "note": "نرخ standard برای مقایسهٔ ردهٔ گران؛ Batch/Fast و هزینهٔ نوشتن cache اعمال نشده.",
     },
 }
