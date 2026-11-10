@@ -392,3 +392,18 @@ details.tool-pill[open] > summary { border-bottom: 1px solid var(--line); }
   resize: vertical;
   outline: none;
 }
+
+/* User-selectable independent visual treatments for Think and tool traces. */
+html[data-think-style="focus"] details.think-drawer,
+html[data-think-style="focus"] .ui-preview-think { background:color-mix(in srgb,var(--violet) 10%,var(--bg-1)); border-inline-start-width:3px; box-shadow:inset 0 0 24px color-mix(in srgb,var(--violet) 5%,transparent); }
+html[data-think-style="focus"] details.think-drawer > summary { color:var(--fg-0); }
+html[data-think-style="minimal"] details.think-drawer,
+html[data-think-style="minimal"] .ui-preview-think { background:transparent; border-inline-start-color:var(--line-strong); border-radius:0; box-shadow:none; }
+html[data-think-style="minimal"] details.think-drawer > summary { color:var(--fg-2); font-weight:500; }
+html[data-tool-style="compact"] details.tool-pill > summary { padding:5px 9px; gap:7px; font-size:11.3px; }
+html[data-tool-style="compact"] .tool-badge { padding:1px 6px; font-size:10px; }
+html[data-tool-style="compact"] .tool-render { padding:5px; }
+html[data-tool-style="minimal"] details.tool-pill { border-color:transparent; border-radius:4px; background:transparent; box-shadow:none; }
+html[data-tool-style="minimal"] details.tool-pill > summary { padding:5px 8px; }
+html[data-tool-style="minimal"] details.tool-pill[open] > summary { border-bottom-color:var(--line); }
+html[data-tool-style="minimal"] .tool-render { background:transparent; }

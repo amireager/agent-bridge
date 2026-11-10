@@ -5,13 +5,16 @@ window.ABSettingsPage = (() => {
   const cfg = () => window.ABApp.getState().config;
   let modelAccountsCache = [];
   let uiPreviewActive = false;
-  const UI_DEFAULTS = { theme: 'openwebui-dark', font_scale: 'large', sidebar_side: 'left', show_think: true, think_default_mode: 'half', translate_thinking: false, show_tools: true, show_inline_tokens: true, show_shadow_cost: true, recent_requests_limit: 10, xray_limit: 40 };
+  const UI_DEFAULTS = { theme: 'openwebui-dark', font_scale: 'large', sidebar_side: 'left', show_think: true, think_default_mode: 'half', box_style: 'outlined', think_style: 'violet', tool_style: 'cards', translate_thinking: false, show_tools: true, show_inline_tokens: true, show_shadow_cost: true, recent_requests_limit: 10, xray_limit: 40 };
 
   function previewUI() {
     const theme = $('sTheme')?.value || UI_DEFAULTS.theme;
     const font = $('sFont')?.value || UI_DEFAULTS.font_scale;
     document.documentElement.setAttribute('data-theme', theme);
     document.documentElement.setAttribute('data-font', font);
+    document.documentElement.setAttribute('data-box-style', $('sBoxStyle')?.value || UI_DEFAULTS.box_style);
+    document.documentElement.setAttribute('data-think-style', $('sThinkStyle')?.value || UI_DEFAULTS.think_style);
+    document.documentElement.setAttribute('data-tool-style', $('sToolStyle')?.value || UI_DEFAULTS.tool_style);
     uiPreviewActive = true;
     const label = $('uiPreviewStatus');
     if (label) label.textContent = 'پیش‌نمایش زنده است؛ برای ثبت، ذخیره را بزن. با لغو یا خروج از این صفحه، تغییرات برمی‌گردند.';
@@ -23,6 +26,9 @@ window.ABSettingsPage = (() => {
     $('sSide').value = ui.sidebar_side || UI_DEFAULTS.sidebar_side;
     $('sThink').checked = ui.show_think ?? UI_DEFAULTS.show_think;
     $('sThinkDefault').value = ui.think_default_mode || UI_DEFAULTS.think_default_mode;
+    $('sBoxStyle').value = ui.box_style || UI_DEFAULTS.box_style;
+    $('sThinkStyle').value = ui.think_style || UI_DEFAULTS.think_style;
+    $('sToolStyle').value = ui.tool_style || UI_DEFAULTS.tool_style;
     $('sTranslateThink').checked = ui.translate_thinking ?? UI_DEFAULTS.translate_thinking;
     $('sTools').checked = ui.show_tools ?? UI_DEFAULTS.show_tools;
     $('sTokens').checked = ui.show_inline_tokens ?? UI_DEFAULTS.show_inline_tokens;
@@ -35,6 +41,9 @@ window.ABSettingsPage = (() => {
     const ui = window.ABApp.getState()?.config?.ui || {};
     document.documentElement.setAttribute('data-theme', ui.theme || UI_DEFAULTS.theme);
     document.documentElement.setAttribute('data-font', ui.font_scale || UI_DEFAULTS.font_scale);
+    document.documentElement.setAttribute('data-box-style', ui.box_style || UI_DEFAULTS.box_style);
+    document.documentElement.setAttribute('data-think-style', ui.think_style || UI_DEFAULTS.think_style);
+    document.documentElement.setAttribute('data-tool-style', ui.tool_style || UI_DEFAULTS.tool_style);
     fillUIForm(ui);
     uiPreviewActive = false;
     const status = $('uiPreviewStatus');
@@ -47,6 +56,9 @@ window.ABSettingsPage = (() => {
     $('sSide').value = UI_DEFAULTS.sidebar_side;
     $('sThink').checked = UI_DEFAULTS.show_think;
     $('sThinkDefault').value = UI_DEFAULTS.think_default_mode;
+    $('sBoxStyle').value = UI_DEFAULTS.box_style;
+    $('sThinkStyle').value = UI_DEFAULTS.think_style;
+    $('sToolStyle').value = UI_DEFAULTS.tool_style;
     $('sTranslateThink').checked = UI_DEFAULTS.translate_thinking;
     $('sTools').checked = UI_DEFAULTS.show_tools;
     $('sTokens').checked = UI_DEFAULTS.show_inline_tokens;
@@ -152,6 +164,9 @@ window.ABSettingsPage = (() => {
     const sidebar_side = $('sSide').value;
     const show_think = $('sThink').checked;
     const think_default_mode = $('sThinkDefault').value;
+    const box_style = $('sBoxStyle').value;
+    const think_style = $('sThinkStyle').value;
+    const tool_style = $('sToolStyle').value;
     const translate_thinking = $('sTranslateThink').checked;
     const show_tools = $('sTools').checked;
     const show_inline_tokens = $('sTokens').checked;
@@ -159,7 +174,7 @@ window.ABSettingsPage = (() => {
     const recent_requests_limit = Math.max(1, Math.min(100, Number($('sRecentLimit').value || 10)));
     const xray_limit = Math.max(1, Math.min(200, Number($('sXrayLimit').value || 40)));
     try {
-      await api('/api/config', { ui: { theme, font_scale, sidebar_side, show_think, think_default_mode, translate_thinking, show_tools, show_inline_tokens, show_shadow_cost, recent_requests_limit, xray_limit } });
+      await api('/api/config', { ui: { theme, font_scale, sidebar_side, show_think, think_default_mode, box_style, think_style, tool_style, translate_thinking, show_tools, show_inline_tokens, show_shadow_cost, recent_requests_limit, xray_limit } });
       uiPreviewActive = false;
       const status = $('uiPreviewStatus');
       if (status) { status.textContent = 'تنظیمات کاربری ذخیره شد.'; status.style.color = 'var(--phosphor)'; }
@@ -427,13 +442,19 @@ Content-Type: application/json
     } else if (route === 'set-hud') {
       host.innerHTML = `<div class="panel-wrap ui-settings">
         <div class="panel rtl">
-          <div class="panel-head"><div><h3>تم و تنظیمات کاربری</h3><p class="muted">تغییر تم و اندازهٔ نوشته را زنده پیش‌نمایش کن؛ تا وقتی ذخیره نزنی فقط پیش‌نمایش موقت است.</p></div></div>
+          <div class="panel-head"><div><h3>تم و تنظیمات کاربری</h3><p class="muted">تم و ظاهر مستقل باکس‌ها، Think و ابزارها را زنده پیش‌نمایش کن؛ تا وقتی ذخیره نزنی فقط پیش‌نمایش موقت است.</p></div></div>
           <div class="field-grid">
-            <div class="fld"><label for="sTheme">تم</label><select id="sTheme" onchange="ABSettingsPage.previewUI()"><option value="openwebui-dark">Open WebUI · Slate</option><option value="mocha-dark">Catppuccin Mocha</option><option value="zed-dark">Zed Dark</option><option value="lobechat-dark">LobeChat Glass</option><option value="nord-dark">Nord</option><option value="forest-dark">Forest</option><option value="paper-light">Paper Light</option></select></div>
+            <div class="fld"><label for="sTheme">تم رنگی</label><select id="sTheme" onchange="ABSettingsPage.previewUI()"><option value="openwebui-dark">Open WebUI · Slate</option><option value="mocha-dark">Catppuccin Mocha</option><option value="zed-dark">Zed Dark</option><option value="lobechat-dark">LobeChat Glass</option><option value="nord-dark">Nord</option><option value="forest-dark">Forest</option><option value="paper-light">Paper Light</option></select></div>
             <div class="fld"><label for="sFont">اندازهٔ نوشته</label><select id="sFont" onchange="ABSettingsPage.previewUI()"><option value="compact">فشرده · 13px</option><option value="normal">معمولی · 14px</option><option value="large">خوانا · 15.5px</option><option value="xlarge">درشت · 17px</option><option value="xxlarge">خیلی درشت · 19px</option></select></div>
             <div class="fld"><label for="sSide">جایگاه سایدبار</label><select id="sSide"><option value="left">چپ</option><option value="right">راست</option></select></div>
           </div>
-          <div class="ui-theme-preview" aria-live="polite"><div class="ui-preview-top"><span class="ui-preview-dot"></span><strong>پیش‌نمایش رابط</strong><small>نمونهٔ کارت و متن</small></div><div class="ui-preview-card"><span class="ui-preview-chip">ابزار · جست‌وجو</span><p>این متن نمونه برای بررسی خوانایی، کنتراست و حالت باکس‌هاست.</p><code>model → response</code></div><div id="uiPreviewStatus" class="muted" role="status">تم فعلی از تنظیمات کاربر گرفته شده است.</div></div>
+          <h4 class="ui-style-heading">حالت مستقل اجزای گفتگو</h4>
+          <div class="field-grid ui-style-picks">
+            <div class="fld"><label for="sBoxStyle">باکس‌ها و کارت‌های عمومی</label><select id="sBoxStyle" onchange="ABSettingsPage.previewUI()"><option value="outlined">قاب ظریف</option><option value="soft">نرم و برجسته</option><option value="flat">تخت و مینیمال</option></select></div>
+            <div class="fld"><label for="sThinkStyle">ظاهر Think</label><select id="sThinkStyle" onchange="ABSettingsPage.previewUI()"><option value="violet">بنفش کلاسیک</option><option value="focus">Focus · هالهٔ ملایم</option><option value="minimal">مینیمال</option></select></div>
+            <div class="fld"><label for="sToolStyle">نمایش ابزارها</label><select id="sToolStyle" onchange="ABSettingsPage.previewUI()"><option value="cards">کارت رنگی</option><option value="compact">کارت فشرده</option><option value="minimal">ردیف مینیمال</option></select></div>
+          </div>
+          <div class="ui-theme-preview" aria-live="polite"><div class="ui-preview-top"><span class="ui-preview-dot"></span><strong>پیش‌نمایش رابط</strong><small>نمونهٔ کارت و متن</small></div><div class="ui-preview-card"><span class="ui-preview-chip">ابزار · جست‌وجو</span><p>این متن نمونه برای بررسی خوانایی و حالت کارت است.</p><code>model → response</code></div><div class="ui-preview-think"><strong>Think · پیش‌نمایش</strong><p>یک قاب جدا برای تفکر؛ ظاهرش مستقل از حالت باز یا بسته انتخاب می‌شود.</p></div><div id="uiPreviewStatus" class="muted" role="status">تم فعلی از تنظیمات کاربر گرفته شده است.</div></div>
         </div>
         <div class="panel rtl">
           <div class="panel-head"><div><h3>نمایش گفتگو</h3><p class="muted">این گزینه‌ها فقط نمایش رابط را تغییر می‌دهند، نه رفتار مدل را.</p></div></div>

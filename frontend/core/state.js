@@ -191,6 +191,9 @@ window.ABApp = (() => {
 
     document.documentElement.setAttribute('data-theme', ui.theme || 'openwebui-dark');
     document.documentElement.setAttribute('data-font', ui.font_scale || 'large');
+    document.documentElement.setAttribute('data-box-style', ui.box_style || 'outlined');
+    document.documentElement.setAttribute('data-think-style', ui.think_style || 'violet');
+    document.documentElement.setAttribute('data-tool-style', ui.tool_style || 'cards');
     document.getElementById('shellRoot').classList.toggle('sidebar-right', ui.sidebar_side === 'right');
 
     const slotCount = up.slot_count || 1;

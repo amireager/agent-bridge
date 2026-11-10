@@ -133,6 +133,9 @@ class DataStore:
                 "translate_thinking": False,
                 "show_think": True,
                 "think_default_mode": "half",  # closed | half (6 lines) | full
+                "box_style": "outlined",       # outlined | soft | flat
+                "think_style": "violet",       # violet | focus | minimal
+                "tool_style": "cards",         # cards | compact | minimal
                 "show_tools": True,
                 "show_inline_tokens": True,
                 "show_shadow_cost": True,
