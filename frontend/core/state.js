@@ -194,6 +194,12 @@ window.ABApp = (() => {
     document.documentElement.setAttribute('data-box-style', ui.box_style || 'outlined');
     document.documentElement.setAttribute('data-think-style', ui.think_style || 'violet');
     document.documentElement.setAttribute('data-tool-style', ui.tool_style || 'cards');
+    document.documentElement.setAttribute('data-paragraph-spacing', ui.paragraph_spacing || 'comfortable');
+    document.documentElement.setAttribute('data-image-mode', ui.image_mode || 'click');
+    document.documentElement.setAttribute('data-code-wrap', ui.code_wrap || 'scroll');
+    document.documentElement.setAttribute('data-code-theme', ui.code_theme || 'midnight');
+    document.documentElement.setAttribute('data-code-lines', ui.show_code_lines ? 'on' : 'off');
+    document.documentElement.setAttribute('data-tool-output', ui.tool_output_mode || 'terminal');
     document.getElementById('shellRoot').classList.toggle('sidebar-right', ui.sidebar_side === 'right');
 
     const slotCount = up.slot_count || 1;

@@ -413,7 +413,13 @@ window.ABChatPage = (() => {
     return `${head}${tl.output ? `\n\n// output\n${tl.output}` : ''}`;
   }
 
-  function renderToolContent(tl) {
+  function renderToolContent(tl, displayMode = 'terminal') {
+    if (displayMode === 'markdown') {
+      const args = tl.args || {};
+      const argsText = typeof args === 'string' ? args : JSON.stringify(args, null, 2);
+      const output = typeof tl.output === 'string' ? tl.output : JSON.stringify(tl.output ?? '', null, 2);
+      return `<div class="tool-readable-content"><details class="tool-args"><summary>ورودی ابزار · ${esc(tl.name || 'tool')}</summary><pre>${esc(argsText || '')}</pre></details>${output ? `<div class="tool-markdown-output">${window.ABMarkdown.render(output)}</div>` : '<p class="muted">خروجی متنی ندارد.</p>'}</div>`;
+    }
     const safe = esc(formatToolBody(tl));
     const highlighted = safe
       .replace(/(^|\s)(sudo|cd|ls|cat|grep|find|git|python3?|nix|curl|mkdir|rm|cp|mv|pytest|node)(?=\s|$)/gm, '$1<span class="term-command">$2</span>')
@@ -444,7 +450,9 @@ window.ABChatPage = (() => {
         <div class="seg-group" title="حالت نمایش متن و ترجمه (کدها همیشه فقط یک‌بار و دست‌نخورده نمایش داده می‌شوند)">
           <button class="seg-btn ${chatMode === 'interleaved' ? 'on' : ''}" onclick="ABChatPage.setChatMode('interleaved')">زیرِ هم (EN + FA)</button>
           <button class="seg-btn ${chatMode === 'fa_only' ? 'on' : ''}" onclick="ABChatPage.setChatMode('fa_only')">تمام‌صفحه فارسی</button>
-          <button class="seg-btn ${chatMode === 'en_only' ? 'on' : ''}" onclick="ABChatPage.setChatMode('en_only')">فقط انگلیسی</button>
+          <button class="seg-btn ${chatMode === 'fa_after' ? 'on' : ''}" onclick="ABChatPage.setChatMode('fa_after')">اصل، سپس ترجمه</button>
+          <button class="seg-btn ${chatMode === 'side_by_side' ? 'on' : ''}" onclick="ABChatPage.setChatMode('side_by_side')">کنارهم</button>
+          <button class="seg-btn ${chatMode === 'en_only' ? 'on' : ''}" onclick="ABChatPage.setChatMode('en_only')">فقط متن اصلی</button>
         </div>
         <button class="btn ghost ${ui.show_think ? 'on' : ''}" onclick="ABChatPage.toggleUiFlag('show_think')">Think</button>
         <button class="btn ghost ${ui.show_tools ? 'on' : ''}" onclick="ABChatPage.toggleUiFlag('show_tools')">Tools</button>
@@ -524,7 +532,7 @@ window.ABChatPage = (() => {
         return `
           <details class="tool-pill kind-${kind}" data-acc-id="${esc(detId)}" ${isOpen ? 'open' : ''}>
             <summary><span class="tool-badge">${esc(toolName)}</span><span class="tool-cmd-preview">${esc(summarizeToolArgs(tl))}</span><span class="tiny-tag">${stTxt}</span></summary>
-            <div class="tool-render">${renderToolContent(tl)}</div>
+            <div class="tool-render">${renderToolContent(tl, ui.tool_output_mode || 'terminal')}</div>
           </details>`;
       }).join('') : '';
 
@@ -536,7 +544,7 @@ window.ABChatPage = (() => {
           const nm = String(tool.name || 'tool');
           const kind = /shell|bash|terminal|exec/i.test(nm) ? 'shell' : (/read|list|search/i.test(nm) ? 'read' : (/edit|write|patch/i.test(nm) ? 'edit' : 'other'));
           const toolId = `${t.id}-step-${sIdx}-tool-${tIdx}`;
-          return `<details class="tool-pill kind-${kind}" data-acc-id="${esc(toolId)}"><summary><span class="tool-badge">${esc(nm)}</span><span class="tool-cmd-preview">${esc(summarizeToolArgs(tool))}</span><span class="tiny-tag">${esc(tool.status || 'done')}</span></summary><div class="tool-render">${renderToolContent(tool)}</div></details>`;
+          return `<details class="tool-pill kind-${kind}" data-acc-id="${esc(toolId)}"><summary><span class="tool-badge">${esc(nm)}</span><span class="tool-cmd-preview">${esc(summarizeToolArgs(tool))}</span><span class="tiny-tag">${esc(tool.status || 'done')}</span></summary><div class="tool-render">${renderToolContent(tool, ui.tool_output_mode || 'terminal')}</div></details>`;
         }).join('') : '';
         const reasoning = ui.show_think && step.thinking ? `<details class="think-drawer think-mode-${stepThinkMode}" data-acc-id="${esc(stepThinkId)}" ${stepThinkMode !== 'closed' ? 'open' : ''}><summary><span>تفکر · مرحله ${sIdx + 1} · ${step.thinking.length} chars</span>${thinkModeControls(stepThinkId, ui.think_default_mode || 'half')}</summary><div class="think-body md-body">${window.ABMarkdown.render(step.thinking)}${step.thinking_fa ? `<div class="think-translation">${window.ABMarkdown.render(step.thinking_fa)}</div>` : ''}<button class="btn ghost think-translate-btn" onclick="ABChatPage.translateThink('${esc(t.id)}',${sIdx},event)">${step.thinking_fa ? 'ترجمه دوباره' : 'ترجمه‌ی این مرحله'}</button></div></details>` : '';
         return `<details class="agent-step" data-acc-id="${esc(stageId)}" ${wasOpen(stageId, true) ? 'open' : ''}><summary class="step-label">مرحله ${sIdx + 1} · ${esc(step.status || 'در حال اجرا')} · تفکر و ابزارهای این دور</summary><div class="step-content">${reasoning}${stepTools}</div></details>`;

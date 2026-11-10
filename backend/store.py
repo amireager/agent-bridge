@@ -136,6 +136,12 @@ class DataStore:
                 "box_style": "outlined",       # outlined | soft | flat
                 "think_style": "violet",       # violet | focus | minimal
                 "tool_style": "cards",         # cards | compact | minimal
+                "paragraph_spacing": "comfortable", # compact | comfortable | airy
+                "image_mode": "click",         # off | click | inline
+                "code_wrap": "scroll",         # scroll | wrap
+                "code_theme": "midnight",      # midnight | surface
+                "show_code_lines": False,
+                "tool_output_mode": "terminal", # terminal | markdown
                 "show_tools": True,
                 "show_inline_tokens": True,
                 "show_shadow_cost": True,

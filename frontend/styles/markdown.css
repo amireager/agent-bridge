@@ -125,3 +125,50 @@
 .tok-str { color: #86efac; }
 .tok-com { color: #64748b; font-style: italic; }
 .tok-num { color: #fcd34d; }
+
+/* Responsive Markdown surfaces, selectable reading density, and safe image reveals. */
+.md-table-scroll { width:100%; max-width:100%; overflow-x:auto; overscroll-behavior-inline:contain; margin:13px 0; border:1px solid var(--line); border-radius:var(--radius-sm); }
+.md-table-scroll table { min-width:420px; margin:0; border:0; }
+.md-table-scroll th { position:sticky; top:0; }
+html[data-paragraph-spacing="compact"] .md-body p { margin-bottom:5px; }
+html[data-paragraph-spacing="compact"] .immersive-flow { gap:8px; }
+html[data-paragraph-spacing="comfortable"] .md-body p { margin-bottom:11px; }
+html[data-paragraph-spacing="comfortable"] .immersive-flow { gap:15px; }
+html[data-paragraph-spacing="airy"] .md-body p { margin-bottom:19px; }
+html[data-paragraph-spacing="airy"] .immersive-flow { gap:22px; }
+html[data-paragraph-spacing="airy"] .bilingual-pair { gap:12px; }
+html[data-code-wrap="wrap"] .md-code pre { white-space:pre-wrap; overflow-wrap:anywhere; }
+html[data-code-wrap="scroll"] .md-code pre { white-space:pre; overflow-x:auto; }
+html[data-code-theme="surface"] .md-code { background:var(--bg-0); }
+html[data-code-theme="surface"] .md-code pre { color:var(--fg-0); }
+html[data-code-theme="surface"] .md-code .tok-kw { color:var(--cyan); }
+html[data-code-theme="surface"] .md-code .tok-str { color:var(--phosphor); }
+html[data-code-theme="surface"] .md-code .tok-com { color:var(--fg-2); }
+html[data-code-theme="surface"] .md-code .tok-num { color:var(--amber); }
+html[data-code-lines="on"] .md-code pre { counter-reset:mdline; }
+.md-code-line { display:block; min-height:1.65em; }
+html[data-code-lines="on"] .md-code-line::before { counter-increment:mdline; content:counter(mdline); display:inline-block; width:3em; margin-inline-end:1em; padding-inline-end:.8em; border-inline-end:1px solid var(--line); color:var(--fg-2); text-align:end; user-select:none; }
+.md-image-reveal { display:inline-flex; align-items:center; gap:7px; max-width:100%; margin:8px 0; padding:9px 13px; border:1px dashed var(--line-strong); border-radius:10px; background:var(--bg-1); color:var(--cyan); cursor:pointer; font:inherit; }
+.md-image-reveal:hover { border-color:var(--cyan); background:var(--bg-2); }
+.md-image-frame { display:block; width:max-content; max-width:100%; margin:12px auto; text-align:center; }
+.md-image-frame img { display:block; max-width:min(100%,760px); max-height:62vh; object-fit:contain; border:1px solid var(--line); border-radius:var(--radius-md); cursor:zoom-in; }
+.md-image-frame img.md-image-zoomed { max-width:100%; max-height:none; cursor:zoom-out; }
+.md-image-blocked,.md-image-error { display:inline-block; padding:6px 10px; border-radius:8px; background:var(--bg-2); color:var(--fg-2); font-size:.9em; }
+.md-image-error { color:var(--amber); }
+.md-side-column { min-width:0; }
+.bilingual-pair.side-by-side { display:grid; grid-template-columns:minmax(0,1fr) minmax(0,1fr); align-items:start; gap:16px; }
+.bilingual-pair.side-by-side .para-en,.bilingual-pair.side-by-side .para-fa { min-width:0; height:100%; }
+.md-side-code { grid-column:1/-1; }
+.md-side-rule { grid-column:1/-1; width:100%; }
+.translation-review-flow { display:grid; gap:18px; }
+.translation-review-flow > section { min-width:0; padding:14px; border:1px solid var(--line); border-radius:var(--radius-md); background:var(--bg-1); }
+.translation-review-flow > section > h4 { margin:0 0 12px; color:var(--fg-2); font-size:12px; }
+@media(max-width:760px) {
+  .bilingual-pair.side-by-side { grid-template-columns:minmax(0,1fr); gap:7px; }
+  .bilingual-pair.side-by-side .para-fa { border-radius:8px; }
+  .md-table-scroll { scrollbar-width:thin; }
+}
+.translation-missing { color:var(--fg-2); font-size:.88em; font-style:italic; }
+.side-by-side-fallback { display:grid; grid-template-columns:minmax(0,1fr) minmax(0,1fr); align-items:start; gap:16px; }
+.side-by-side-fallback > .md-side-column { min-width:0; }
+@media(max-width:760px) { .side-by-side-fallback { grid-template-columns:minmax(0,1fr); } }

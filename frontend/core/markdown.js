@@ -28,19 +28,40 @@ window.ABMarkdown = (() => {
     setTimeout(() => { btn.textContent = old; }, 1200);
   }
 
+  function loadImage(button) {
+    const url = button?.dataset?.imageUrl || '';
+    if (!/^https?:\/\//i.test(url)) return;
+    const figure = document.createElement('figure');
+    figure.className = 'md-image-frame';
+    const img = document.createElement('img');
+    img.src = url;
+    img.alt = button.dataset.imageAlt || 'تصویر';
+    img.loading = 'lazy';
+    img.referrerPolicy = 'no-referrer';
+    img.addEventListener('click', () => zoomImage(img));
+    img.addEventListener('error', () => { figure.textContent = `تصویر بارگذاری نشد · ${img.alt}`; figure.classList.add('md-image-error'); }, { once: true });
+    figure.appendChild(img);
+    button.replaceWith(figure);
+  }
+
+  function zoomImage(img) {
+    img?.classList.toggle('md-image-zoomed');
+  }
+
   function renderCodeCard(rawFence) {
     const ch = String(rawFence || '').trim();
     const nl = ch.indexOf('\n');
     const lang = (nl > 3 ? ch.slice(3, nl).trim() : '') || 'code';
     const rawCode = (nl > -1 ? ch.slice(nl + 1, -3) : ch.slice(3, -3)).replace(/\n$/, '');
     const encoded = encodeURIComponent(rawCode);
+    const codeLines = highlightCode(rawCode).split('\n').map(line => `<span class="md-code-line">${line || ' '}</span>`).join('');
     return `
       <div class="md-code">
         <div class="md-code-bar">
           <span>${esc(lang)}</span>
           <button class="md-copy-btn" onclick="ABMarkdown.copyCodeBtn(this,'${encoded}')">Copy</button>
         </div>
-        <pre>${highlightCode(rawCode)}</pre>
+        <pre>${codeLines}</pre>
       </div>`;
   }
 
@@ -51,6 +72,12 @@ window.ABMarkdown = (() => {
       return `\x00INL${codeStash.length - 1}\x00`;
     });
     s = esc(s);
+    const imageMode = (typeof document !== 'undefined' ? document.documentElement?.getAttribute('data-image-mode') : 'click') || 'click';
+    s = s.replace(/!\[([^\]]*)\]\((https?:\/\/[^\s)<>\"]+)\)/g, (_, alt, url) => {
+      if (imageMode === 'off') return `<span class="md-image-blocked">[تصویر پنهان${alt ? ` · ${alt}` : ''}]</span>`;
+      if (imageMode === 'inline') return `<figure class="md-image-frame"><img src="${url}" alt="${alt}" loading="lazy" referrerpolicy="no-referrer" onclick="ABMarkdown.zoomImage(this)"></figure>`;
+      return `<button class="md-image-reveal" type="button" data-image-url="${url}" data-image-alt="${alt}" onclick="ABMarkdown.loadImage(this)">▧ بارگذاری تصویر${alt ? ` · ${alt}` : ''}</button>`;
+    });
     s = s.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
     s = s.replace(/\*([^*\n]+)\*/g, '<em>$1</em>');
     s = s.replace(/~~([^~]+)~~/g, '<del>$1</del>');
@@ -70,7 +97,7 @@ window.ABMarkdown = (() => {
     const body = lines.slice(2).map(parseRow);
     const ths = head.map((h, i) => `<th${aligns[i] ? ` style="text-align:${aligns[i]}"` : ''}>${renderInline(h)}</th>`).join('');
     const trs = body.map(row => `<tr>${row.map((c, i) => `<td${aligns[i] ? ` style="text-align:${aligns[i]}"` : ''}>${renderInline(c)}</td>`).join('')}</tr>`).join('');
-    return `<table><thead><tr>${ths}</tr></thead><tbody>${trs}</tbody></table>`;
+    return `<div class="md-table-scroll" role="region" aria-label="جدول Markdown"><table><thead><tr>${ths}</tr></thead><tbody>${trs}</tbody></table></div>`;
   }
 
   function renderProseSegment(seg) {
@@ -179,6 +206,21 @@ window.ABMarkdown = (() => {
     if (mode === 'en_only') {
       return `<div class="ltr">${render(fallbackEn)}</div>`;
     }
+    if (mode === 'fa_after') {
+      if (!Array.isArray(blocks) || !blocks.length) return `<div class="translation-review-flow"><section><h4>متن اصلی</h4><div class="ltr">${render(fallbackEn)}</div></section><section><h4>ترجمه</h4><div class="rtl">${render(fallbackFa || '')}</div></section></div>`;
+      const original = blocks.map(b => b.type === 'code' ? renderCodeCard(b.raw) : b.type === 'hr' ? '<hr/>' : `<div class="md-body para-en">${renderProseSegment(b.en || '')}</div>`).join('');
+      const translated = blocks.filter(b => b.type === 'prose').map(b => `<div class="md-body para-fa-seamless">${b.fa && b.fa.trim() ? renderProseSegment(b.fa) : '<span class="translation-missing">ترجمهٔ این بند موجود نیست.</span>'}</div>`).join('');
+      return `<div class="translation-review-flow"><section class="translation-original"><h4>متن اصلی · کد دست‌نخورده</h4><div class="immersive-flow">${original}</div></section><section class="translation-fa"><h4>ترجمهٔ فارسی</h4><div class="immersive-flow fa-clean">${translated || '<p class="muted">ترجمه‌ای برای این بخش نداریم.</p>'}</div></section></div>`;
+    }
+    if (mode === 'side_by_side') {
+      if (!Array.isArray(blocks) || !blocks.length) return `<div class="immersive-flow side-by-side side-by-side-fallback"><div class="md-side-column ltr">${render(fallbackEn)}</div><div class="md-side-column rtl">${render(fallbackFa || '')}</div></div>`;
+      const inner = blocks.map(b => {
+        if (b.type === 'code') return `<div class="md-side-code">${renderCodeCard(b.raw)}</div>`;
+        if (b.type === 'hr') return '<hr class="md-side-rule"/>';
+        return `<div class="bilingual-pair side-by-side"><div class="md-body para-en">${renderProseSegment(b.en || '')}</div><div class="md-body para-fa">${b.fa && b.fa.trim() ? renderProseSegment(b.fa) : '<span class="translation-missing">ترجمهٔ این بند موجود نیست.</span>'}</div></div>`;
+      }).join('');
+      return `<div class="immersive-flow side-by-side">${inner}</div>`;
+    }
     if (!Array.isArray(blocks) || !blocks.length) {
       if (mode === 'fa_only' && fallbackFa) {
         return `<div class="rtl">${render(fallbackFa)}</div>`;
@@ -210,5 +252,5 @@ window.ABMarkdown = (() => {
     return `<div class="immersive-flow">${inner}</div>`;
   }
 
-  return { render, renderBlocks, copyCodeBtn };
+  return { render, renderBlocks, copyCodeBtn, loadImage, zoomImage };
 })();
