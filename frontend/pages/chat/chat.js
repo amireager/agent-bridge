@@ -44,7 +44,8 @@ window.ABChatPage = (() => {
         <div id="chatSubBar" class="chat-subbar"></div>
         <div id="selectionTranslatePanel" class="selection-translate" hidden>
           <div class="selection-head"><strong>ترجمه‌ی متن انتخاب‌شده</strong><button class="mini-action" onclick="ABChatPage.closeSelectionTranslate()">×</button></div>
-          <select id="selectionEngine" class="btn"></select>
+          <select id="selectionEngine" class="btn" aria-label="موتور ترجمهٔ متن انتخاب‌شده"></select>
+          <small class="muted">فهرست شامل مسیرهای آنلاین و API آفلاین تنظیم‌شده است؛ فقط پس از زدن دکمه، متن به موتور انتخابی فرستاده می‌شود.</small>
           <div id="selectionSource" class="selection-source"></div>
           <div id="selectionResult" class="selection-result muted">موتور را انتخاب و ترجمه را اجرا کن.</div>
           <button class="btn primary" onclick="ABChatPage.translateSelection()">ترجمه / آزمایش</button>
@@ -115,11 +116,24 @@ window.ABChatPage = (() => {
       const selected = String(window.getSelection?.().toString() || '').trim();
       if (selected.length < 2) return;
       const panel = document.getElementById('selectionTranslatePanel');
-      const tested = window.ABApp.getState()?.tested_translators || [];
+      const appState = window.ABApp.getState() || {};
+      const tested = appState.tested_translators || [];
+      const testedByMode = new Map(tested.map(item => [item.mode === 'online' ? 'builtin-online' : item.mode, item]));
+      const options = [
+        ['builtin-online', 'آنلاین · خودکار (Google / MyMemory)'],
+        ['online-google', 'آنلاین · Google Chrome'],
+        ['online-google-gtx', 'آنلاین · Google GTX'],
+        ['online-mymemory', 'آنلاین · MyMemory'],
+        ['offline', 'آفلاین · API محلی تنظیم‌شده']
+      ];
+      const configuredEngine = appState.config?.translation?.engine || 'builtin-online';
+      const activeMode = configuredEngine === 'custom-offline' ? 'offline' : (options.some(([id]) => id === configuredEngine) ? configuredEngine : 'builtin-online');
       const engine = document.getElementById('selectionEngine');
-      engine.innerHTML = tested.length
-        ? tested.map(x => `<option value="${esc(x.mode)}">${esc(x.mode === 'online' ? 'آنلاین' : 'آفلاین')} · ${esc(x.label)} (${x.latency_ms}ms)</option>`).join('')
-        : '<option value="">ابتدا موتور را در تنظیمات تست کن</option>';
+      engine.innerHTML = options.map(([id, label]) => {
+        const test = testedByMode.get(id);
+        const status = test ? ` · آزموده ${Number(test.latency_ms || 0)}ms` : ' · آمادهٔ آزمون';
+        return `<option value="${esc(id)}" ${id === activeMode ? 'selected' : ''}>${esc(label + status)}</option>`;
+      }).join('');
       document.getElementById('selectionSource').textContent = selected.slice(0, 4000);
       document.getElementById('selectionResult').textContent = 'موتور را انتخاب و ترجمه را اجرا کن.';
       panel.hidden = false;
@@ -377,8 +391,12 @@ window.ABChatPage = (() => {
     const out = document.getElementById('selectionResult');
     if (!engineMode) { out.textContent = 'ابتدا در Settings موتور را تست کن.'; return; }
     out.textContent = 'در حال ترجمه...';
-    const res = await api('/api/translate', { text, to: 'auto', engine_mode: engineMode });
-    out.innerHTML = res.error ? `<span class="term-error">${esc(res.error)}</span>` : window.ABMarkdown.render(res.translation || '');
+    try {
+      const res = await api('/api/translate', { text, to: 'auto', engine_mode: engineMode });
+      out.innerHTML = res.error ? `<span class="term-error">${esc(res.error)}</span>` : window.ABMarkdown.render(res.translation || '');
+    } catch (error) {
+      out.innerHTML = `<span class="term-error">ترجمه ناموفق بود · ${esc(error.message || error)}</span>`;
+    }
   }
 
   async function translatePrompt(turnId, ev) {

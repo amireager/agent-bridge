@@ -11,6 +11,8 @@ window.ABSettingsPage = (() => {
   let cleanupPreviewData = null;
   let cleanupPreviewKey = '';
   let pendingHistoryDelete = null;
+  let translationTestNotice = '';
+  let translationTestOk = false;
   let cleanupNotice = '';
   let historyNotice = '';
   const PREVIEW_IMAGE_URL = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAGAAAAA2CAIAAAC3LQuFAAACDElEQVR42u3Q20qUYRTG8ec+OugWPO3QOyiUZMJQjCJRisIoFAclSQrD3WFbw/ZUVqRlYbmhss3JqKPO3plRL6M+ecMGnXd94xq+9cHLgt8wBwPr/c+Do7diioBjt2OKgLo7MUVA/d0lRcDxe0uKgIb7y4qAyNiyIuDEgxVFQOP4ikv+5Ib3q+YgTj6MO6PsOgb7Jpoexd1ArGPwzqL58aobfAfinUXLk1U3+A7EO4tTT9fc4DsQ7yxOP1tzg+9AvLM483zdDb4D8c7i7It1N/gOxDuL1pcJZxDrsG+i7VXCJWXXqeYg2icSioBzr5OKgPNvkoqAC29TioCL71KKgI7JtCLg0lRaEXD5fUYRcOVDRhHQOZ1VBHR9zIboSGu0VLgxZfPQ/SkXlj3reEKMseUhOpMLxf51jLB6bG3o+bwhz7aOEUqSLQ+9Xzbk0QOFkmRrw9XZvCR6ml3CVUQh+ubykiocSLiKyMO1+bykCgfyCIfZ8tC/UBBT+TqGZJstD9e/FsQcdCDJNlsebnwryjjoOh6xNiIPA9+LAhjrGDJ5RCFuLm4Gjb2ORyCPLoT3GfyxGZxq1jECzfON3Blo6OdWcA7XRnbxBgo0z2NeKe0sTYX5Gvm1FYQ9r7I3CijPFlma+m+g0d/bDMRf8n61PcybiVdIIwr/D3SoplYRdCAdSAfSgXQgHUgHctZfi0XGmvcO0XcAAAAASUVORK5CYII=';
@@ -184,6 +186,18 @@ window.ABSettingsPage = (() => {
   }
 
   function translationMode() { return $('sMode')?.value || 'online'; }
+  function captureTranslationDraft() {
+    const mode = $('sMode')?.value;
+    if (!mode) return null;
+    return {
+      enabled: $('sEnabled')?.checked !== false,
+      engine: mode === 'online' ? ($('sEngine')?.value || 'builtin-online') : 'custom-offline',
+      proxy: $('sProxy')?.value?.trim() || '',
+      offline_protocol: $('sProtocol')?.value || 'openai',
+      offline_url: $('sOfflineUrl')?.value?.trim() || 'http://127.0.0.1:18095',
+      offline_model: $('sOfflineModel')?.value?.trim() || 'local-translator'
+    };
+  }
   function selectedTranslationEngine() {
     return translationMode() === 'online' ? ($('sEngine')?.value || 'builtin-online') : 'custom-offline';
   }
@@ -209,7 +223,10 @@ window.ABSettingsPage = (() => {
   }
 
   function setTranslationStatus(message, ok) {
+    translationTestNotice = message;
+    translationTestOk = !!ok;
     const out = $('sTestResult');
+    if (!out) return;
     out.textContent = message;
     out.style.color = ok ? 'var(--phosphor)' : 'var(--red)';
   }
@@ -229,7 +246,9 @@ window.ABSettingsPage = (() => {
     if (!source) { $('sSampleOutput').textContent = 'ابتدا متن نمونه را وارد کن.'; return; }
     const output = $('sSampleOutput');
     output.textContent = 'در حال ترجمه…';
-    const online = translationMode() === 'online';
+    const online = ($('sSampleMode')?.value || translationMode()) === 'online';
+    $('sMode').value = online ? 'online' : 'offline';
+    syncConditional();
     try {
       const res = await api('/api/translate', {
         text: source,
@@ -240,10 +259,10 @@ window.ABSettingsPage = (() => {
       output.innerHTML = res.error
         ? `<span class="translator-error">${esc(res.error)}</span>`
         : window.ABMarkdown.render(res.translation || 'ترجمه‌ای برنگشت.');
-      $('sSampleMeta').textContent = res.error ? 'آزمون ترجمه ناموفق بود.' : `موتور: ${res.engine || 'نامشخص'} · ${res.elapsed_ms || 0} ms`;
+      $('sSampleMeta').textContent = res.error ? `آزمون ${online ? 'آنلاین' : 'آفلاین'} ناموفق بود.` : `مسیر ${online ? 'آنلاین' : 'آفلاین'} · موتور: ${res.engine || 'نامشخص'} · ${res.elapsed_ms || 0} ms`;
     } catch (e) {
       output.textContent = `خطا در ترجمه · ${e.message}`;
-      $('sSampleMeta').textContent = 'آزمون ترجمه ناموفق بود.';
+      $('sSampleMeta').textContent = `آزمون ${online ? 'آنلاین' : 'آفلاین'} ناموفق بود.`;
     }
   }
 
@@ -852,12 +871,25 @@ window.ABSettingsPage = (() => {
     $('offlineFields').hidden = online;
     $('sProxy').disabled = !online;
     $('sEngine').disabled = !online;
+    const sampleMode = $('sSampleMode');
+    if (sampleMode) sampleMode.value = online ? 'online' : 'offline';
+  }
+  function setSampleTranslationMode() {
+    const sampleMode = $('sSampleMode')?.value || 'online';
+    $('sMode').value = sampleMode;
+    syncConditional();
   }
 
   function render(host, state, route) {
-    const c = state.config, tr = c.translation, ui = c.ui, tap = c.tap;
+    if (route !== 'set-translate') translationTestNotice = '';
+    const c = state.config;
+    const draft = route === 'set-translate' ? captureTranslationDraft() : null;
+    const sampleModeDraft = route === 'set-translate' ? $('sSampleMode')?.value : null;
+    const tr = { ...c.translation, ...(draft || {}) };
+    const ui = c.ui, tap = c.tap;
     if (route === 'set-translate') {
       const online = tr.engine !== 'custom-offline';
+      const selectedSampleMode = sampleModeDraft || (online ? 'online' : 'offline');
       const engines = [
         ['builtin-online', 'آنلاین خودکار · Google و MyMemory به‌عنوان مسیرهای جایگزین'],
         ['online-google', 'Google · Chrome endpoint'],
@@ -902,7 +934,7 @@ Content-Type: application/json
 
           <div id="sTestResult" class="translator-test-status" role="status" aria-live="polite"></div>
           <div class="translator-sample-wrap">
-            <div class="translator-sample-head"><div><h3>آزمون ترجمه</h3><p>متن نمونه را ترجمه کن و ورودی و خروجی را کنار هم بررسی کن.</p></div><div class="fld"><label for="sSampleTarget">ترجمه به</label><select id="sSampleTarget"><option value="en">English</option><option value="fa">فارسی</option></select></div></div>
+            <div class="translator-sample-head"><div><h3>آزمون ترجمه</h3><p>برای نمونه، حالت آنلاین یا آفلاین را همین‌جا انتخاب کن؛ تنظیمات همان حالت در بالا باز می‌شود.</p></div><div class="translator-sample-controls"><div class="fld"><label for="sSampleMode">حالت آزمون</label><select id="sSampleMode" onchange="ABSettingsPage.setSampleTranslationMode()"><option value="online" ${selectedSampleMode === 'online' ? 'selected' : ''}>آنلاین</option><option value="offline" ${selectedSampleMode === 'offline' ? 'selected' : ''}>آفلاین</option></select></div><div class="fld"><label for="sSampleTarget">ترجمه به</label><select id="sSampleTarget"><option value="en">English</option><option value="fa">فارسی</option></select></div></div></div>
             <div class="translator-pair"><div class="translator-sample-pane"><label for="sSampleInput">متن ورودی</label><textarea id="sSampleInput" dir="rtl" rows="6">لطفاً وضعیت سرویس را بررسی کن؛ اگر فایل پیکربندی وجود ندارد، آن را نساز و فقط مسیر دقیق فایل موردنیاز را گزارش بده.</textarea></div><div class="translator-sample-pane"><label>ترجمهٔ خروجی</label><div id="sSampleOutput" class="translator-sample-output" dir="auto">خروجی ترجمه اینجا نمایش داده می‌شود.</div></div></div>
             <div class="translator-sample-actions"><span id="sSampleMeta" class="muted">نمونهٔ فارسی → انگلیسی · مسیرها و کد را هم می‌توانی امتحان کنی.</span><button class="btn primary" type="button" onclick="ABSettingsPage.translateSettingsSample()">ترجمهٔ نمونه</button></div>
           </div>
@@ -916,6 +948,7 @@ Content-Type: application/json
           <div class="translator-glossary-actions"><button class="btn" type="button" onclick="ABSettingsPage.addGlossaryRow()">افزودن واژه</button><button class="btn primary" type="button" onclick="ABSettingsPage.saveGlossary()">ذخیره واژه‌نامه</button></div><div id="glossaryStatus" class="muted" role="status"></div>
         </section>
       </div>`;
+      if (translationTestNotice) setTranslationStatus(translationTestNotice, translationTestOk);
     } else if (route === 'set-hud') {
       host.innerHTML = `<div class="panel-wrap ui-settings">
         <div class="panel rtl">
@@ -998,5 +1031,5 @@ Content-Type: application/json
       renderCleanupPage(host, state, c);
     }
   }
-  return { render, applyPreset, saveTranslation, testConnection, translateSettingsSample, addGlossaryRow, saveGlossary, saveUI, previewUI, cancelUIPreview, resetUIToDefaults, saveModel, testModelConnection, refreshProviderAccounts, applyProviderDefaults, saveModelAccount, editModelAccount, testOnlineAccount, discoverOnlineModels, deleteModelAccount, changeModelEncryption, previewCleanup, runSelectedCleanup, confirmCleanupRun, cancelCleanupRun, saveRetention, switchCleanupTab, setCleanupRange, setCleanupDays, setCleanupScope, filterHistory, cancelHistoryDelete, confirmHistoryDelete, toggleHelp, syncConditional };
+  return { render, applyPreset, saveTranslation, testConnection, translateSettingsSample, addGlossaryRow, saveGlossary, saveUI, previewUI, cancelUIPreview, resetUIToDefaults, saveModel, testModelConnection, refreshProviderAccounts, applyProviderDefaults, saveModelAccount, editModelAccount, testOnlineAccount, discoverOnlineModels, deleteModelAccount, changeModelEncryption, previewCleanup, runSelectedCleanup, confirmCleanupRun, cancelCleanupRun, saveRetention, switchCleanupTab, setCleanupRange, setCleanupDays, setCleanupScope, filterHistory, cancelHistoryDelete, confirmHistoryDelete, toggleHelp, syncConditional, setSampleTranslationMode };
 })();
