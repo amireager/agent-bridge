@@ -73,7 +73,19 @@ window.ABApp = (() => {
 
   async function deleteLabSession(sessionId, ev) {
     if (ev) ev.stopPropagation();
-    await api('/api/lab/delete', { session_id: sessionId });
+    const title = [...(state?.lab_history || []), ...(state?.lab_sessions || [])].find(x => x.id === sessionId)?.title || sessionId;
+    if (!confirm(`حذف تاریخچهٔ Lab «${title}»؟ پیام‌ها و نشست ذخیره‌شده پاک می‌شوند و این کار برگشت‌پذیر نیست.`)) return;
+    try {
+      const result = await api('/api/lab/delete', { session_id: sessionId });
+      if (!result?.ok) throw new Error('نشست پیدا نشد یا حذف انجام نشد.');
+      if (state) {
+        state.lab_history = (state.lab_history || []).filter(x => x.id !== sessionId);
+        state.lab_sessions = (state.lab_sessions || []).filter(x => x.id !== sessionId);
+        renderTree();
+      }
+    } catch (error) {
+      alert(`حذف انجام نشد: ${error.message}`);
+    }
   }
 
   async function filterByObservedModel(modelName) {
@@ -97,6 +109,66 @@ window.ABApp = (() => {
 
   function toggleSidebarCollapse() {
     document.getElementById('sidebar').classList.toggle('collapsed');
+  }
+
+  let sidebarDrag = null;
+  function clampSidebarWidth(value) {
+    const shell = document.getElementById('shellRoot');
+    const total = shell?.clientWidth || window.innerWidth || 1200;
+    const min = Math.min(220, Math.max(150, total * 0.32));
+    const max = Math.max(min, Math.min(560, total - Math.min(240, total * 0.35)));
+    return Math.round(Math.min(max, Math.max(min, Number(value) || 280)));
+  }
+  function applySidebarWidth(value) {
+    if (sidebarDrag) return;
+    const shell = document.getElementById('shellRoot');
+    if (shell) shell.style.setProperty('--sidebar-width', `${clampSidebarWidth(value)}px`);
+  }
+  async function saveSidebarWidth(value) {
+    const width = clampSidebarWidth(value);
+    try { await api('/api/config', { ui: { sidebar_width: width } }); } catch (_) {}
+  }
+  function bindSidebarResizer() {
+    const handle = document.getElementById('sidebarResizer');
+    const shell = document.getElementById('shellRoot');
+    const sidebar = document.getElementById('sidebar');
+    if (!handle || !shell || !sidebar || handle.dataset.bound) return;
+    handle.dataset.bound = 'true';
+    handle.addEventListener('pointerdown', event => {
+      if (event.button !== 0) return;
+      event.preventDefault();
+      const side = state?.config?.ui?.sidebar_side || 'left';
+      sidebar.classList.remove('collapsed');
+      sidebarDrag = { pointerId: event.pointerId, x: event.clientX, width: sidebar.getBoundingClientRect().width, side };
+      shell.classList.add('is-resizing');
+      handle.setPointerCapture?.(event.pointerId);
+    });
+    handle.addEventListener('pointermove', event => {
+      if (!sidebarDrag || sidebarDrag.pointerId !== event.pointerId) return;
+      const delta = event.clientX - sidebarDrag.x;
+      const width = sidebarDrag.width + (sidebarDrag.side === 'right' ? -delta : delta);
+      shell.style.setProperty('--sidebar-width', `${clampSidebarWidth(width)}px`);
+    });
+    const finish = event => {
+      if (!sidebarDrag || (event?.pointerId != null && sidebarDrag.pointerId !== event.pointerId)) return;
+      const width = sidebar.getBoundingClientRect().width;
+      sidebarDrag = null;
+      shell.classList.remove('is-resizing');
+      saveSidebarWidth(width);
+    };
+    handle.addEventListener('pointerup', finish);
+    handle.addEventListener('pointercancel', finish);
+    handle.addEventListener('keydown', event => {
+      if (!['ArrowLeft', 'ArrowRight'].includes(event.key)) return;
+      event.preventDefault();
+      sidebar.classList.remove('collapsed');
+      const side = state?.config?.ui?.sidebar_side || 'left';
+      const grow = (event.key === 'ArrowRight') !== (side === 'right');
+      const current = sidebar.getBoundingClientRect().width;
+      const width = clampSidebarWidth(current + (grow ? 16 : -16) * (event.shiftKey ? 2 : 1));
+      shell.style.setProperty('--sidebar-width', `${width}px`);
+      saveSidebarWidth(width);
+    });
   }
 
   function renderTree() {
@@ -126,7 +198,7 @@ window.ABApp = (() => {
     }).join('');
     const labHistoryHtml = (state.lab_history || []).map(s => {
       const isAct = route === 'chat' && state.view_kind === 'lab' && state.view_id === s.id;
-      return `<div class="tree-node ${isAct ? 'active' : ''}" onclick="ABApp.selectLab('${esc(s.id)}')"><span>⚡ <strong>${esc(s.title)}</strong> <small>${s.turn_count} دور · بایگانی‌شده</small></span><span class="tiny-tag">بازگردانی</span></div>`;
+      return `<div class="tree-node ${isAct ? 'active' : ''}" onclick="ABApp.selectLab('${esc(s.id)}')"><span>⚡ <strong>${esc(s.title)}</strong> <small>${s.turn_count} دور · بایگانی‌شده</small></span><span style="display:flex;align-items:center;gap:4px;"><span class="tiny-tag">بازگردانی</span><button class="mini-action danger" title="حذف دائمی تاریخچهٔ Lab" aria-label="حذف ${esc(s.title)}" onclick="ABApp.deleteLabSession('${esc(s.id)}',event)">×</button></span></div>`;
     }).join('');
     const historyHtml = [labHistoryHtml, mirrorHistoryHtml].filter(Boolean).join('') || '<div class="tree-empty">تاریخچه‌ای نیست</div>';
 
@@ -306,6 +378,7 @@ window.ABApp = (() => {
 
   function applyState(nextState, isFirst = false) {
     state = nextState;
+    applySidebarWidth(state?.config?.ui?.sidebar_width);
     renderVaultGate();
     renderHudBar();
     renderTree();
@@ -313,6 +386,7 @@ window.ABApp = (() => {
   }
 
   function boot() {
+    bindSidebarResizer();
     api('/api/state').then(s => applyState(s, true)).catch(() => {});
     const connect = () => {
       const es = new EventSource('/api/events');

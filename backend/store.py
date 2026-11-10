@@ -148,6 +148,7 @@ class DataStore:
         return {
             "ui": {
                 "sidebar_side": "left",
+                "sidebar_width": 280,
                 "theme": "openwebui-dark",   # openwebui-dark | mocha-dark | zed-dark | lobechat-dark
                 "font_scale": "large",       # normal (14px) | large (15.5px) | xlarge (17px)
                 "chat_mode": "interleaved",  # interleaved | fa_only | en_only

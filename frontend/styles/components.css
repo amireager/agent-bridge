@@ -1,7 +1,8 @@
 /* Sidebar, Topbar, OS-Style Pill Toggle Switches, Cards & Guaranteed Scroll Containers */
 .sidebar {
-  width: 280px;
-  min-width: 280px;
+  width: var(--sidebar-width, 280px);
+  min-width: var(--sidebar-width, 280px);
+  flex: 0 0 var(--sidebar-width, 280px);
   height: 100dvh;
   background: var(--bg-1);
   border-right: 1px solid var(--line);
@@ -17,7 +18,30 @@
 .sidebar.collapsed {
   width: 54px;
   min-width: 54px;
+  flex-basis: 54px;
 }
+.sidebar-resizer {
+  flex: 0 0 6px;
+  position: relative;
+  z-index: 5;
+  cursor: col-resize;
+  touch-action: none;
+  user-select: none;
+}
+.sidebar-resizer::after {
+  content: "";
+  position: absolute;
+  inset: 0 2px;
+  border-radius: 4px;
+  background: transparent;
+  transition: background .15s ease;
+}
+.sidebar-resizer:hover::after,
+.sidebar-resizer:focus-visible::after,
+.shell.is-resizing .sidebar-resizer::after { background: var(--cyan); }
+.shell.is-resizing, .shell.is-resizing * { cursor: col-resize !important; }
+.shell.is-resizing .sidebar { transition: none; }
+.sidebar-resizer:focus-visible { outline: 2px solid var(--cyan); outline-offset: -2px; }
 .sidebar.collapsed .hide-collapsed {
   display: none !important;
 }
