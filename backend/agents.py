@@ -1144,7 +1144,7 @@ class BridgeHub:
         pty_alive = (time.time() - self.pty_heartbeats.get(target_agent, 0.0)) < 25.0
         if not pty_alive:
             raise RuntimeError(
-                f"ترمینال زنده برای «{target_agent}» متصل نیست (متن انگلیسی در کلیپ‌بورد کپی شد). برای تایپ خودکار در ترمینال بزن: python3 cli.py --wrap pi"
+                f"ترمینال زنده برای «{target_agent}» متصل نیست (متن انگلیسی در کلیپ‌بورد کپی شد). برای اتصال هر عامل تعاملی در ترمینال بزن: python3 cli.py --wrap <agent>"
             )
 
         self.pending_saved_by_agent[target_agent] = savings["saved"]

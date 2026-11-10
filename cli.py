@@ -1,13 +1,10 @@
 #!/usr/bin/env python3
 """
-Transparent Interactive PTY Wrapper (`cli.py --wrap pi`) for Agent Bridge:
-1) Fixes `~/.pi/agent/models.json` bypass: clones your existing `pi` config/auth into a
-   clean runtime dir while guaranteeing `baseUrl` routes through `http://127.0.0.1:18080/v1`!
-2) Multi-Terminal Auto-Naming: open 2 or 3 terminals (`pi`, `pi-2`, `pi-3`) and each gets
-   its own independent live mirror channel + KV slot automatically!
-3) Clean `Ctrl+C` Exit: single `Ctrl+C` interrupts active generation inside `pi`; pressing
-   `Ctrl+C` twice within 1.4s (or `SIGTERM`/`SIGHUP`) kills the entire child process group,
-   restores terminal state, unregisters from Web UI, and exits 0 with ZERO tracebacks!
+Interactive PTY wrapper for Agent Bridge:
+1) Routes supported agent CLIs through the currently selected Bridge model.
+2) Duplicate launches are auto-named (pi, pi-2; omp, omp-2, etc.) and receive fresh mirrors.
+3) UI prompts are typed into the selected agent's real terminal session, followed by Enter.
+4) Ctrl+C first interrupts the child; a second press within 1.4s force-closes that child only.
 """
 
 from __future__ import annotations
@@ -22,6 +19,7 @@ import select
 import shlex
 import shutil
 import signal
+import subprocess
 import sys
 import tempfile
 import termios
@@ -134,6 +132,245 @@ def _build_routed_pi_env(base: str, agent_id: str) -> tuple[dict[str, str], Path
     return env, tmp_dir
 
 
+def _route_context(base: str) -> tuple[str, int, Path]:
+    """Read the Bridge-selected model and its private runtime root without exposing secrets."""
+    try:
+        state = get_json(base, "/api/state")
+    except Exception:
+        state = {}
+    upstream = state.get("upstream", {}) if isinstance(state, dict) else {}
+    model_id = str(upstream.get("detected_model") or "local-model")
+    if model_id == "listening...":
+        model_id = "local-model"
+    try:
+        context = max(16384, int(upstream.get("server_ctx") or 32768))
+    except (TypeError, ValueError):
+        context = 32768
+    data_dir = str(state.get("storage", {}).get("data_dir", "")) if isinstance(state, dict) else ""
+    data_root = Path(data_dir) if data_dir else Path(__file__).resolve().parent / ".data"
+    return model_id, context, data_root
+
+
+def _new_runtime_dir(data_root: Path, agent_id: str) -> Path:
+    runtime_root = data_root / "pty-runtime"
+    runtime_root.mkdir(parents=True, exist_ok=True)
+    safe = "".join(ch if ch.isalnum() or ch in "._-" else "-" for ch in agent_id) or "agent"
+    return Path(tempfile.mkdtemp(prefix=f"{safe}-", dir=runtime_root))
+
+
+def _clean_child_env() -> dict[str, str]:
+    env = os.environ.copy()
+    # Agent inference must reach the local Bridge directly, never through ambient proxies.
+    for key in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy"):
+        env.pop(key, None)
+    return env
+
+
+def _build_routed_omp_env(base: str, agent_id: str) -> tuple[dict[str, str], Path]:
+    model_id, context, data_root = _route_context(base)
+    tmp_dir = _new_runtime_dir(data_root, agent_id)
+    agent_dir = tmp_dir / "omp-agent"
+    agent_dir.mkdir(parents=True, exist_ok=True)
+
+    # Preserve user-authored extensions/skills without copying credentials or saved sessions.
+    user_agent_dir = Path.home() / ".omp" / "agent"
+    for item_name in ("extensions", "skills", "prompts", "keybindings", "themes"):
+        src = user_agent_dir / item_name
+        dst = agent_dir / item_name
+        if src.exists() and not dst.exists():
+            try:
+                os.symlink(src, dst, target_is_directory=src.is_dir())
+            except OSError:
+                pass
+
+    provider = {
+        "providers": {
+            "agent-bridge": {
+                "baseUrl": f"{base}/v1",
+                "api": "openai-completions",
+                "apiKey": f"agent:{agent_id}",
+                "models": [{
+                    "id": model_id,
+                    "name": model_id,
+                    "contextWindow": context,
+                    "maxTokens": 4096,
+                    "reasoning": True,
+                    "input": ["text"],
+                    "cost": {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0},
+                }],
+            }
+        }
+    }
+    (agent_dir / "models.yml").write_text(json.dumps(provider, ensure_ascii=False, indent=2), encoding="utf-8")
+    (agent_dir / "config.yml").write_text(json.dumps({
+        "setupVersion": 3,
+        "startup": {"setupWizard": False},
+        "update": {"auto": False},
+        "modelRoles": {"default": f"agent-bridge/{model_id}"}
+    }, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    env = _clean_child_env()
+    env["PI_CODING_AGENT_DIR"] = str(agent_dir)
+    env["OPENAI_BASE_URL"] = f"{base}/v1"
+    env["OPENAI_API_KEY"] = f"agent:{agent_id}"
+    return env, tmp_dir
+
+
+def _prepare_agent_runtime(base: str, agent_id: str, cmd_list: list[str], adapter: str = "auto") -> tuple[dict[str, str], Path, list[str]]:
+    """Route supported terminal agents to Bridge while keeping their per-run state under .data."""
+    if not cmd_list:
+        raise ValueError("فرمان عامل خالی است.")
+    detected = Path(cmd_list[0]).name.lower()
+    aliases = {"pi-coding-agent": "pi", "codew": "codewhale", "hermes-agent": "hermes", "dsh-tui": "dsh"}
+    detected = aliases.get(detected, detected)
+    kind = detected if adapter in ("", "auto") else adapter.lower()
+    if kind == "pi":
+        env, tmp_dir = _build_routed_pi_env(base, agent_id)
+        return env, tmp_dir, cmd_list
+    if kind == "omp":
+        env, tmp_dir = _build_routed_omp_env(base, agent_id)
+        model_id = _route_context(base)[0]
+        if "--model" not in cmd_list and not any(arg.startswith("--model=") for arg in cmd_list):
+            cmd_list = [cmd_list[0], "--model", f"agent-bridge/{model_id}", *cmd_list[1:]]
+        return env, tmp_dir, cmd_list
+
+    model_id, context, data_root = _route_context(base)
+    tmp_dir = _new_runtime_dir(data_root, agent_id)
+    env = _clean_child_env()
+    base_url = f"{base}/v1"
+    api_key = f"agent:{agent_id}"
+
+    if kind == "hermes":
+        hermes_home = tmp_dir / "hermes-home"
+        hermes_home.mkdir(parents=True, exist_ok=True)
+        config = {"model": {"default": model_id, "provider": "custom", "base_url": base_url,
+                             "api_key": api_key, "api_mode": "chat_completions"}}
+        (hermes_home / "config.yaml").write_text(json.dumps(config, ensure_ascii=False, indent=2), encoding="utf-8")
+        env["HERMES_HOME"] = str(hermes_home)
+        env["OPENAI_BASE_URL"] = base_url
+        env["OPENAI_API_KEY"] = api_key
+        if "--tui" not in cmd_list:
+            cmd_list = [*cmd_list, "--tui"]
+
+    elif kind == "codewhale":
+        env["OPENAI_BASE_URL"] = base_url
+        env["OPENAI_API_KEY"] = api_key
+        env["CODEWHALE_TELEMETRY"] = "0"
+        codewhale_home = tmp_dir / "codewhale-home"
+        codewhale_home.mkdir(parents=True, exist_ok=True)
+        codewhale_config = codewhale_home / "config.toml"
+        env["CODEWHALE_HOME"] = str(codewhale_home)
+        # CodeWhale's --api-key flag exposes secrets in argv, and OPENAI_API_KEY alone is not
+        # accepted by all CLI builds. Seed its isolated credential store through stdin instead.
+        try:
+            result = subprocess.run(
+                [cmd_list[0], "--config", str(codewhale_config), "auth", "set",
+                 "--provider", "openai", "--api-key-stdin"],
+                env=env, input=api_key, stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT, text=True, timeout=30, check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+            raise RuntimeError(f"آماده‌سازی امنِ کلید موقت CodeWhale ناموفق بود: {exc}") from exc
+        if result.returncode:
+            detail = (result.stdout or "").strip()[-1000:]
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+            raise RuntimeError(f"CodeWhale نتوانست credential موقت را از stdin ثبت کند.\n{detail}")
+        injected = ["--config", str(codewhale_config), "--provider", "openai",
+                    "--base-url", base_url, "--model", model_id, "--skip-onboarding",
+                    "--fresh", "--telemetry", "false"]
+        cmd_list = [cmd_list[0], *injected, *cmd_list[1:]]
+
+    elif kind == "letta":
+        config_root = tmp_dir / "letta-config"
+        config_root.mkdir(parents=True, exist_ok=True)
+        env["LETTA_CONFIG_DIR"] = str(config_root)
+        env["OPENAI_BASE_URL"] = base_url
+        env["OPENAI_API_KEY"] = api_key
+        setup = [cmd_list[0], "--backend", "local", "connect", "openai-compatible",
+                 "--base-url", base_url, "--api-key", api_key]
+        try:
+            result = subprocess.run(setup, env=env, stdin=subprocess.DEVNULL,
+                                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                    text=True, timeout=60, check=False)
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+            raise RuntimeError(f"آماده‌سازی اتصال Letta به Bridge ناموفق بود: {exc}") from exc
+        if result.returncode:
+            detail = (result.stdout or "").strip()[-1200:]
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+            raise RuntimeError(f"Letta نتوانست endpoint مدل Bridge را تأیید کند. سرور مدل را روشن کن و دوباره اجرا کن.\n{detail}")
+        cmd_list = [cmd_list[0], "--backend", "local", "--new", "--model",
+                    f"openai-compatible/{model_id}", *cmd_list[1:]]
+
+    elif kind == "dsh":
+        dsh_home = data_root / "agent-runtimes" / "dsh-home"
+        profile_dir = dsh_home / "profiles" / "tui"
+        if not profile_dir.exists():
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+            raise RuntimeError("برای DSH لازم است یک پروفایل TUI محلی نصب شود؛ dsh web به‌تنهایی ترمینال تعاملی نیست.")
+        env["DSH_HOME"] = str(dsh_home)
+        env["DSH_AGENT_BRIDGE_KEY"] = api_key
+        env["DSH_TUI_SESSION_ROOT"] = str(tmp_dir / "dsh-sessions")
+        patch = [{"id": "llm-pi-ai", "config": {"providers": {"agent-bridge": {
+            "displayName": "Agent Bridge", "apiKeyEnv": "DSH_AGENT_BRIDGE_KEY",
+            "baseURL": base_url, "api": "openai-completions",
+            "models": [{"id": model_id, "name": model_id, "contextWindow": context,
+                        "maxTokens": 4096, "reasoning": True, "input": ["text"]}],
+        }}}}, {"id": "agent-default-model", "config": {"provider": "agent-bridge", "model": model_id}}]
+        patch_path = tmp_dir / "dsh-provider-patch.yml"
+        patch_path.write_text(json.dumps(patch, ensure_ascii=False, indent=2), encoding="utf-8")
+        cmd_list = [cmd_list[0], "--profile", "tui", "--patch", str(patch_path), *cmd_list[1:]]
+
+    elif kind == "forge":
+        # Forge reads custom OpenAI-compatible routes from its provider setup; these env vars
+        # keep inference local to Bridge and do not persist a provider key or modify forge.yaml.
+        env["OPENAI_URL"] = base_url
+        env["OPENAI_BASE_URL"] = base_url
+        env["OPENAI_API_KEY"] = api_key
+        env["OPENAI_MODEL"] = model_id
+
+    else:
+        # Generic OpenAI-compatible fallback for other interactive CLIs.
+        env["OPENAI_BASE_URL"] = base_url
+        env["OPENAI_API_KEY"] = api_key
+        env["OPENAI_URL"] = base_url
+        env["OPENAI_MODEL"] = model_id
+
+    return env, tmp_dir, cmd_list
+
+
+def _stop_hermes_gateway(command: str, env: dict[str, str]) -> None:
+    """Stop the per-run Hermes sidecar before its isolated HERMES_HOME is removed."""
+    try:
+        subprocess.run(
+            [command, "gateway", "stop"], env=env, stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=15, check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+
+
+def _pty_prompt_chunks(message: str) -> tuple[bytes, ...]:
+    """Encode a UI prompt as terminal input followed by Enter (bracketed paste for multiline)."""
+    message = str(message or "").strip()
+    if not message:
+        return ()
+    if "\n" in message:
+        return (f"\x1b[200~{message}\x1b[201~".encode("utf-8"), b"\r")
+    # Separate text and Enter so TUI event loops that read in chunks see a real submission key.
+    return (message.encode("utf-8"), b"\r")
+
+
+def _inject_pty_prompt(master_fd: int, message: str) -> None:
+    chunks = _pty_prompt_chunks(message)
+    for index, chunk in enumerate(chunks):
+        os.write(master_fd, chunk)
+        if index == 0 and len(chunks) > 1:
+            # Let the TUI process the text event and update its composer before Enter arrives.
+            time.sleep(0.25)
+
+
 def _kill_child_group(pid: int) -> None:
     for sig in (signal.SIGTERM, signal.SIGKILL):
         try:
@@ -155,17 +392,32 @@ def _kill_child_group(pid: int) -> None:
             time.sleep(0.04)
 
 
-def run_transparent_pty_wrap(base: str, wrap_cmd: str, explicit_name: str = "") -> int:
+def run_transparent_pty_wrap(base: str, wrap_cmd: str, explicit_name: str = "", adapter: str = "auto") -> int:
     cmd_list = shlex.split(wrap_cmd)
-    desired_base = Path(cmd_list[0]).name if cmd_list else "pi"
+    if not cmd_list:
+        raise ValueError("برای راه‌اندازی عامل، نام فرمان را بعد از --wrap بنویس.")
+    detected = Path(cmd_list[0]).name.lower()
+    aliases = {"pi-coding-agent": "pi", "codew": "codewhale", "hermes-agent": "hermes", "dsh-tui": "dsh"}
+    detected = aliases.get(detected, detected)
+    selected_adapter = detected if adapter in ("", "auto") else adapter.lower()
+    supported = {"pi", "omp", "hermes", "codewhale", "letta", "dsh", "forge"}
+    desired_base = selected_adapter if selected_adapter in supported else detected
 
     try:
         reg = post_json(base, "/api/pty/register", {"desired": desired_base, "explicit": explicit_name})
         agent_id = reg.get("agent_id", explicit_name or desired_base)
     except Exception:
-        agent_id = explicit_name or desired_base
+        # Keep even offline wrapper launches distinct; registration will retry via heartbeat.
+        agent_id = explicit_name or f"{desired_base}-{os.getpid()}"
 
-    child_env, tmp_dir = _build_routed_pi_env(base, agent_id)
+    try:
+        child_env, tmp_dir, cmd_list = _prepare_agent_runtime(base, agent_id, cmd_list, selected_adapter)
+    except Exception:
+        try:
+            post_json(base, "/api/pty/unregister", {"agent_id": agent_id})
+        except Exception:
+            pass
+        raise
     print(
         f"[agent-bridge] Linked as '{agent_id}' -> {base}/v1  (Press Ctrl+C twice quickly to force-quit)\r",
         flush=True,
@@ -220,14 +472,7 @@ def run_transparent_pty_wrap(base: str, wrap_cmd: str, explicit_name: str = "") 
                             continue
                         ev = json.loads(ls[5:].strip())
                         if ev.get("kind") == "pty_inject" and ev.get("agent_id") == agent_id:
-                            msg = ev.get("message", "").strip()
-                            if msg:
-                                if "\n" in msg:
-                                    os.write(master_fd, f"\x1b[200~{msg}\x1b[201~".encode("utf-8"))
-                                    time.sleep(0.06)
-                                    os.write(master_fd, b"\r")
-                                else:
-                                    os.write(master_fd, (msg + "\r").encode("utf-8"))
+                            _inject_pty_prompt(master_fd, ev.get("message", ""))
                         elif ev.get("kind") == "pty_abort" and ev.get("agent_id") == agent_id:
                             os.write(master_fd, b"\x03")
             except Exception:
@@ -301,6 +546,8 @@ def run_transparent_pty_wrap(base: str, wrap_cmd: str, explicit_name: str = "") 
             post_json(base, "/api/pty/unregister", {"agent_id": agent_id})
         except Exception:
             pass
+        if selected_adapter == "hermes":
+            _stop_hermes_gateway(cmd_list[0], child_env)
         shutil.rmtree(tmp_dir, ignore_errors=True)
         sys.stdout.write(f"\r\n[agent-bridge] '{agent_id}' closed cleanly.\r\n")
         sys.stdout.flush()
@@ -308,13 +555,14 @@ def run_transparent_pty_wrap(base: str, wrap_cmd: str, explicit_name: str = "") 
 
 
 def main() -> None:
-    ap = argparse.ArgumentParser(description="Transparent PTY Wrapper (`--wrap pi`) for Agent Bridge")
+    ap = argparse.ArgumentParser(description="Run an interactive agent TUI in a Bridge-linked PTY")
     ap.add_argument("--url", default="http://127.0.0.1:18080", help="Agent Bridge URL")
-    ap.add_argument("--wrap", default="pi", help="Interactive TUI command to wrap (default: 'pi')")
-    ap.add_argument("--name", default="", help="Optional custom channel name (auto-assigns pi, pi-2, ... if omitted)")
+    ap.add_argument("--wrap", default="pi", help="Interactive agent command to wrap (for example: pi, omp, hermes)")
+    ap.add_argument("--adapter", default="auto", choices=("auto", "pi", "omp", "hermes", "codewhale", "letta", "dsh", "forge", "generic"), help="Provider/config adapter; auto-detected from the command by default")
+    ap.add_argument("--name", default="", help="Optional channel name; otherwise each new terminal is named automatically (pi, pi-2, ...) ")
     args = ap.parse_args()
     try:
-        sys.exit(run_transparent_pty_wrap(args.url.rstrip("/"), args.wrap, args.name.strip()))
+        sys.exit(run_transparent_pty_wrap(args.url.rstrip("/"), args.wrap, args.name.strip(), args.adapter))
     except KeyboardInterrupt:
         sys.exit(0)
 

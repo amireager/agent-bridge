@@ -50,6 +50,17 @@ class MirrorHistoryTests(unittest.TestCase):
         self.assertEqual(name, "pi-2")
         self.assertEqual(self.hub.mirrors["pi"]["turns"][0]["id"], "old")
 
+    def test_duplicate_terminal_launches_are_named_automatically(self):
+        self.hub.mirrors = {}
+        self.hub.pty_heartbeats = {}
+        self.hub.agent_activity = {}
+        self.hub._persist_mirror = lambda mirror: None
+        self.hub.broadcast_state = lambda: None
+        first = self.hub.register_pty("pi")
+        second = self.hub.register_pty("pi")
+        self.assertEqual((first, second), ("pi", "pi-2"))
+        self.assertEqual(self.hub.view_id, "pi-2")
+
 
 if __name__ == "__main__":
     unittest.main()

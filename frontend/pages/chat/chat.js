@@ -487,7 +487,7 @@ window.ABChatPage = (() => {
       <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;">
         <span>Proxy: <code>http://127.0.0.1:${state.bridge_port}/v1</code></span>
         <span>·</span>
-        <span>TTY Wrap: <code>python3 cli.py --wrap pi</code></span>
+        <span>ترمینال عامل: <code>python3 cli.py --wrap &lt;agent&gt;</code></span>
       </div>
       <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
         <div class="seg-group" title="حالت نمایش متن و ترجمه (کدها همیشه فقط یک‌بار و دست‌نخورده نمایش داده می‌شوند)">
@@ -527,8 +527,8 @@ window.ABChatPage = (() => {
             ۱. اگر در ترمینال عادی یا سندباکس، عاملت (مثل <code>pi</code>) به <code>http://127.0.0.1:${state.bridge_port}/v1</code> وصل باشد، تمام پاسخ‌ها، ابزارها و آمار دقیق کش <strong>به‌صورت زنده اینجا استخراج می‌شوند</strong> و کدها فقط یک‌بار بدون تکرار نمایش داده می‌شوند.
           </p>
           <p class="fg-1" style="line-height:1.9;margin:0;">
-            ۲. اگر می‌خواهی محیط تعاملی واقعی <code>pi</code> در ترمینال باز بماند <strong>و</strong> دکمه «ارسال» همین صفحه هم مستقیم داخلش تایپ شود، در ترمینال سندباکس بزن:
-            <code>python3 cli.py --wrap pi</code>
+            ۲. برای بازماندن TUI واقعی هر عامل و تایپ پیام UI در همان ترمینال، در ترمینال پروژه بزن:
+            <code>python3 cli.py --wrap &lt;agent&gt;</code>؛ مثلاً <code>--wrap pi</code> یا <code>--wrap omp</code>. اجرای دوباره خودکار نام تازه می‌گیرد.
           </p>
         </div>`;
       lastSessionId = sessId;

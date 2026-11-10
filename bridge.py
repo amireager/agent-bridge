@@ -53,7 +53,7 @@ def main() -> None:
 
     print(
         f"\n[agent-bridge] UI & Proxy  : http://{args.host}:{args.port}/\n"
-        f"[agent-bridge] TTY Wrapper : python3 cli.py --wrap pi   (Ctrl+C x2 exits cleanly)\n"
+        f"[agent-bridge] TTY Wrapper : python3 cli.py --wrap <agent> (e.g. pi, omp, hermes, codewhale; Ctrl+C x2 exits cleanly)\n"
         f"[agent-bridge] Isolated DB : {store.data_dir}\n",
         flush=True,
     )
