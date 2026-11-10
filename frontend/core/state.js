@@ -167,10 +167,10 @@ window.ABApp = (() => {
         mkLeaf('usage-xray', 'بازرس بسته خام (Wire X-Ray)')
       ),
       mkRoot('settings', ICONS.sliders, 'تنظیمات',
-        mkLeaf('set-translate', 'مترجم، پروکسی و API آفلاین', trOn ? 'ON' : 'OFF', trOn ? 'on' : '') +
-        mkLeaf('set-hud', 'تم، فونت و کلیدهای نمایش') +
+        mkLeaf('set-hud', 'تم و تنظیمات کاربری') +
+        mkLeaf('set-translate', 'موتور مترجم، پروکسی و API آفلاین', trOn ? 'ON' : 'OFF', trOn ? 'on' : '') +
         mkLeaf('set-tap', 'مدل محلی، API آنلاین و پیش‌فرض Agent') +
-        mkLeaf('set-retention', 'نگهداری تاریخچه و پاکسازی', `${state.config.retention.days || '∞'}d`)
+        mkLeaf('set-retention', 'تاریخچه‌ها و پاکسازی', `${state.config.retention.days || '∞'}d`)
       )
     ].join('');
   }
