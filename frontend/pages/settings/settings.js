@@ -5,6 +5,14 @@ window.ABSettingsPage = (() => {
   const cfg = () => window.ABApp.getState().config;
   let modelAccountsCache = [];
   let uiPreviewActive = false;
+  let cleanupTab = 'history';
+  let cleanupUi = { query: '', kind: 'all', sort: 'recent', days: null, scopes: { telemetry: true, lab: true, mirrors: true, xray: false } };
+  let cleanupState = null;
+  let cleanupPreviewData = null;
+  let cleanupPreviewKey = '';
+  let pendingHistoryDelete = null;
+  let cleanupNotice = '';
+  let historyNotice = '';
   const PREVIEW_IMAGE_URL = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAGAAAAA2CAIAAAC3LQuFAAACDElEQVR42u3Q20qUYRTG8ec+OugWPO3QOyiUZMJQjCJRisIoFAclSQrD3WFbw/ZUVqRlYbmhss3JqKPO3plRL6M+ecMGnXd94xq+9cHLgt8wBwPr/c+Do7diioBjt2OKgLo7MUVA/d0lRcDxe0uKgIb7y4qAyNiyIuDEgxVFQOP4ikv+5Ib3q+YgTj6MO6PsOgb7Jpoexd1ArGPwzqL58aobfAfinUXLk1U3+A7EO4tTT9fc4DsQ7yxOP1tzg+9AvLM483zdDb4D8c7i7It1N/gOxDuL1pcJZxDrsG+i7VXCJWXXqeYg2icSioBzr5OKgPNvkoqAC29TioCL71KKgI7JtCLg0lRaEXD5fUYRcOVDRhHQOZ1VBHR9zIboSGu0VLgxZfPQ/SkXlj3reEKMseUhOpMLxf51jLB6bG3o+bwhz7aOEUqSLQ+9Xzbk0QOFkmRrw9XZvCR6ml3CVUQh+ubykiocSLiKyMO1+bykCgfyCIfZ8tC/UBBT+TqGZJstD9e/FsQcdCDJNlsebnwryjjoOh6xNiIPA9+LAhjrGDJ5RCFuLm4Gjb2ORyCPLoT3GfyxGZxq1jECzfON3Blo6OdWcA7XRnbxBgo0z2NeKe0sTYX5Gvm1FYQ9r7I3CijPFlma+m+g0d/bDMRf8n61PcybiVdIIwr/D3SoplYRdCAdSAfSgXQgHUgHctZfi0XGmvcO0XcAAAAASUVORK5CYII=';
   const UI_DEFAULTS = { theme: 'openwebui-dark', font_scale: 'large', sidebar_side: 'left', show_think: true, think_default_mode: 'half', box_style: 'outlined', think_style: 'violet', tool_style: 'cards', translation_style: 'accent', markdown_style: 'reader', chat_mode: 'interleaved', paragraph_spacing: 'comfortable', image_mode: 'click', image_size: 'large', code_wrap: 'scroll', code_theme: 'midnight', show_code_lines: false, tool_output_mode: 'terminal', translate_thinking: false, show_tools: true, show_inline_tokens: true, show_shadow_cost: true, recent_requests_limit: 10, xray_limit: 40 };
 
@@ -456,31 +464,346 @@ window.ABSettingsPage = (() => {
     }
   }
 
-  async function clearData(kind) {
-    const scopes = kind === 'telemetry' ? ['telemetry'] : (kind === 'sessions' ? ['lab'] : ['telemetry','lab','mirrors']);
-    const days = Number($('cleanupDays')?.value ?? 7);
-    const preview = await api('/api/cleanup/preview', { days, scopes });
-    $('cleanupPreview').innerHTML = `در آستانه‌ی حذف: ${preview.telemetry_requests} درخواست آماری، ${preview.file_count} فایل، حدود ${(preview.bytes/1048576).toFixed(2)} MiB. تأیید نهایی لازم است.`;
-    if (!confirm('این پاکسازی را اجرا کنم؟')) return;
-    const result = await api('/api/cleanup/run', { days, scopes });
-    $('cleanupPreview').textContent = `انجام شد: ${result.deleted_requests} درخواست، ${result.deleted_files} فایل؛ آزادسازی تقریبی ${(result.freed_bytes/1048576).toFixed(2)} MiB.`;
+  function selectedCleanupScopes() {
+    return ['telemetry', 'lab', 'mirrors', 'xray'].filter(scope => cleanupUi.scopes[scope]);
   }
 
-  function selectedCleanupScopes() {
-    return ['telemetry','lab','mirrors'].filter(x => $(`cleanup-${x}`).checked);
+  function cleanupDaysValue() {
+    const raw = $('cleanupDays')?.value ?? cleanupUi.days ?? 7;
+    if (String(raw).trim() === '') return null;
+    const value = Number(raw);
+    return Number.isFinite(value) ? Math.max(0, Math.min(3650, Math.floor(value))) : null;
   }
+
+  function cleanupKey(days = cleanupDaysValue(), scopes = selectedCleanupScopes()) {
+    return JSON.stringify({ days, scopes: [...scopes].sort() });
+  }
+
+  function invalidateCleanupPreview() {
+    cleanupPreviewData = null;
+    cleanupPreviewKey = '';
+    const result = $('cleanupPreview');
+    if (result) { result.hidden = true; result.innerHTML = ''; }
+    const dialog = $('cleanupConfirmDialog');
+    if (dialog) dialog.hidden = true;
+    cleanupNotice = 'انتخاب تغییر کرد؛ برای دیدن موارد دقیق، پیش‌نمایش تازه بگیر.';
+    const status = $('cleanupStatus');
+    if (status) status.textContent = cleanupNotice;
+  }
+
+  function setCleanupRange(days) {
+    cleanupUi.days = Math.max(0, Math.min(3650, Number(days) || 0));
+    const input = $('cleanupDays');
+    if (input) input.value = cleanupUi.days;
+    const hint = $('cleanupRangeHint');
+    if (hint) hint.textContent = cleanupUi.days === 0 ? 'تمام تاریخچهٔ دسته‌های انتخاب‌شده · X-Ray جداگانه' : `${cleanupUi.days} روز · بازه روی X-Ray اعمال نمی‌شود`;
+    invalidateCleanupPreview();
+    document.querySelectorAll('[data-cleanup-days]').forEach(btn => btn.classList.toggle('active', Number(btn.dataset.cleanupDays) === cleanupUi.days));
+  }
+
+  function setCleanupDays(value) {
+    if (String(value).trim() === '') {
+      cleanupUi.days = null;
+      const hint = $('cleanupRangeHint');
+      if (hint) hint.textContent = 'برای پیش‌نمایش، عدد روز را وارد کن.';
+      invalidateCleanupPreview();
+      document.querySelectorAll('[data-cleanup-days]').forEach(btn => btn.classList.remove('active'));
+      return;
+    }
+    cleanupUi.days = Math.max(0, Math.min(3650, Number(value) || 0));
+    const hint = $('cleanupRangeHint');
+    if (hint) hint.textContent = cleanupUi.days === 0 ? 'تمام تاریخچهٔ دسته‌های انتخاب‌شده · X-Ray جداگانه' : `${cleanupUi.days} روز · بازه روی X-Ray اعمال نمی‌شود`;
+    invalidateCleanupPreview();
+    document.querySelectorAll('[data-cleanup-days]').forEach(btn => btn.classList.toggle('active', Number(btn.dataset.cleanupDays) === cleanupUi.days));
+  }
+
+  function setCleanupScope(scope, enabled) {
+    if (!(scope in cleanupUi.scopes)) return;
+    cleanupUi.scopes[scope] = !!enabled;
+    invalidateCleanupPreview();
+  }
+
+  function switchCleanupTab(tab) {
+    if (!['history', 'cleanup'].includes(tab)) return;
+    cleanupTab = tab;
+    const root = $('cleanupRoot');
+    if (!root) return;
+    root.querySelectorAll('[data-cleanup-pane]').forEach(pane => { pane.hidden = pane.dataset.cleanupPane !== tab; });
+    root.querySelectorAll('[data-cleanup-tab]').forEach(button => button.classList.toggle('active', button.dataset.cleanupTab === tab));
+  }
+
+  function formatHistoryDate(timestamp) {
+    const value = Number(timestamp || 0);
+    if (!value) return 'زمان نامشخص';
+    try { return new Date(value * 1000).toLocaleString('fa-IR', { dateStyle: 'medium', timeStyle: 'short' }); }
+    catch (_) { return 'زمان نامشخص'; }
+  }
+
+  function formatStorageBytes(bytes) {
+    const value = Math.max(0, Number(bytes) || 0);
+    if (value < 1024) return `${value} B`;
+    if (value < 1048576) return `${(value / 1024).toFixed(1)} KiB`;
+    return `${(value / 1048576).toFixed(2)} MiB`;
+  }
+
+  function historyRecords() {
+    const state = cleanupState || {};
+    const storedFiles = state.storage?.files || [];
+    const fileSize = path => Number(storedFiles.find(file => file.path === path)?.bytes || 0);
+    const safeMirrorId = id => String(id || '').replace(/[^a-zA-Z0-9_.-]/g, '-') || 'agent';
+    const labs = (state.lab_sessions || []).map(item => ({ kind: 'lab', id: item.id, title: item.title || item.id, turns: item.turn_count || 0, updated: item.updated_at, bytes: item.bytes || fileSize(`sessions/lab/${item.id}.json`), live: false }));
+    const offline = (state.mirror_history || []).map(item => ({ kind: 'mirror', id: item.agent_id, title: item.title || item.agent_id, turns: item.turn_count || 0, updated: item.updated_at, bytes: item.bytes || fileSize(`mirrors/${safeMirrorId(item.agent_id)}.json`), live: false }));
+    const live = (state.mirrors || []).map(item => ({ kind: 'mirror', id: item.agent_id, title: item.title || item.agent_id, turns: item.turn_count || 0, updated: item.updated_at, bytes: item.bytes || fileSize(`mirrors/${safeMirrorId(item.agent_id)}.json`), live: !!item.pty_live }));
+    return [...labs, ...offline, ...live];
+  }
+
+  function renderHistoryResults() {
+    const host = $('historyResults');
+    if (!host) return;
+    const query = String(cleanupUi.query || '').trim().toLocaleLowerCase();
+    let records = historyRecords().filter(item => {
+      const typeOk = cleanupUi.kind === 'all' || (cleanupUi.kind === 'lab' && item.kind === 'lab') || (cleanupUi.kind === 'mirror' && item.kind === 'mirror') || (cleanupUi.kind === 'live' && item.live);
+      const queryOk = !query || `${item.title} ${item.id} ${item.kind}`.toLocaleLowerCase().includes(query);
+      return typeOk && queryOk;
+    });
+    records.sort((a, b) => cleanupUi.sort === 'oldest' ? (a.updated || 0) - (b.updated || 0) : cleanupUi.sort === 'turns' ? b.turns - a.turns : cleanupUi.sort === 'size' ? b.bytes - a.bytes : (b.updated || 0) - (a.updated || 0));
+    if (!records.length) {
+      host.innerHTML = '<div class="cleanup-empty"><span>⌕</span><strong>چیزی پیدا نشد</strong><small>عبارت جست‌وجو یا فیلتر نوع تاریخچه را تغییر بده.</small></div>';
+    } else {
+      host.innerHTML = records.map(item => {
+        const type = item.kind === 'lab' ? 'آزمایش Lab' : item.live ? 'ترمینال زنده' : 'تاریخچهٔ ترمینال';
+        const badge = item.live ? '<span class="history-state live">زنده · محافظت‌شده</span>' : item.kind === 'lab' ? '<span class="history-state lab">LAB</span>' : '<span class="history-state offline">ذخیره‌شده</span>';
+        const openAction = `<button type="button" class="btn ghost" data-history-action="open" data-kind="${item.kind}" data-id="${esc(item.id)}">بازکردن</button>`;
+        const deleteAction = item.live ? '' : `<button type="button" class="btn ghost danger" data-history-action="delete" data-kind="${item.kind}" data-id="${esc(item.id)}" data-title="${esc(item.title)}">حذف</button>`;
+        return `<article class="history-card ${item.live ? 'is-live' : ''}"><div class="history-card-main"><div class="history-card-title">${badge}<strong>${esc(item.title)}</strong><small>${esc(type)}</small></div><div class="history-card-meta"><span>◷ ${formatHistoryDate(item.updated)}</span><span>↻ ${Number(item.turns)} دور</span><span>▤ ${formatStorageBytes(item.bytes)}</span></div></div><div class="history-card-actions">${openAction}${deleteAction}</div></article>`;
+      }).join('');
+    }
+    const count = $('historyResultCount');
+    if (count) count.textContent = `${records.length} مورد`;
+    const status = $('historyStatus');
+    if (status) status.textContent = historyNotice;
+  }
+
+  function filterHistory() {
+    cleanupUi.query = $('historySearch')?.value || '';
+    cleanupUi.kind = $('historyKind')?.value || 'all';
+    cleanupUi.sort = $('historySort')?.value || 'recent';
+    renderHistoryResults();
+  }
+
+  function bindHistoryActions(root) {
+    root.querySelectorAll('[data-history-action]').forEach(button => button.addEventListener('click', () => {
+      const { historyAction: action, kind, id, title } = button.dataset;
+      if (action === 'open') {
+        if (kind === 'lab') window.ABApp.selectLab(id);
+        else window.ABApp.selectMirror(id);
+      } else if (action === 'delete') {
+        pendingHistoryDelete = { kind, id, title: title || id };
+        const message = $('historyDeleteMessage');
+        if (message) message.textContent = `«${pendingHistoryDelete.title}» حذف شود؟ این کار نشست و پیام‌های ذخیره‌شدهٔ همین مورد را پاک می‌کند.`;
+        const dialog = $('historyDeleteDialog');
+        if (dialog) dialog.hidden = false;
+      }
+    }));
+  }
+
+  function cancelHistoryDelete() {
+    pendingHistoryDelete = null;
+    const dialog = $('historyDeleteDialog');
+    if (dialog) dialog.hidden = true;
+  }
+
+  async function confirmHistoryDelete() {
+    if (!pendingHistoryDelete) return;
+    const item = pendingHistoryDelete;
+    const button = $('confirmHistoryDeleteButton');
+    if (button) button.disabled = true;
+    try {
+      const result = item.kind === 'lab'
+        ? await api('/api/lab/delete', { session_id: item.id })
+        : await api('/api/mirror/delete', { agent_id: item.id });
+      if (!result.ok) throw new Error('مورد پیدا نشد یا ترمینال هنوز فعال است؛ حذف انجام نشد.');
+      historyNotice = 'تاریخچه حذف شد.';
+      if (item.kind === 'lab') cleanupState.lab_sessions = (cleanupState.lab_sessions || []).filter(entry => entry.id !== item.id);
+      else cleanupState.mirror_history = (cleanupState.mirror_history || []).filter(entry => entry.agent_id !== item.id);
+      pendingHistoryDelete = null;
+      const dialog = $('historyDeleteDialog');
+      if (dialog) dialog.hidden = true;
+      renderHistoryResults();
+    } catch (error) {
+      historyNotice = `حذف انجام نشد · ${error.message}`;
+      const message = $('historyDeleteMessage');
+      if (message) message.textContent = historyNotice;
+      const status = $('historyStatus');
+      if (status) status.textContent = historyNotice;
+      const dialog = $('historyDeleteDialog');
+      if (dialog) dialog.hidden = false;
+    } finally {
+      if (button) button.disabled = false;
+    }
+  }
+
+  function cleanupPreviewMarkup(preview) {
+    const categories = preview.categories || {};
+    const labels = { telemetry: 'آمار درخواست‌ها', xray: 'قاب‌های X-Ray', lab: 'نشست‌های Lab', mirrors: 'تاریخچهٔ ترمینال' };
+    const rows = ['telemetry', 'xray', 'lab', 'mirrors'].filter(key => preview.scopes.includes(key)).map(key => {
+      const item = categories[key] || { items: 0 };
+      const details = key === 'xray' ? 'تمام قاب‌های فعلی حافظه' : key === 'telemetry' ? 'رکوردهای قدیمی‌تر از بازه' : `${(preview.files || []).filter(file => file.scope === key).length} فایل`;
+      return `<div class="cleanup-preview-row"><span>${labels[key]}</span><strong>${Number(item.items || 0).toLocaleString('fa-IR')} ${item.unit || 'مورد'}</strong><small>${details}${item.bytes != null ? ` · ${formatStorageBytes(item.bytes)}` : ''}</small></div>`;
+    }).join('');
+    const paths = (preview.files || []).length
+      ? `<details class="cleanup-target-list"><summary>دیدن فایل‌های هدف · ${preview.files.length}</summary><ul>${preview.files.map(file => `<li><span>${esc(file.title || file.id || file.path)}</span><small>${esc(file.path)} · ${formatStorageBytes(file.bytes)}</small></li>`).join('')}</ul></details>`
+      : '';
+    const warning = preview.scopes.includes('xray') && preview.xray_frames
+      ? '<p class="cleanup-warning">X-Ray موقتی است؛ انتخابش همهٔ قاب‌های فعلی را پاک می‌کند و بازهٔ روزها روی آن اعمال نمی‌شود.</p>' : '';
+    const scopeCount = Number(preview.total_items || 0);
+    const dateSummary = preview.scopes.some(scope => scope !== 'xray') ? (preview.days === 0 ? 'تمام تاریخچهٔ دسته‌های انتخاب‌شده' : `قدیمی‌تر از ${preview.days} روز`) : 'تمام قاب‌های فعلی حافظه';
+    return `<div class="cleanup-preview-head"><div><span class="cleanup-preview-icon">⌕</span><div><strong>پیش‌نمایش آماده است</strong><small>${dateSummary} · ${scopeCount.toLocaleString('fa-IR')} مورد در صف بررسی</small></div></div><span class="cleanup-size-tag">فایل‌ها · ${formatStorageBytes(preview.bytes)}</span></div><div class="cleanup-preview-rows">${rows || '<p class="muted">دسته‌ای برای پاکسازی انتخاب نشده.</p>'}</div>${paths}${warning}<button class="btn danger cleanup-review-button" type="button" onclick="ABSettingsPage.runSelectedCleanup()" ${scopeCount ? '' : 'disabled'}>ادامه و بررسی حذف ${scopeCount.toLocaleString('fa-IR')} مورد</button>`;
+  }
+
   async function previewCleanup() {
     const scopes = selectedCleanupScopes();
-    const result = await api('/api/cleanup/preview', { days:Number($('cleanupDays').value), scopes });
-    $('cleanupPreview').innerHTML = `<strong>پیش‌نمایش حذف</strong><br>آمار درخواست‌ها: ${result.telemetry_requests}<br>قاب‌های X-Ray: ${result.xray_frames || 0}<br>فایل/سشن‌های هدف: ${result.file_count}<br>حجم قابل‌آزادسازی تقریبی: ${(result.bytes/1048576).toFixed(2)} MiB<br><small>${result.files.map(x=>esc(x.path)).join('<br>')}</small>`;
+    if (!scopes.length) { cleanupNotice = 'برای پیش‌نمایش، حداقل یک دسته را انتخاب کن.'; const s = $('cleanupStatus'); if (s) s.textContent = cleanupNotice; return null; }
+    const days = cleanupDaysValue();
+    if (days === null) { cleanupNotice = 'تعداد روز معتبر وارد کن یا یکی از بازه‌های آماده را انتخاب کن.'; const invalidStatus = $('cleanupStatus'); if (invalidStatus) invalidStatus.textContent = cleanupNotice; return null; }
+    cleanupUi.days = days;
+    cleanupNotice = 'در حال محاسبهٔ موارد منطبق…';
+    const status = $('cleanupStatus');
+    if (status) status.textContent = cleanupNotice;
+    const requestKey = cleanupKey(days, scopes);
+    try {
+      const result = await api('/api/cleanup/preview', { days, scopes });
+      if (requestKey !== cleanupKey()) return null;
+      if (!result.categories) {
+        const files = result.files || [];
+        result.categories = {
+          telemetry: { items: Number(result.telemetry_requests || 0), unit: 'درخواست', bytes: null },
+          xray: { items: Number(result.xray_frames || 0), unit: 'قاب', bytes: null },
+          lab: { items: files.filter(file => file.scope === 'lab').length, unit: 'نشست', bytes: files.filter(file => file.scope === 'lab').reduce((sum, file) => sum + Number(file.bytes || 0), 0) },
+          mirrors: { items: files.filter(file => file.scope === 'mirrors').length, unit: 'تاریخچه', bytes: files.filter(file => file.scope === 'mirrors').reduce((sum, file) => sum + Number(file.bytes || 0), 0) }
+        };
+      }
+      if (result.total_items == null) result.total_items = Number(result.telemetry_requests || 0) + Number(result.xray_frames || 0) + Number(result.file_count || (result.files || []).length);
+      cleanupPreviewData = result;
+      cleanupPreviewKey = cleanupKey(days, scopes);
+      const host = $('cleanupPreview');
+      if (host) { host.innerHTML = cleanupPreviewMarkup(result); host.hidden = false; }
+      const dialog = $('cleanupConfirmDialog');
+      if (dialog) dialog.hidden = true;
+      cleanupNotice = result.total_items ? 'پیش‌نمایش کامل است؛ تا تأیید نهایی هیچ داده‌ای حذف نمی‌شود.' : 'موردی با این بازه و دسته‌ها پیدا نشد؛ چیزی حذف نخواهد شد.';
+      if (status) status.textContent = cleanupNotice;
+      return result;
+    } catch (error) {
+      cleanupNotice = `پیش‌نمایش ناموفق · ${error.message}`;
+      if (status) status.textContent = cleanupNotice;
+      return null;
+    }
   }
+
   async function runSelectedCleanup() {
+    const days = cleanupDaysValue();
     const scopes = selectedCleanupScopes();
-    if (!scopes.length) { alert('حداقل یک دسته را انتخاب کن.'); return; }
-    await previewCleanup();
-    if (!confirm('فقط موارد مطابق پیش‌نمایش و بازه‌ی زمانی انتخاب‌شده حذف شوند؟')) return;
-    const result = await api('/api/cleanup/run', { days:Number($('cleanupDays').value), scopes });
-    $('cleanupPreview').textContent = `انجام شد: ${result.deleted_requests} درخواست، ${result.deleted_files} فایل؛ حدود ${(result.freed_bytes/1048576).toFixed(2)} MiB.`;
+    if (!cleanupPreviewData || cleanupPreviewKey !== cleanupKey(days, scopes)) {
+      const preview = await previewCleanup();
+      if (!preview) return;
+    }
+    if (!cleanupPreviewData?.total_items) return;
+    const summary = $('cleanupConfirmSummary');
+    if (summary) summary.textContent = `حذف ${Number(cleanupPreviewData.total_items).toLocaleString('fa-IR')} مورد از ${cleanupPreviewData.scopes.map(scope => ({ telemetry:'آمار', xray:'X-Ray', lab:'Lab', mirrors:'ترمینال' })[scope]).join('، ')}. فایل تنظیمات، حساب‌ها و کلیدهای مدل در این عملیات دست‌نخورده می‌مانند.`;
+    const caution = $('cleanupConfirmCaution');
+    if (caution) caution.textContent = cleanupPreviewData.scopes.includes('xray')
+      ? 'این عملیات قابل‌بازگشت نیست؛ X-Ray همهٔ قاب‌های موقت فعلی را پاک می‌کند.'
+      : 'این عملیات قابل‌بازگشت نیست؛ فقط موارد همین پیش‌نمایش حذف می‌شوند.';
+    const dialog = $('cleanupConfirmDialog');
+    if (dialog) dialog.hidden = false;
+  }
+
+  function cancelCleanupRun() {
+    const dialog = $('cleanupConfirmDialog');
+    if (dialog) dialog.hidden = true;
+  }
+
+  async function confirmCleanupRun() {
+    const days = cleanupDaysValue();
+    const scopes = selectedCleanupScopes();
+    if (!cleanupPreviewData || cleanupPreviewKey !== cleanupKey(days, scopes)) {
+      cancelCleanupRun();
+      await previewCleanup();
+      return;
+    }
+    const button = $('cleanupConfirmButton');
+    if (button) button.disabled = true;
+    cleanupNotice = 'پاکسازی در حال اجراست…';
+    const status = $('cleanupStatus');
+    if (status) status.textContent = cleanupNotice;
+    try {
+      const result = await api('/api/cleanup/run', { days, scopes });
+      const parts = result.deleted_by_scope || {
+        telemetry: Number(result.deleted_requests || 0),
+        xray: Number(result.deleted_xray_frames || 0),
+        lab: Number(result.deleted_lab_sessions || 0),
+        mirrors: Math.max(0, Number(result.deleted_files || 0) - Number(result.deleted_lab_sessions || 0))
+      };
+      cleanupNotice = `پاکسازی انجام شد · آمار ${Number(parts.telemetry || 0).toLocaleString('fa-IR')} · X-Ray ${Number(parts.xray || 0).toLocaleString('fa-IR')} · Lab ${Number(parts.lab || 0).toLocaleString('fa-IR')} · ترمینال ${Number(parts.mirrors || 0).toLocaleString('fa-IR')} · آزادشده ${formatStorageBytes(result.freed_bytes)}.`;
+      cleanupPreviewData = null;
+      cleanupPreviewKey = '';
+      const previewHost = $('cleanupPreview');
+      if (previewHost) previewHost.hidden = true;
+      cancelCleanupRun();
+      if (status) status.textContent = cleanupNotice;
+    } catch (error) {
+      cleanupNotice = `پاکسازی انجام نشد · ${error.message}`;
+      if (status) status.textContent = cleanupNotice;
+    } finally {
+      if (button) button.disabled = false;
+    }
+  }
+
+  async function saveRetention() {
+    const days = Math.max(0, Math.min(3650, Number($('retentionDays')?.value || 0)));
+    const enabled = !!$('retentionAuto')?.checked && days > 0;
+    const status = $('retentionStatus');
+    if (status) status.textContent = 'در حال ذخیره…';
+    try {
+      await api('/api/config', { retention: { days, auto_prune_on_boot: enabled } });
+      if (status) status.textContent = enabled ? `نگهداری خودکار ذخیره شد · ${days === 0 ? 'حذف خودکار خاموش' : `نگه‌داشتن ${days} روز`}. از شروع بعدی برنامه اعمال می‌شود.` : 'نگهداری خودکار خاموش شد؛ پاکسازی دستی مستقل باقی می‌ماند.';
+    } catch (error) { if (status) status.textContent = `ذخیره ناموفق · ${error.message}`; }
+  }
+
+  function renderCleanupPage(host, state, config) {
+    cleanupState = state;
+    if (cleanupUi.days === null) cleanupUi.days = Math.max(0, Number(config.retention?.days) || 7);
+    const activeMirrors = (state.mirrors || []).filter(item => item.pty_live).length;
+    const historyCount = (state.mirror_history || []).length;
+    const labCount = (state.lab_sessions || []).length;
+    const storageMiB = Number(state.storage?.total_kib || 0) / 1024;
+    host.innerHTML = `<div id="cleanupRoot" class="panel-wrap cleanup-page rtl">
+      <header class="cleanup-hero"><div><span class="cleanup-eyebrow">DATA CARE · .DATA/</span><h2>تاریخچه و پاکسازی</h2><p>تاریخچه را پیدا و مرور کن؛ پاکسازی هم فقط بعد از پیش‌نمایش و تأیید انجام می‌شود.</p></div><div class="cleanup-storage"><span>فضای داده</span><strong>${storageMiB.toFixed(1)} <small>MiB</small></strong><small>${Number(state.storage?.file_count || 0).toLocaleString('fa-IR')} فایل در .data/</small></div></header>
+      <nav class="cleanup-tabs" aria-label="مدیریت تاریخچه و داده"><button type="button" data-cleanup-tab="history" class="${cleanupTab === 'history' ? 'active' : ''}" onclick="ABSettingsPage.switchCleanupTab('history')">⌕ تاریخچه <span>${labCount + historyCount}</span></button><button type="button" data-cleanup-tab="cleanup" class="${cleanupTab === 'cleanup' ? 'active' : ''}" onclick="ABSettingsPage.switchCleanupTab('cleanup')">⌫ پاکسازی</button></nav>
+      <section class="cleanup-pane" data-cleanup-pane="history" ${cleanupTab === 'history' ? '' : 'hidden'}>
+        <div class="cleanup-stats"><div><span>آزمایش‌های Lab</span><strong>${labCount}</strong></div><div><span>تاریخچهٔ ترمینال</span><strong>${historyCount}</strong></div><div><span>ترمینال زنده · محافظت‌شده</span><strong>${activeMirrors}</strong></div></div>
+        <div class="history-toolbar"><div class="history-search"><span>⌕</span><input id="historySearch" type="search" placeholder="جست‌وجو بر اساس عنوان یا شناسه…" value="${esc(cleanupUi.query)}" oninput="ABSettingsPage.filterHistory()"></div><select id="historyKind" aria-label="نوع تاریخچه" onchange="ABSettingsPage.filterHistory()"><option value="all" ${cleanupUi.kind === 'all' ? 'selected' : ''}>همهٔ موارد</option><option value="lab" ${cleanupUi.kind === 'lab' ? 'selected' : ''}>Lab</option><option value="mirror" ${cleanupUi.kind === 'mirror' ? 'selected' : ''}>ترمینال‌های ذخیره‌شده</option><option value="live" ${cleanupUi.kind === 'live' ? 'selected' : ''}>ترمینال‌های زنده</option></select><select id="historySort" aria-label="مرتب‌سازی" onchange="ABSettingsPage.filterHistory()"><option value="recent" ${cleanupUi.sort === 'recent' ? 'selected' : ''}>تازه‌ترین</option><option value="oldest" ${cleanupUi.sort === 'oldest' ? 'selected' : ''}>قدیمی‌ترین</option><option value="turns" ${cleanupUi.sort === 'turns' ? 'selected' : ''}>بیشترین دور</option><option value="size" ${cleanupUi.sort === 'size' ? 'selected' : ''}>بزرگ‌ترین</option></select></div>
+        <div class="history-list-head"><strong>موارد ذخیره‌شده</strong><span id="historyResultCount"></span></div><div id="historyResults" class="history-results"></div><div id="historyStatus" class="cleanup-status" role="status">${esc(historyNotice)}</div>
+      </section>
+      <section class="cleanup-pane" data-cleanup-pane="cleanup" ${cleanupTab === 'cleanup' ? '' : 'hidden'}>
+        <section class="retention-card"><div class="retention-card-copy"><span class="cleanup-section-kicker">AUTOMATIC RETENTION</span><h3>نگهداری خودکار هنگام شروع برنامه</h3><p>این تنظیم فقط سیاست اجرای بعدی را ذخیره می‌کند؛ با زدن ذخیره چیزی همان لحظه پاک نمی‌شود.</p></div><div class="retention-control"><label class="ui-switch"><input id="retentionAuto" type="checkbox" ${config.retention?.auto_prune_on_boot !== false && Number(config.retention?.days ?? 7) > 0 ? 'checked' : ''}><span class="ui-slider"></span></label><span>فعال</span></div><div class="retention-days"><label for="retentionDays">مدت نگهداری</label><div><input id="retentionDays" type="number" min="0" max="3650" value="${Number(config.retention?.days ?? 7)}"><span>روز</span></div><small>۰ یعنی پاکسازی خودکار خاموش؛ نشست‌ها و آمار قدیمی‌تر از این مدت در شروع بعدی حذف می‌شوند.</small></div><div class="retention-actions"><button class="btn" type="button" onclick="ABSettingsPage.saveRetention()">ذخیرهٔ سیاست نگهداری</button><span id="retentionStatus" class="muted" role="status"></span></div></section>
+        <section class="manual-cleanup-card"><div class="manual-cleanup-head"><div><span class="cleanup-section-kicker">MANUAL CLEANUP</span><h3>پاکسازی دستیِ انتخابی</h3><p>انتخاب دسته و بازه؛ اول پیش‌نمایش می‌گیری، بعد جداگانه حذف را تأیید می‌کنی.</p></div><span class="safe-badge">تنظیمات و کلیدها محفوظ‌اند</span></div>
+          <div class="cleanup-range"><div><strong>حذف موارد قدیمی‌تر از</strong><small id="cleanupRangeHint">${cleanupUi.days === 0 ? 'تمام تاریخچهٔ دسته‌های انتخاب‌شده' : `${cleanupUi.days} روز`} · بازه روی X-Ray اعمال نمی‌شود</small></div><div class="cleanup-range-picks">${[[1,'۲۴ ساعت'],[7,'۷ روز'],[30,'۳۰ روز'],[90,'۹۰ روز'],[0,'همه']].map(([days,label]) => `<button type="button" data-cleanup-days="${days}" class="${cleanupUi.days === days ? 'active' : ''}" onclick="ABSettingsPage.setCleanupRange(${days})">${label}</button>`).join('')}<label class="cleanup-custom-days"><input id="cleanupDays" type="number" min="0" max="3650" value="${cleanupUi.days}" oninput="ABSettingsPage.setCleanupDays(this.value)" aria-label="روز دلخواه"><span>روز دلخواه</span></label></div></div>
+          <div class="cleanup-scope-grid">${[
+            ['telemetry','آمار درخواست‌ها','رکوردهای توکن، زمان و هزینه؛ متن گفتگو حذف نمی‌شود.','chart'],
+            ['lab','نشست‌های Lab','نشست‌ها و پیام‌های ذخیره‌شدهٔ Lab در بازهٔ انتخابی.','lab'],
+            ['mirrors','تاریخچهٔ ترمینال','فقط آینه‌های غیرفعال؛ کانال زنده محافظت می‌شود.','mirror'],
+            ['xray','قاب‌های X-Ray','حافظهٔ موقت همین اجرای برنامه؛ با انتخاب این مورد همهٔ قاب‌ها پاک می‌شوند.','xray']
+          ].map(([id,title,description,icon]) => `<label class="cleanup-scope-card ${id === 'xray' ? 'is-volatile' : ''}"><input type="checkbox" data-cleanup-scope="${id}" ${cleanupUi.scopes[id] ? 'checked' : ''} onchange="ABSettingsPage.setCleanupScope('${id}',this.checked)"><span class="cleanup-scope-icon ${icon}">${id === 'telemetry' ? '↗' : id === 'lab' ? '⚡' : id === 'mirrors' ? '⌘' : '◉'}</span><span class="cleanup-scope-text"><strong>${title}</strong><small>${description}</small></span><span class="cleanup-scope-check">✓</span></label>`).join('')}</div>
+          <div class="cleanup-actions"><button class="btn primary" type="button" onclick="ABSettingsPage.previewCleanup()">پیش‌نمایش موارد منطبق</button><span id="cleanupStatus" class="cleanup-status" role="status">${esc(cleanupNotice || 'هنوز چیزی حذف نشده؛ برای شروع پیش‌نمایش بگیر.')}</span></div>
+          <div id="cleanupPreview" class="cleanup-preview-card" ${cleanupPreviewData && cleanupPreviewKey === cleanupKey(cleanupUi.days, selectedCleanupScopes()) ? '' : 'hidden'}>${cleanupPreviewData ? cleanupPreviewMarkup(cleanupPreviewData) : ''}</div>
+        </section>
+      </section>
+      <div id="historyDeleteDialog" class="cleanup-modal" hidden role="dialog" aria-modal="true" aria-labelledby="historyDeleteTitle"><div class="cleanup-modal-card"><span class="cleanup-modal-icon">!</span><h3 id="historyDeleteTitle">حذف این تاریخچه؟</h3><p id="historyDeleteMessage"></p><div class="cleanup-modal-actions"><button class="btn ghost" type="button" onclick="ABSettingsPage.cancelHistoryDelete()">انصراف</button><button id="confirmHistoryDeleteButton" class="btn danger" type="button" onclick="ABSettingsPage.confirmHistoryDelete()">حذف همین مورد</button></div></div></div>
+      <div id="cleanupConfirmDialog" class="cleanup-modal" hidden role="dialog" aria-modal="true" aria-labelledby="cleanupConfirmTitle"><div class="cleanup-modal-card"><span class="cleanup-modal-icon">!</span><h3 id="cleanupConfirmTitle">تأیید پاکسازی</h3><p id="cleanupConfirmSummary"></p><small id="cleanupConfirmCaution">این عملیات قابل‌بازگشت نیست.</small><div class="cleanup-modal-actions"><button class="btn ghost" type="button" onclick="ABSettingsPage.cancelCleanupRun()">برگشت و بازبینی</button><button id="cleanupConfirmButton" class="btn danger" type="button" onclick="ABSettingsPage.confirmCleanupRun()">بله، موارد پیش‌نمایش‌شده حذف شوند</button></div></div></div>
+    </div>`;
+    bindHistoryActions(host);
+    renderHistoryResults();
   }
 
   function toggleHelp(id) { $(id).classList.toggle('open'); }
@@ -632,15 +955,9 @@ Content-Type: application/json
       if (models.default_model) testModelConnection();
       if (models.default_mode === 'online' && models.active_account_id) $('sOnlineAccount').value = models.active_account_id;
       applyProviderDefaults();
-    } else {
-      host.innerHTML = `<div class="panel-wrap"><div class="panel rtl"><div class="panel-head"><h3>نگهداری و پاکسازی انتخابی داده</h3></div>
-        <p>داده‌های runtime در <code>.data/</code> هستند. حجم فعلی: <strong>${state.storage?.total_kib || 0} KiB</strong> · ${state.storage?.file_count || 0} فایل.</p>
-        <div class="field-grid"><div class="fld"><label>حفظ داده‌های چند روز اخیر (۰ = همه‌ی بازه)</label><input id="cleanupDays" type="number" min="0" max="3650" value="${c.retention.days || 7}"></div></div>
-        <div class="os-card" style="margin-top:14px">${[['telemetry','آمار توکن و هزینه'],['xray','بسته‌های X-Ray در حافظه'],['lab','چت‌های Lab'],['mirrors','تاریخچه‌ی آینه‌های غیرفعال']].map(([id,label])=>`<div class="os-row"><div class="os-row-top"><div class="os-title-wrap">${label}</div><label class="ui-switch"><input id="cleanup-${id}" type="checkbox" checked><span class="ui-slider"></span></label></div></div>`).join('')}</div>
-        <div class="field-grid" style="margin-top:14px"><button class="btn" onclick="ABSettingsPage.previewCleanup()">پیش‌نمایش: چه چیزی پاک می‌شود؟</button><button class="btn danger" onclick="ABSettingsPage.runSelectedCleanup()">حذف موارد انتخابی</button></div>
-        <div id="cleanupPreview" class="os-help-drawer open" style="margin-top:12px">انتخاب‌ها و بازه را مشخص کن، پیش‌نمایش بگیر و بعد حذف را تأیید کن.</div>
-        <details style="margin-top:16px"><summary>فهرست فایل‌های داده</summary><pre class="acc-body">${esc((state.storage?.files || []).map(f => `${f.path} · ${f.bytes} B`).join('\n'))}</pre></details></div></div>`;
+    } else if (route === 'set-retention') {
+      renderCleanupPage(host, state, c);
     }
   }
-  return { render, applyPreset, saveTranslation, testConnection, translateSettingsSample, addGlossaryRow, saveGlossary, saveUI, previewUI, cancelUIPreview, resetUIToDefaults, saveModel, testModelConnection, refreshProviderAccounts, applyProviderDefaults, saveModelAccount, editModelAccount, testOnlineAccount, discoverOnlineModels, deleteModelAccount, changeModelEncryption, clearData, previewCleanup, runSelectedCleanup, toggleHelp, syncConditional };
+  return { render, applyPreset, saveTranslation, testConnection, translateSettingsSample, addGlossaryRow, saveGlossary, saveUI, previewUI, cancelUIPreview, resetUIToDefaults, saveModel, testModelConnection, refreshProviderAccounts, applyProviderDefaults, saveModelAccount, editModelAccount, testOnlineAccount, discoverOnlineModels, deleteModelAccount, changeModelEncryption, previewCleanup, runSelectedCleanup, confirmCleanupRun, cancelCleanupRun, saveRetention, switchCleanupTab, setCleanupRange, setCleanupDays, setCleanupScope, filterHistory, cancelHistoryDelete, confirmHistoryDelete, toggleHelp, syncConditional };
 })();

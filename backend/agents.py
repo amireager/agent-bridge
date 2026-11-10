@@ -265,25 +265,46 @@ class BridgeHub:
             self.broadcast_state()
 
     def cleanup_preview(self, days: int, scopes: list[str]) -> dict:
-        cutoff = 0.0 if int(days) <= 0 else time.time() - int(days) * 86400.0
+        days = max(0, min(3650, int(days)))
+        cutoff = 0.0 if days <= 0 else time.time() - days * 86400.0
+        scopes = list(dict.fromkeys(x for x in scopes if x in ("telemetry", "lab", "mirrors", "xray")))
         items = []
-        xray_count = len(self._inspector_ring) if "xray" in scopes else 0
+        category_files = {"lab": 0, "mirrors": 0}
+        category_bytes = {"lab": 0, "mirrors": 0}
+        with self._lock:
+            xray_count = len(self._inspector_ring) if "xray" in scopes else 0
         base = self.store.data_dir
+        live_ids = {aid for aid, ts in self.pty_heartbeats.items() if time.time() - ts <= 25.0}
         for scope, folder in (("lab", self.store.sessions_dir / "lab"), ("mirrors", self.store.mirrors_dir)):
             if scope not in scopes:
                 continue
             for path in folder.glob("*.json"):
+                doc = {}
                 if scope == "mirrors":
                     try:
                         doc = json.loads(path.read_text(encoding="utf-8"))
-                        aid = str(doc.get("agent_id", path.stem))
-                        if time.time() - self.pty_heartbeats.get(aid, 0.0) <= 25.0:
-                            continue
                     except Exception:
-                        pass
+                        doc = {}
+                    aid = str(doc.get("agent_id", path.stem))
+                    if aid in live_ids or path.stem in live_ids:
+                        continue
+                else:
+                    doc = self.lab_sessions.get(path.stem, {})
                 try:
-                    if cutoff == 0 or path.stat().st_mtime < cutoff:
-                        items.append({"scope": scope, "path": str(path.relative_to(base)), "bytes": path.stat().st_size})
+                    stat = path.stat()
+                    if cutoff == 0 or stat.st_mtime < cutoff:
+                        item_id = str(doc.get("agent_id", path.stem)) if scope == "mirrors" else path.stem
+                        items.append({
+                            "scope": scope,
+                            "id": item_id,
+                            "title": str(doc.get("title", item_id)),
+                            "path": str(path.relative_to(base)),
+                            "bytes": stat.st_size,
+                            "updated_at": stat.st_mtime,
+                            "turn_count": len(doc.get("turns", [])) if isinstance(doc.get("turns", []), list) else 0,
+                        })
+                        category_files[scope] += 1
+                        category_bytes[scope] += stat.st_size
                 except OSError:
                     pass
         req_count = 0
@@ -291,8 +312,20 @@ class BridgeHub:
             with self.store._db_lock:
                 import sqlite3
                 with closing(sqlite3.connect(self.store.db_path)) as conn:
-                    req_count = int(conn.execute("SELECT COUNT(*) FROM llm_requests WHERE ts < ?", (cutoff or time.time()+1,)).fetchone()[0])
-        return {"days": int(days), "scopes": scopes, "telemetry_requests": req_count, "xray_frames": xray_count, "files": items, "file_count": len(items), "bytes": sum(x["bytes"] for x in items)}
+                    req_count = int(conn.execute("SELECT COUNT(*) FROM llm_requests WHERE ts < ?", (cutoff or time.time() + 1,)).fetchone()[0])
+        categories = {
+            "telemetry": {"items": req_count, "bytes": None, "unit": "درخواست"},
+            "xray": {"items": xray_count, "bytes": None, "unit": "قاب"},
+            "lab": {"items": category_files["lab"], "bytes": category_bytes["lab"], "unit": "نشست"},
+            "mirrors": {"items": category_files["mirrors"], "bytes": category_bytes["mirrors"], "unit": "تاریخچه"},
+        }
+        return {
+            "days": days, "scopes": scopes, "cutoff": cutoff,
+            "telemetry_requests": req_count, "xray_frames": xray_count,
+            "files": items, "file_count": len(items), "bytes": sum(x["bytes"] for x in items),
+            "categories": categories,
+            "total_items": req_count + xray_count + len(items),
+        }
 
     def run_cleanup(self, days: int, scopes: list[str]) -> dict:
         preview = self.cleanup_preview(days, scopes)
@@ -300,8 +333,9 @@ class BridgeHub:
         deleted_requests = 0
         deleted_xray = 0
         if "xray" in scopes:
-            deleted_xray = len(self._inspector_ring)
-            self._inspector_ring.clear()
+            with self._lock:
+                deleted_xray = len(self._inspector_ring)
+                self._inspector_ring.clear()
         db_size_before = self.store.db_path.stat().st_size if self.store.db_path.exists() else 0
         if "telemetry" in scopes:
             with self.store._db_lock:
@@ -316,6 +350,7 @@ class BridgeHub:
         deleted_files = 0
         freed_file_bytes = 0
         deleted_lab_ids = []
+        deleted_by_scope = {"lab": 0, "mirrors": 0}
         live_ids = {aid for aid, ts in self.pty_heartbeats.items() if time.time()-ts <= 25.0}
         for item in preview["files"]:
             path = self.store.data_dir / item["path"]
@@ -325,13 +360,14 @@ class BridgeHub:
                     self.lab_sessions.pop(sid, None)
                     deleted_lab_ids.append(sid)
                 elif item["scope"] == "mirrors":
-                    aid = path.stem
-                    if aid in live_ids:
+                    aid = str(item.get("id", path.stem))
+                    if aid in live_ids or path.stem in live_ids:
                         continue
                     self.mirrors.pop(aid, None)
                 item_bytes = path.stat().st_size if path.exists() else 0
                 path.unlink(missing_ok=True)
                 deleted_files += 1
+                deleted_by_scope[item["scope"]] += 1
                 freed_file_bytes += item_bytes
             except OSError:
                 pass
@@ -341,7 +377,16 @@ class BridgeHub:
             else:
                 self.view_kind, self.view_id = "mirror", ""
         self.broadcast_state()
-        return {"deleted_requests": deleted_requests, "deleted_files": deleted_files, "deleted_xray_frames": deleted_xray, "freed_bytes": freed_file_bytes + freed_db_bytes, "deleted_lab_sessions": len(deleted_lab_ids)}
+        return {
+            "deleted_requests": deleted_requests,
+            "deleted_files": deleted_files,
+            "deleted_xray_frames": deleted_xray,
+            "deleted_lab_sessions": len(deleted_lab_ids),
+            "deleted_by_scope": {"telemetry": deleted_requests, "xray": deleted_xray, **deleted_by_scope},
+            "freed_file_bytes": freed_file_bytes,
+            "freed_database_bytes": freed_db_bytes,
+            "freed_bytes": freed_file_bytes + freed_db_bytes,
+        }
 
     def clear_observed_history(self) -> dict:
         """Clear telemetry/X-Ray and mirror history; preserve only currently live PTY channels."""
@@ -1074,18 +1119,36 @@ class BridgeHub:
         mirrors_list = []
         history_list = []
         for aid, m in sorted(self.mirrors.items()):
+            safe = re.sub(r"[^a-zA-Z0-9_.-]", "-", aid) or "agent"
+            mirror_path = self.store.mirrors_dir / f"{safe}.json"
+            try:
+                mirror_bytes = mirror_path.stat().st_size
+            except OSError:
+                mirror_bytes = 0
             item = {
                 "agent_id": aid,
                 "title": m.get("title") or aid,
                 "turn_count": len(m.get("turns", [])),
+                "updated_at": float(m.get("updated_at", 0.0) or 0.0),
+                "bytes": mirror_bytes,
                 "pty_live": (now - self.pty_heartbeats.get(aid, 0.0)) < 25.0,
             }
             (mirrors_list if item["pty_live"] else history_list).append(item)
 
-        lab_list = [
-            {"id": s["id"], "title": s["title"], "turn_count": len(s.get("turns", []))}
-            for s in sorted(self.lab_sessions.values(), key=lambda x: x.get("updated_at", 0), reverse=True)
-        ]
+        lab_list = []
+        for sess in sorted(self.lab_sessions.values(), key=lambda x: x.get("updated_at", 0), reverse=True):
+            session_path = self.store.sessions_dir / "lab" / f"{sess['id']}.json"
+            try:
+                session_bytes = session_path.stat().st_size
+            except OSError:
+                session_bytes = 0
+            lab_list.append({
+                "id": sess["id"], "title": sess["title"],
+                "turn_count": len(sess.get("turns", [])),
+                "created_at": float(sess.get("created_at", 0.0) or 0.0),
+                "updated_at": float(sess.get("updated_at", 0.0) or 0.0),
+                "bytes": session_bytes,
+            })
 
         if self.view_kind == "lab":
             if self.view_id not in self.lab_sessions:
