@@ -3,7 +3,9 @@ window.ABApp = (() => {
   const { ICONS, esc, api } = window.ABUtils;
 
   let state = null;
+  let baseState = null;
   let route = 'chat';
+  const liveWireTurns = new Map();
   const openBranches = {
     mirrors: true,
     history: false,
@@ -376,8 +378,38 @@ window.ABApp = (() => {
     }
   }
 
+  function withLiveWireTurn(nextState) {
+    const now = Date.now();
+    for (const [key, item] of liveWireTurns) {
+      if (now - item.receivedAt > 120000) liveWireTurns.delete(key);
+    }
+    if (nextState?.view_kind !== 'mirror' || !nextState?.view_id) return nextState;
+    const overlays = [...liveWireTurns.values()].filter(item => item.agent_id === nextState.view_id);
+    if (!overlays.length) return nextState;
+    const active = nextState.active_conversation || { agent_id: nextState.view_id, turns: [] };
+    const turns = [...(active.turns || [])];
+    for (const item of overlays) {
+      if (!item.turn) continue;
+      const index = turns.findIndex(turn => turn.id === item.turn.id);
+      if (index >= 0) turns[index] = item.turn;
+      else turns.push(item.turn);
+    }
+    return { ...nextState, session_state: 'GENERATING', active_conversation: { ...active, turns } };
+  }
+
+  function applyWireProgress(message) {
+    const key = `${message.agent_id}:${message.stream_id}`;
+    if (message.turn) liveWireTurns.set(key, { ...message, receivedAt: Date.now() });
+    else liveWireTurns.delete(key);
+    if (!baseState || baseState.view_kind !== 'mirror' || baseState.view_id !== message.agent_id) return;
+    state = withLiveWireTurn(baseState);
+    renderHudBar();
+    renderMainPage(false);
+  }
+
   function applyState(nextState, isFirst = false) {
-    state = nextState;
+    baseState = nextState;
+    state = withLiveWireTurn(nextState);
     applySidebarWidth(state?.config?.ui?.sidebar_width);
     renderVaultGate();
     renderHudBar();
@@ -394,6 +426,7 @@ window.ABApp = (() => {
         try {
           const msg = JSON.parse(ev.data);
           if (msg.kind === 'state') applyState(msg.state, false);
+          else if (msg.kind === 'wire_progress') applyWireProgress(msg);
         } catch (_) {}
       };
       es.onerror = () => { es.close(); setTimeout(connect, 2500); };

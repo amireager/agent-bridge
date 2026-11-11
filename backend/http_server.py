@@ -3,10 +3,13 @@
 
 from __future__ import annotations
 
+import copy
 import json
 import mimetypes
+import os
 import queue
 import time
+import uuid
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -19,6 +22,127 @@ from .model_accounts import PROVIDERS, discover_models, test_model
 from .translator import LOOPBACK_OPENER, test_translator_connection, translate_prose
 
 FRONTEND_DIR = Path(__file__).resolve().parent.parent / "frontend"
+
+
+def _write_wire_trace(event: str, agent_id: str, payload: dict, headers=None, **extra) -> None:
+    """Opt-in, redacted protocol trace for local diagnosis; never records API key values."""
+    target = os.environ.get("AGENT_BRIDGE_TRACE", "").strip()
+    if not target:
+        return
+    safe_headers = {}
+    if headers is not None:
+        for key, value in headers.items():
+            low = key.lower()
+            if low == "user-agent" or low == "x-agent-name" or any(
+                marker in low for marker in ("session", "request-id", "thread", "conversation", "trace")
+            ):
+                safe_headers[low] = str(value)[:300]
+        auth = headers.get("Authorization", "")
+        if auth:
+            safe_headers["authorization"] = {
+                "present": True,
+                "scheme": auth.split(None, 1)[0] if auth.split() else "",
+                "agent_tag": auth.split("agent:", 1)[1].split()[0] if "agent:" in auth else "",
+            }
+    message_rows = []
+    for message in payload.get("messages", []) if isinstance(payload.get("messages"), list) else []:
+        content = message.get("content", "") if isinstance(message, dict) else ""
+        if isinstance(content, str):
+            preview = content[:180]
+            content_chars = len(content)
+        elif isinstance(content, list):
+            texts = [str(part.get("text", "")) for part in content if isinstance(part, dict) and part.get("type") == "text"]
+            preview = " ".join(texts)[:180]
+            content_chars = sum(map(len, texts))
+        else:
+            preview, content_chars = "", 0
+        calls = []
+        for call in message.get("tool_calls", []) if isinstance(message, dict) else []:
+            function = call.get("function", {}) if isinstance(call, dict) else {}
+            calls.append({"id": call.get("id", ""), "name": function.get("name", "")})
+        message_rows.append({
+            "role": message.get("role", "") if isinstance(message, dict) else "",
+            "content_chars": content_chars,
+            "content_preview": preview,
+            "tool_calls": calls,
+            "tool_call_id": message.get("tool_call_id", "") if isinstance(message, dict) else "",
+        })
+    safe_payload = {
+        "model": payload.get("model", ""),
+        "stream": bool(payload.get("stream", False)),
+        "payload_keys": sorted(str(key) for key in payload.keys()),
+        "messages": message_rows,
+    }
+    row = {"ts": time.time(), "event": event, "agent_id": agent_id, "headers": safe_headers,
+           "request": safe_payload, **extra}
+    try:
+        path = Path(target).expanduser()
+        path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        fd = os.open(path, os.O_CREAT | os.O_APPEND | os.O_WRONLY, 0o600)
+        try:
+            os.write(fd, (json.dumps(row, ensure_ascii=False) + "\n").encode("utf-8"))
+        finally:
+            os.close(fd)
+    except OSError:
+        pass
+
+
+def _wire_text(content) -> str:
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return " ".join(str(item.get("text", "")) for item in content
+                        if isinstance(item, dict) and item.get("type") == "text")
+    return ""
+
+
+def _wire_progress_turn(hub: BridgeHub, agent_id: str, model: str, messages: list[dict],
+                        content: str, reasoning: str, tool_map: dict[int, dict], stream_id: str) -> dict | None:
+    """Build an ephemeral, unpersisted turn for the chat UI while an SSE reply is in flight."""
+    last_user = ""
+    outputs = {}
+    for message in messages:
+        if not isinstance(message, dict):
+            continue
+        role = message.get("role")
+        if role == "user":
+            last_user = _wire_text(message.get("content", "")).strip()
+        elif role == "tool" and message.get("tool_call_id"):
+            outputs[str(message["tool_call_id"])] = _wire_text(message.get("content", ""))
+    internal = last_user.lstrip()
+    if internal.startswith("<title-request>") or (
+        internal.startswith("<system-reminder>") and "Ephemeral side-channel turn;" in internal[:180]
+    ):
+        return None
+
+    streamed_tools = []
+    for idx in sorted(tool_map):
+        item = tool_map[idx]
+        try:
+            args = json.loads(item["args_raw"]) if item.get("args_raw") else {}
+        except (TypeError, ValueError):
+            args = item.get("args_raw", "")
+        tool_id = item.get("id") or f"tc-{idx}"
+        output = outputs.get(tool_id, "")
+        streamed_tools.append({
+            "id": tool_id, "name": item.get("name") or "tool", "args": args,
+            "output": output, "status": "done" if output else "running", "is_error": False,
+        })
+
+    return {
+        "id": stream_id, "agent": agent_id, "model": model, "source": "tty",
+        "ts": time.strftime("%H:%M:%S"), "ts_epoch": time.time(),
+        "user_raw": last_user, "prompt_sent": last_user, "saved_fa_tokens": 0,
+        "kv_status": "cold", "thinking": reasoning, "thinking_fa": "", "think_blocks": [],
+        "steps": [{
+            "index": 1, "thinking": reasoning, "tools": copy.deepcopy(streamed_tools),
+            "reply_en": content, "status": "streaming",
+        }],
+        "tools": streamed_tools, "reply_en": content, "reply_fa": "", "blocks": [],
+        "tr_engine": "streaming", "status": "streaming", "elapsed_s": 0.0,
+        "metrics": {"uncached_in": 0, "cached_in": 0, "out_tok": 0, "tg_tps": 0.0},
+    }
+
 
 MIME_OVERRIDES = {
     ".js": "application/javascript; charset=utf-8",
@@ -508,6 +632,8 @@ def make_handler(hub: BridgeHub):
                 payload = {}
 
             agent_name = self._detect_agent_tag(payload)
+            trace_id = uuid.uuid4().hex
+            _write_wire_trace("request", agent_name, payload, self.headers, trace_id=trace_id)
             is_stream = bool(payload.get("stream", False))
             if is_stream:
                 payload.setdefault("stream_options", {})["include_usage"] = True
@@ -583,6 +709,9 @@ def make_handler(hub: BridgeHub):
             acc_reasoning: list[str] = []
             stream_tool_map: dict[int, dict] = {}
             acc_tools: list[dict] = []
+            stream_id = uuid.uuid4().hex
+            last_progress_emit = 0.0
+            stream_progress_sent = False
 
             if is_stream:
                 self.send_response(resp.status)
@@ -604,12 +733,15 @@ def make_handler(hub: BridgeHub):
                                     timings = chunk["timings"]
                                 if chunk.get("usage"):
                                     usage_obj = chunk["usage"]
+                                progress_dirty = False
                                 for ch in chunk.get("choices", []):
                                     d = ch.get("delta", {})
                                     if d.get("content"):
                                         acc_content.append(d["content"])
+                                        progress_dirty = True
                                     if d.get("reasoning_content"):
                                         acc_reasoning.append(d["reasoning_content"])
+                                        progress_dirty = True
                                     for tcd in d.get("tool_calls", []) or []:
                                         idx = int(tcd.get("index", 0))
                                         entry = stream_tool_map.setdefault(
@@ -622,6 +754,20 @@ def make_handler(hub: BridgeHub):
                                             entry["name"] += fn["name"]
                                         if fn.get("arguments"):
                                             entry["args_raw"] += fn["arguments"]
+                                        progress_dirty = True
+                                now = time.monotonic()
+                                if progress_dirty and (not stream_progress_sent or now - last_progress_emit >= 0.12):
+                                    progress_turn = _wire_progress_turn(
+                                        hub, agent_name, model_used, msgs, "".join(acc_content),
+                                        "".join(acc_reasoning), stream_tool_map, stream_id,
+                                    )
+                                    if progress_turn is not None:
+                                        hub.emit_event("wire_progress", {
+                                            "agent_id": agent_name, "stream_id": stream_id,
+                                            "turn": progress_turn,
+                                        })
+                                        stream_progress_sent = True
+                                        last_progress_emit = now
                             except Exception:
                                 pass
                 except (BrokenPipeError, ConnectionResetError, OSError):
@@ -771,6 +917,17 @@ def make_handler(hub: BridgeHub):
                 metrics=turn_metrics,
                 kv_status=kv_status,
                 elapsed_s=elapsed_s,
+            )
+            if stream_progress_sent:
+                hub.emit_event("wire_progress", {
+                    "agent_id": agent_name, "stream_id": stream_id, "turn": None,
+                })
+            _write_wire_trace(
+                "response", agent_name, payload, self.headers, trace_id=trace_id,
+                elapsed_ms=round(elapsed_s * 1000, 1),
+                reply_chars=sum(len(x) for x in acc_content),
+                reasoning_chars=sum(len(x) for x in acc_reasoning),
+                tool_calls=[{"id": t.get("id"), "name": t.get("name"), "args": t.get("args")} for t in acc_tools],
             )
 
             hub.push_inspector(

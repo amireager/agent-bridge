@@ -692,6 +692,16 @@ class BridgeHub:
                 if tcid:
                     tool_outputs_by_id[tcid] = _extract_msg_text(m.get("content", ""))
 
+        # OMP makes separate OpenAI-compatible requests for internal side-channel and
+        # title generation turns inside one PTY/session. They are not user conversations.
+        internal_prompt = last_user_txt.lstrip()
+        if internal_prompt.startswith("<title-request>") or (
+            internal_prompt.startswith("<system-reminder>")
+            and "Ephemeral side-channel turn;" in internal_prompt[:180]
+        ):
+            self.agent_activity[agent_name] = {"status": "IDLE", "started_at": 0}
+            return
+
         clean_reply = raw_reply
         extracted_think = reasoning_text or ""
         m_th = THINK_TAG_RE.search(clean_reply)
@@ -707,10 +717,13 @@ class BridgeHub:
 
         # Archive prior web context when pi switches session; never overwrite historical mirror data.
         conv_fp = hashlib.sha1(first_user_txt.encode("utf-8")).hexdigest()[:12] if first_user_txt else "init"
-        anchor_changed = bool(mirror.get("first_assistant_fp") and first_assistant_anchor and
-                              mirror["first_assistant_fp"] != first_assistant_anchor)
         count_rolled_back = int(mirror.get("wire_message_count", 0)) > 4 and len(messages) <= 2
-        session_changed = bool(mirror.get("conv_fp") and mirror.get("conv_fp") != conv_fp) or anchor_changed or count_rolled_back
+        # Assistant content/anchors can legitimately change between OMP's primary
+        # response and its side-channel/title requests; that alone is not a new session.
+        # A single PTY can issue multiple short requests (OMP title/side-channel
+        # calls and fresh prompts). Keep them in its one mirror; only a strong
+        # message-count rollback signals an in-session reset worth archiving.
+        session_changed = count_rolled_back
         prior_turns = messages[:last_user_index] if last_user_index >= 0 else messages
         if session_changed:
             if mirror.get("turns"):

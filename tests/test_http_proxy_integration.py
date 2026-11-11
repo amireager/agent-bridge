@@ -3,6 +3,7 @@
 This validates bridge plumbing, not model quality; real llama-server testing is separate.
 """
 import json
+import os
 import sqlite3
 import threading
 from contextlib import closing
@@ -12,9 +13,10 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from unittest.mock import patch
 
 from backend.agents import BridgeHub
-from backend.http_server import run_http_server
+from backend.http_server import _write_wire_trace, run_http_server
 from backend.store import DataStore
 
 
@@ -139,6 +141,117 @@ class HttpProxyIntegrationTests(unittest.TestCase):
                 hub.shutdown()
             upstream.shutdown()
             upstream.server_close()
+
+    def test_streaming_tool_progress_is_broadcast_before_upstream_finishes(self):
+        class StreamingToolStub(BaseHTTPRequestHandler):
+            def do_POST(self):
+                size = int(self.headers.get("Content-Length", "0"))
+                json.loads(self.rfile.read(size))
+                self.send_response(200)
+                self.send_header("Content-Type", "text/event-stream")
+                self.send_header("Connection", "close")
+                self.end_headers()
+                chunks = [
+                    {"choices": [{"index": 0, "delta": {"tool_calls": [{
+                        "index": 0, "id": "call-stream-1", "type": "function",
+                        "function": {"name": "mystery_search", "arguments": "{"},
+                    }]}, "finish_reason": None}]},
+                    {"choices": [{"index": 0, "delta": {"tool_calls": [{
+                        "index": 0, "function": {"arguments": "}"},
+                    }]}, "finish_reason": "tool_calls"}]},
+                ]
+                for chunk in chunks:
+                    self.wfile.write(("data: " + json.dumps(chunk) + "\n\n").encode())
+                    self.wfile.flush()
+                    time.sleep(0.35)
+                self.wfile.write(b"data: [DONE]\n\n")
+                self.wfile.flush()
+                self.server.response_finished_at = time.monotonic()
+
+            def log_message(self, *_args):
+                pass
+
+        upstream = ThreadingHTTPServer(("127.0.0.1", 0), StreamingToolStub)
+        upstream.response_finished_at = None
+        threading.Thread(target=upstream.serve_forever, daemon=True).start()
+        server = None
+        hub = None
+        try:
+            with TemporaryDirectory() as temp_dir:
+                hub = BridgeHub(DataStore(Path(temp_dir) / ".data"), 0)
+                hub.config["tap"]["upstream_url"] = f"http://127.0.0.1:{upstream.server_port}"
+                hub.config["translation"]["enabled"] = False
+                hub.mirrors["omp-stream"] = hub._new_mirror_obj("omp-stream")
+                events = []
+                emit = hub.emit_event
+
+                def capture(kind, payload):
+                    events.append((kind, payload, time.monotonic()))
+                    emit(kind, payload)
+
+                hub.emit_event = capture
+                server = run_http_server(hub, "127.0.0.1", 0)
+                threading.Thread(target=server.serve_forever, daemon=True).start()
+                payload = {
+                    "model": "local-stub", "stream": True,
+                    "messages": [{"role": "user", "content": "search local test"}],
+                }
+                request = urllib.request.Request(
+                    f"http://127.0.0.1:{server.server_address[1]}/v1/chat/completions",
+                    data=json.dumps(payload).encode(),
+                    headers={
+                        "Content-Type": "application/json",
+                        "Authorization": "Bearer agent:omp-stream",
+                    },
+                    method="POST",
+                )
+                with urllib.request.urlopen(request, timeout=5) as response:
+                    body = response.read().decode()
+                progress = next(
+                    (item for item in events if item[0] == "wire_progress" and item[1].get("turn")),
+                    None,
+                )
+                self.assertIsNotNone(progress)
+                self.assertIsNotNone(upstream.response_finished_at)
+                self.assertLess(progress[2], upstream.response_finished_at)
+                tool = progress[1]["turn"]["tools"][0]
+                self.assertEqual(tool["name"], "mystery_search")
+                self.assertEqual(tool["status"], "running")
+                self.assertIn("mystery_search", body)
+                self.assertTrue(any(kind == "wire_progress" and item.get("turn") is None
+                                    for kind, item, _ in events))
+        finally:
+            if server:
+                server.shutdown()
+                server.server_close()
+            if hub:
+                hub.shutdown()
+            upstream.shutdown()
+            upstream.server_close()
+
+    def test_opt_in_wire_trace_is_private_and_redacts_credentials(self):
+        with TemporaryDirectory() as temp_dir:
+            trace = Path(temp_dir) / "wire.jsonl"
+            payload = {
+                "model": "local-stub",
+                "stream": True,
+                "messages": [{"role": "user", "content": "trace sample"}],
+            }
+            headers = {
+                "Authorization": "Bearer do-not-log-this-secret",
+                "X-Session-ID": "omp-session-123",
+                "User-Agent": "omp-test/1",
+            }
+            with patch.dict(os.environ, {"AGENT_BRIDGE_TRACE": str(trace)}):
+                _write_wire_trace("request", "omp-2", payload, headers, trace_id="req-1")
+            content = trace.read_text(encoding="utf-8")
+            row = json.loads(content)
+            self.assertEqual(row["agent_id"], "omp-2")
+            self.assertEqual(row["headers"]["x-session-id"], "omp-session-123")
+            self.assertEqual(row["headers"]["authorization"]["scheme"], "Bearer")
+            self.assertNotIn("do-not-log-this-secret", content)
+            self.assertEqual(row["request"]["messages"][0]["content_preview"], "trace sample")
+            self.assertEqual(trace.stat().st_mode & 0o777, 0o600)
 
 
 if __name__ == "__main__":

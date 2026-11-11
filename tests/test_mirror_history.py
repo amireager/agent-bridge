@@ -1,7 +1,10 @@
 import unittest
+from pathlib import Path
+from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
 from backend.agents import BridgeHub, _wire_assistant_anchor
+from backend.store import DataStore
 
 
 class MirrorHistoryTests(unittest.TestCase):
@@ -39,6 +42,69 @@ class MirrorHistoryTests(unittest.TestCase):
         a = _wire_assistant_anchor("", [{"id": "1", "function": {"name": "read", "arguments": "{}"}}])
         b = _wire_assistant_anchor("", [{"id": "2", "function": {"name": "read", "arguments": "{}"}}])
         self.assertNotEqual(a, b)
+
+    def test_omp_internal_title_and_sidechannel_calls_do_not_split_mirror_history(self):
+        with TemporaryDirectory() as temp_dir:
+            hub = BridgeHub(DataStore(Path(temp_dir) / ".data"), 0)
+            hub.config["translation"]["enabled"] = False
+            try:
+                first_user = "<system-reminder>context</system-reminder> Reply exactly: OK"
+                first_messages = [
+                    {"role": "system", "content": "You are concise."},
+                    {"role": "user", "content": first_user},
+                ]
+                hub.record_passive_wire_turn(
+                    agent_name="omp-1", model_name="local", messages=first_messages,
+                    raw_reply="OK", reasoning_text="", tool_calls=[], metrics={},
+                    kv_status="cold", elapsed_s=1.0,
+                )
+                second_messages = [
+                    *first_messages,
+                    {"role": "assistant", "content": "OK, with a rewritten anchor."},
+                    {"role": "user", "content": "<system-reminder>\\nEphemeral side-channel turn; reuses current conversation context."},
+                    {"role": "user", "content": "<title-request>name the session</title-request>"},
+                ]
+                hub.record_passive_wire_turn(
+                    agent_name="omp-1", model_name="local", messages=second_messages,
+                    raw_reply="<title emoji=\\\"🧪\\\" code=\\\"TEST\\\">Smoke test</title>",
+                    reasoning_text="", tool_calls=[], metrics={}, kv_status="warm", elapsed_s=0.2,
+                )
+                self.assertEqual(list(hub.mirrors), ["omp-1"])
+                self.assertEqual(len(hub.mirrors["omp-1"]["turns"]), 1)
+                self.assertEqual(hub.mirrors["omp-1"]["turns"][0]["reply_en"], "OK")
+            finally:
+                hub.shutdown()
+
+    def test_assistant_anchor_rewrite_does_not_archive_an_active_session(self):
+        with TemporaryDirectory() as temp_dir:
+            hub = BridgeHub(DataStore(Path(temp_dir) / ".data"), 0)
+            hub.config["translation"]["enabled"] = False
+            try:
+                first_messages = [
+                    {"role": "system", "content": "system"},
+                    {"role": "user", "content": "first user prompt"},
+                ]
+                hub.record_passive_wire_turn(
+                    agent_name="omp-2", model_name="local", messages=first_messages,
+                    raw_reply="initial short reply", reasoning_text="", tool_calls=[], metrics={},
+                    kv_status="cold", elapsed_s=0.1,
+                )
+                # A fresh short request in the same PTY may have a different first
+                # user/assistant anchor but still belongs to this mirror channel.
+                next_messages = [
+                    {"role": "system", "content": "system"},
+                    {"role": "user", "content": "second user prompt"},
+                ]
+                hub.record_passive_wire_turn(
+                    agent_name="omp-2", model_name="local", messages=next_messages,
+                    raw_reply="second reply", reasoning_text="", tool_calls=[], metrics={},
+                    kv_status="warm", elapsed_s=0.1,
+                )
+                self.assertEqual(list(hub.mirrors), ["omp-2"])
+                self.assertEqual(len(hub.mirrors["omp-2"]["turns"]), 2)
+                self.assertEqual(hub.mirrors["omp-2"]["turns"][-1]["user_raw"], "second user prompt")
+            finally:
+                hub.shutdown()
 
     def test_fresh_pty_does_not_reuse_retained_history_name(self):
         self.hub.mirrors = {"pi": {"turns": [{"id": "old"}]}}
