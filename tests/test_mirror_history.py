@@ -1,3 +1,4 @@
+import time
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -103,6 +104,22 @@ class MirrorHistoryTests(unittest.TestCase):
                 self.assertEqual(list(hub.mirrors), ["omp-2"])
                 self.assertEqual(len(hub.mirrors["omp-2"]["turns"]), 2)
                 self.assertEqual(hub.mirrors["omp-2"]["turns"][-1]["user_raw"], "second user prompt")
+            finally:
+                hub.shutdown()
+
+    def test_live_mirror_snapshot_exposes_busy_activity_for_control_room(self):
+        with TemporaryDirectory() as temp_dir:
+            hub = BridgeHub(DataStore(Path(temp_dir) / ".data"), 0)
+            try:
+                hub.mirrors["omp"] = hub._new_mirror_obj("omp")
+                hub.pty_heartbeats["omp"] = time.time()
+                hub.agent_activity["omp"] = {"status": "GENERATING", "started_at": 1}
+                with patch("backend.agents.probe_upstream_passive", return_value={"online": False, "available_models": []}):
+                    with patch("backend.agents.probe_translator_health", return_value=True):
+                        snapshot = hub.build_state_snapshot()
+                item = next(mirror for mirror in snapshot["mirrors"] if mirror["agent_id"] == "omp")
+                self.assertTrue(item["pty_live"])
+                self.assertEqual(item["activity"], "GENERATING")
             finally:
                 hub.shutdown()
 

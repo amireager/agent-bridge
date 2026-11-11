@@ -1224,6 +1224,7 @@ class BridgeHub:
                 "updated_at": float(m.get("updated_at", 0.0) or 0.0),
                 "bytes": mirror_bytes,
                 "pty_live": pty_live,
+                "activity": self.agent_activity.get(aid, {}).get("status", "IDLE"),
                 "archived": bool(m.get("archived", False)),
             }
             (mirrors_list if pty_live and not item["archived"] else history_list).append(item)

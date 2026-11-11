@@ -39,6 +39,7 @@ def probe_upstream_passive(upstream_url: str) -> dict:
     upstream = upstream_url.rstrip("/")
     online = False
     detected_model = "listening..."
+    available_models: list[str] = []
     server_ctx = 0
     slots_info: list[dict] = []
 
@@ -47,8 +48,14 @@ def probe_upstream_passive(upstream_url: str) -> dict:
             obj = json.loads(r.read().decode("utf-8"))
             online = True
             items = obj.get("data", [])
-            if items:
-                detected_model = Path(items[0].get("id", "model")).name
+            if isinstance(items, list):
+                available_models = [
+                    str(item.get("id", "")).strip()
+                    for item in items
+                    if isinstance(item, dict) and str(item.get("id", "")).strip()
+                ]
+            if available_models:
+                detected_model = Path(available_models[0]).name
     except Exception:
         pass
 
@@ -107,6 +114,7 @@ def probe_upstream_passive(upstream_url: str) -> dict:
     return {
         "online": online,
         "detected_model": detected_model,
+        "available_models": available_models,
         "server_ctx": server_ctx,
         "slots": slots_info,
         "slot_count": len(slots_info) or 1,

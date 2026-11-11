@@ -4,14 +4,14 @@ window.ABApp = (() => {
 
   let state = null;
   let baseState = null;
-  let route = 'chat';
+  let route = 'home';
   const liveWireTurns = new Map();
   const openBranches = {
-    mirrors: true,
+    mirrors: false,
     history: false,
-    lab: true,
-    usage: true,
-    settings: true
+    lab: false,
+    usage: false,
+    settings: false
   };
 
   function getState() { return state; }
@@ -136,30 +136,42 @@ window.ABApp = (() => {
     const sidebar = document.getElementById('sidebar');
     if (!handle || !shell || !sidebar || handle.dataset.bound) return;
     handle.dataset.bound = 'true';
-    handle.addEventListener('pointerdown', event => {
-      if (event.button !== 0) return;
-      event.preventDefault();
-      const side = state?.config?.ui?.sidebar_side || 'left';
-      sidebar.classList.remove('collapsed');
-      sidebarDrag = { pointerId: event.pointerId, x: event.clientX, width: sidebar.getBoundingClientRect().width, side };
-      shell.classList.add('is-resizing');
-      handle.setPointerCapture?.(event.pointerId);
-    });
-    handle.addEventListener('pointermove', event => {
+
+    const move = event => {
       if (!sidebarDrag || sidebarDrag.pointerId !== event.pointerId) return;
       const delta = event.clientX - sidebarDrag.x;
       const width = sidebarDrag.width + (sidebarDrag.side === 'right' ? -delta : delta);
-      shell.style.setProperty('--sidebar-width', `${clampSidebarWidth(width)}px`);
-    });
+      const clamped = clampSidebarWidth(width);
+      shell.style.setProperty('--sidebar-width', `${clamped}px`);
+      handle.setAttribute('aria-valuenow', String(clamped));
+    };
     const finish = event => {
       if (!sidebarDrag || (event?.pointerId != null && sidebarDrag.pointerId !== event.pointerId)) return;
       const width = sidebar.getBoundingClientRect().width;
       sidebarDrag = null;
       shell.classList.remove('is-resizing');
+      window.removeEventListener('pointermove', move);
+      window.removeEventListener('pointerup', finish);
+      window.removeEventListener('pointercancel', finish);
       saveSidebarWidth(width);
     };
-    handle.addEventListener('pointerup', finish);
-    handle.addEventListener('pointercancel', finish);
+
+    handle.addEventListener('pointerdown', event => {
+      if (event.button !== 0) return;
+      event.preventDefault();
+      event.stopPropagation();
+      const side = state?.config?.ui?.sidebar_side || 'left';
+      sidebar.classList.remove('collapsed');
+      const width = sidebar.getBoundingClientRect().width;
+      sidebarDrag = { pointerId: event.pointerId, x: event.clientX, width, side };
+      shell.classList.add('is-resizing');
+      handle.setAttribute('aria-valuenow', String(Math.round(width)));
+      window.addEventListener('pointermove', move);
+      window.addEventListener('pointerup', finish);
+      window.addEventListener('pointercancel', finish);
+      try { handle.setPointerCapture(event.pointerId); } catch (_) {}
+    });
+    handle.addEventListener('lostpointercapture', finish);
     handle.addEventListener('keydown', event => {
       if (!['ArrowLeft', 'ArrowRight'].includes(event.key)) return;
       event.preventDefault();
@@ -169,6 +181,7 @@ window.ABApp = (() => {
       const current = sidebar.getBoundingClientRect().width;
       const width = clampSidebarWidth(current + (grow ? 16 : -16) * (event.shiftKey ? 2 : 1));
       shell.style.setProperty('--sidebar-width', `${width}px`);
+      handle.setAttribute('aria-valuenow', String(width));
       saveSidebarWidth(width);
     });
   }
@@ -222,21 +235,21 @@ window.ABApp = (() => {
 
     const mkRoot = (key, icon, title, bodyHtml, extraAction = '') => `
       <div class="tree-group">
-        <div class="tree-root-btn" onclick="ABApp.toggleBranch('${key}')">
-          <span style="display:flex;align-items:center;gap:7px;">${icon}<span class="hide-collapsed">${title}</span></span>
-          <span class="hide-collapsed" style="display:flex;align-items:center;gap:6px;">
-            ${extraAction}
-            ${openBranches[key] ? ICONS.chevronDown : ICONS.chevronRight}
-          </span>
+        <div class="tree-group-heading">
+          <button class="tree-root-btn" type="button" onclick="ABApp.toggleBranch('${key}')" aria-expanded="${openBranches[key] ? 'true' : 'false'}" aria-controls="tree-${key}">
+            <span class="tree-root-label"><span class="tree-emoji" aria-hidden="true">${icon}</span><span class="hide-collapsed">${title}</span></span>
+            <span class="tree-root-chevron hide-collapsed">${openBranches[key] ? ICONS.chevronDown : ICONS.chevronRight}</span>
+          </button>
+          ${extraAction ? `<div class="tree-group-tools hide-collapsed">${extraAction}</div>` : ''}
         </div>
-        <div class="tree-children hide-collapsed ${openBranches[key] ? 'open' : ''}">
+        <div id="tree-${key}" class="tree-children hide-collapsed ${openBranches[key] ? 'open' : ''}">
           ${bodyHtml}
         </div>
       </div>`;
 
     const mkLeaf = (rId, label, rightTag = '', tagCls = '') => `
-      <button class="tree-node ${route === rId ? 'active' : ''}" onclick="ABApp.navigate('${rId}')">
-        <span>· ${label}</span>
+      <button class="tree-node ${route === rId ? 'active' : ''}" onclick="ABApp.navigate('${rId}')" ${route === rId ? 'aria-current="page"' : ''}>
+        <span>${label}</span>
         ${rightTag ? `<span class="tiny-tag ${tagCls}">${rightTag}</span>` : ''}
       </button>`;
 
@@ -244,25 +257,26 @@ window.ABApp = (() => {
     const trOn = state.config.translation.enabled !== false;
 
     treeEl.innerHTML = [
-      mkRoot('mirrors', ICONS.terminal, 'ترمینال‌های زنده', mirrorHtml),
-      mkRoot('history', ICONS.clock || ICONS.terminal, 'تاریخچهٔ چت‌ها', historyHtml),
+      `<div class="sidebar-shortcuts">${mkLeaf('home', '🏠 داشبورد')}${mkLeaf('chat', '💬 گفتگو')}</div>`,
+      mkRoot('mirrors', '🔌', 'عامل‌های زنده', mirrorHtml),
+      mkRoot('history', '🕘', 'تاریخچهٔ مکالمه‌ها', historyHtml),
       mkRoot(
         'lab',
-        ICONS.cpu,
-        'تست مستقیم و ابزار (Lab)',
+        '🧪',
+        'آزمایش مدل و ابزار',
         labHtml,
-        `<span class="tiny-tag on" title="ساخت صفحه تست جدید" onclick="ABApp.createLabSession(event)">+ جدید</span>`
+        `<button class="tree-add-btn" type="button" title="ساخت نشست آزمایش جدید" onclick="ABApp.createLabSession(event)">＋ <span>جدید</span></button>`
       ),
-      mkRoot('usage', ICONS.chart, 'شکارچی کش و توکن‌ها',
+      mkRoot('usage', '📊', 'آمار و پایش',
         mkLeaf('usage-overview', 'داشبورد کش، اسلات‌ها و هزینه', `${kvPct}%`, 'on') +
-        mkLeaf('usage-agents', 'مقایسه مدل‌ها و ترمینال‌ها') +
-        mkLeaf('usage-xray', 'بازرس بسته خام (Wire X-Ray)')
+        mkLeaf('usage-agents', 'مقایسهٔ مدل‌ها و عامل‌ها') +
+        mkLeaf('usage-xray', 'بازرس ترافیک (Wire X-Ray)')
       ),
-      mkRoot('settings', ICONS.sliders, 'تنظیمات',
-        mkLeaf('set-hud', 'تم و تنظیمات کاربری') +
-        mkLeaf('set-translate', 'موتور مترجم، پروکسی و API آفلاین', trOn ? 'ON' : 'OFF', trOn ? 'on' : '') +
-        mkLeaf('set-tap', 'مدل محلی، API آنلاین و پیش‌فرض Agent') +
-        mkLeaf('set-retention', 'تاریخچه‌ها و پاکسازی', `${state.config.retention.days || '∞'}d`)
+      mkRoot('settings', '⚙️', 'تنظیمات',
+        mkLeaf('set-hud', 'ظاهر و تجربهٔ کاربری') +
+        mkLeaf('set-translate', 'مترجم و API آفلاین', trOn ? 'ON' : 'OFF', trOn ? 'on' : '') +
+        mkLeaf('set-tap', 'مدل محلی و مدل‌های آنلاین') +
+        mkLeaf('set-retention', 'نگهداری و پاکسازی', `${state.config.retention.days || '∞'}d`)
       )
     ].join('');
   }
@@ -328,7 +342,9 @@ window.ABApp = (() => {
     if (!state) return;
     const host = document.getElementById('pageHost');
     host.classList.toggle('is-chat', route === 'chat');
-    if (route === 'chat') {
+    if (route === 'home') {
+      window.ABHomePage.render(host, state);
+    } else if (route === 'chat') {
       window.ABChatPage.render(host, state, forceFull);
     } else if (route.startsWith('usage-')) {
       window.ABUsagePage.render(host, state, route);
@@ -420,6 +436,13 @@ window.ABApp = (() => {
   function boot() {
     bindSidebarResizer();
     api('/api/state').then(s => applyState(s, true)).catch(() => {});
+    let homePollBusy = false;
+    window.setInterval(async () => {
+      if (route !== 'home' || homePollBusy) return;
+      homePollBusy = true;
+      try { applyState(await api('/api/state'), false); } catch (_) {}
+      finally { homePollBusy = false; }
+    }, 12000);
     const connect = () => {
       const es = new EventSource('/api/events');
       es.onmessage = ev => {

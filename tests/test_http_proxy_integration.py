@@ -82,6 +82,7 @@ class HttpProxyIntegrationTests(unittest.TestCase):
 
                 self.assertEqual(result["choices"][0]["message"]["content"], "Stub model reply")
                 self.assertEqual(hub.mirrors["pi"]["turns"][0]["reply_en"], "Stub model reply")
+                self.assertEqual(hub.build_state_snapshot()["upstream"]["available_models"], ["local-stub"])
                 with closing(sqlite3.connect(store.db_path)) as conn:
                     request_count = conn.execute("SELECT COUNT(*) FROM llm_requests").fetchone()[0]
                     token_row = conn.execute(
