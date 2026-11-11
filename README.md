@@ -1,6 +1,8 @@
-# agent-bridge
+# Agent Bridge
 
-Smooth, zero-dependency local `/v1` KV-cache hunter proxy, **paragraph-interleaved** Persian $\leftrightarrow$ English prose translator (browser-extension style), and terminal companion for multiple interactive agent CLIs.
+[فارسی](README.fa.md) · [Project rules](PROJECT_RULES.md) · [Goals](GOALS.md)
+
+A local-first bridge for reviewable Persian/English translation, independent terminal-agent sessions, and routing to the user-selected local or online model. Online routes are opt-in; runtime state and history stay under `./.data/`.
 
 ## Key Capabilities
 

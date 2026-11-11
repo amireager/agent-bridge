@@ -1,47 +1,55 @@
-# نقشهٔ ماژول‌های Agent Bridge
+# نقشهٔ فعلی ماژول‌های Agent Bridge
 
-این نقشه مشخص می‌کند برای هر رفتار، کدام فایل نقطهٔ ورود تغییر است. اصل تغییر: هر لایه مسئول یک مرز مشخص باشد؛ قابلیت جدید را در فایل‌های نامرتبط پخش نکنیم.
+این نقشه بر اساس کد فعلی است. پیش از تغییر هر قابلیت، مسیر و آزمون مرتبط را از همین جدول پیدا کن؛ `PROJECT_RULES.md` و `GOALS.md` مرجع تصمیم‌های جاری‌اند.
 
-## جریان درخواست مدل
+## مسیر اصلی درخواست
 
 ```text
-عامل CLI / صفحهٔ چت
-  → backend/http_server.py     مسیرهای HTTP، پروکسی /v1، SSE و اتصال payload به سرویس‌ها
-  → backend/agents.py          وضعیت نشست، آینه‌های PTY، tool cycle، Lab و snapshot رابط
-  → backend/engine.py          ارتباط با upstream مدل محلی و آمار درخواست
-  → backend/store.py           فایل‌های runtime و SQLite در ./.data/
+CLIهای مستقل / رابط چت
+       │
+       ├─ cli.py ── PTY mirror یکتا برای هر نشست
+       │
+       └─ frontend ── backend/http_server.py
+                           ├─ مسیر /v1 و provider مدل
+                           ├─ مترجم و APIهای تنظیمات
+                           └─ backend/agents.py ── نشست، Lab، وضعیت زنده
+                                                └─ backend/store.py ── ./.data/
 ```
 
-## محل تغییر بر اساس موضوع
+## فایل‌ها بر اساس موضوع
 
-| موضوع | فایل اصلی | فایل‌های مرتبط / آزمون |
+| موضوع | نقطهٔ ورود / فایل اصلی | آزمون یا بخش مرتبط |
 |---|---|---|
-| ترجمه، تشخیص زبان، حفظ Markdown و cache | `backend/translator.py` | `tests/test_translation.py`، تنظیمات در `frontend/pages/settings/settings.js` |
-| انتخاب موتور online/offline و تست اتصال | `backend/translator.py`, `backend/http_server.py` | `frontend/pages/settings/settings.js`, `tests/test_translation.py` |
-| فعالیت request و proxy `/v1` | `backend/http_server.py` | ثبت نشست در `backend/agents.py` |
-| نشست‌های Lab و mirror، tool cycle و status | `backend/agents.py` | `tests/test_mirror_history.py` |
-| ذخیره‌سازی و retention/cleanup | `backend/store.py` | routeها در `backend/http_server.py`، UI در settings |
-| نمایش چت، Think، ترجمهٔ انتخابی، tool card | `frontend/pages/chat/chat.js` | استایل در `frontend/pages/chat/chat.css` |
-| تنظیمات مترجم، API guide، آزمون دوپنجره‌ای و واژه‌نامه | `frontend/pages/settings/settings.js` | استایل در `frontend/styles/components.css`، آزمون markup در `tests/test_settings_render.js` |
-| تنظیمات و cleanup dialogs | `frontend/pages/settings/settings.js` | API cleanup در `backend/http_server.py` و `backend/store.py` |
-| نمودارها و usage | `frontend/pages/usage/usage.js` | داده از `backend/agents.py` و `backend/store.py` |
-| launcher و سیگنال‌های CLI | `bridge.py`, `cli.py` | راهنمای NixOS در `README.fa.md` |
-| گام آزمایش مستقل | `step0_tap.py`, `agent-team/` | مستقل از مسیرهای runtime؛ `agent-team/` را وارد تنظیمات/دادهٔ Bridge نکن |
+| اجرای Bridge و سرور HTTP | `bridge.py`, `backend/http_server.py` | `tests/test_http_proxy_integration.py` |
+| wrapper و نام‌گذاری یکتای عامل‌ها | `cli.py` | `tests/test_cli_wrapper.py`, `tests/test_mirror_history.py` |
+| وضعیت عامل، PTY mirror، Lab و مسیرهای درحال‌اجرا | `backend/agents.py` | `tests/test_route_trace.py`, `tests/test_mirror_history.py` |
+| پراکسی /v1، provider/model، خطای مقصد و telemetry | `backend/http_server.py` | `tests/test_http_proxy_integration.py`, `tests/test_usage_accuracy.py` |
+| SQLite، migration، نگهداری و پاک‌سازی telemetry | `backend/store.py` | `tests/test_usage_accuracy.py`, `tests/test_cleanup.py` |
+| انتخاب provider و خزانهٔ کلیدها | `backend/model_accounts.py` | `tests/test_model_accounts.py` و تنظیمات مدل |
+| ترجمه و حفظ Markdown | `backend/translator.py` | `tests/test_translation.py`, `tests/test_chat_translation_modes.js` |
+| صفحهٔ چت، ارسال و ترجمهٔ قابل‌بازبینی | `frontend/pages/chat/` | `tests/test_markdown_display.js`, `tests/test_chat_translation_modes.js` |
+| داشبورد، نشست‌ها و audit درخواست‌ها | `frontend/pages/home/` | `tests/test_home_dashboard.js` |
+| تنظیمات مدل، مترجم و ظاهر | `frontend/pages/settings/settings.js` | `tests/test_settings_render.js`, `tests/test_model_settings_render.js`, `tests/test_ui_settings_render.js` |
+| آمار و نمایهٔ استفاده | `frontend/pages/usage/usage.js` | داده از `backend/store.py` و `backend/agents.py` |
+| نقشه و معرفی رابط | `frontend/pages/about/` | `tests/test_about_page.js` |
+| alias قدیمی برای اجرای Bridge | `step0_tap.py` | فقط به `bridge.py` ارجاع می‌دهد؛ مسیر مستقل آزمایشگاهی نیست |
+| گالری نمونه‌های ظاهری | `docs/ui-patterns-gallery.html` | سند مرجع؛ بخشی از runtime نیست |
+| فضای مستقل آیندهٔ agent-team | `agent-team/` | فعلاً فقط scaffold/راهنما؛ به storage یا import path هسته تبدیل نشود |
+| یادداشت‌های طراحی اولیه | `archive/NOTES-early-design.md` | تاریخی و غیرمرجع؛ ادعاها/دستورها را دوباره بررسی کن |
 
-## قواعد مرزی
+## مرزهای مهم
 
-- فایل‌های runtime، config، cache و نشست‌ها فقط زیر `./.data/` هستند؛ هیچ‌یک از آن‌ها را commit نکن.
-- `agent-team/` workspace آزمایشی جدا است و نباید به‌عنوان storage یا import path داخلی Bridge استفاده شود.
-- منطق provider ترجمه را در توابع/شاخه‌های ترجمه نگه‌دار؛ UI فقط شناسهٔ موتور را بفرستد و backend مرجع نهایی resolve باشد.
-- تغییر رفتار session باید آزمون‌های `tests/test_mirror_history.py` را به‌روز کند؛ ترجمه باید آزمون‌های `tests/test_translation.py` را به‌روز کند.
-- آزمون‌های واحد شبکه را mock می‌کنند؛ آن‌ها جایگزین اجرای واقعی llama-server نیستند.
+- runtime، config، کلیدها، cache و تاریخچه فقط در `./.data/` قرار بگیرند.
+- `agent-team/` از برنامه و PTYهای Bridge مستقل بماند؛ نبودنش نباید اجرای هسته را مختل کند.
+- UI فقط وضعیت و مقصدی را نشان دهد که از state یا telemetry واقعی آمده؛ مجهول را حدس نزن.
+- ترجمهٔ دستی متن اصلی را حذف یا خودکار ارسال نمی‌کند؛ تغییر این رفتار نیازمند تصمیم جدا است.
+- تغییر رفتار wrapper، lifecycle نشست یا telemetry باید تست رفتاری همان حوزه را به‌روز کند.
 
 ## اجرای آزمون‌ها
 
 ```bash
 python3 -m unittest discover -s tests -v
-python3 -m py_compile backend/*.py
-node --check frontend/pages/chat/chat.js
-node --check frontend/pages/settings/settings.js
-node tests/test_settings_render.js
+for f in tests/*.js; do node "$f" || exit 1; done
 ```
+
+`py_compile` و `node --check` فقط بررسی syntax هستند و جای آزمون رفتاری را نمی‌گیرند.
