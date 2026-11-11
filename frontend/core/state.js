@@ -243,7 +243,7 @@ window.ABApp = (() => {
           </button>
           ${extraAction ? `<div class="tree-group-tools hide-collapsed">${extraAction}</div>` : ''}
         </div>
-        <div id="tree-${key}" class="tree-children hide-collapsed ${openBranches[key] ? 'open' : ''}">
+        <div id="tree-${key}" class="tree-children tree-children-${key} hide-collapsed ${openBranches[key] ? 'open' : ''}">
           ${bodyHtml}
         </div>
       </div>`;

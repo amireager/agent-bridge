@@ -90,6 +90,9 @@ class HttpProxyIntegrationTests(unittest.TestCase):
                     ).fetchone()
                 self.assertGreaterEqual(request_count, 1)
                 self.assertEqual(token_row, (12, 0, 4, 1, 1, 1))
+                local_record = store.query_usage("deepseek-v4.1-flash", 24)["recent"][0]
+                self.assertEqual(local_record["provider"], "local")
+                self.assertEqual(local_record["route_mode"], "local")
 
                 with urllib.request.urlopen(f"http://127.0.0.1:{server.server_address[1]}/api/models/local", timeout=5) as response:
                     catalog = json.loads(response.read())
@@ -127,8 +130,14 @@ class HttpProxyIntegrationTests(unittest.TestCase):
                         if conn.execute("SELECT COUNT(*) FROM llm_requests").fetchone()[0] >= 2:
                             break
                     time.sleep(0.01)
-                with closing(sqlite3.connect(store.db_path)) as conn:
-                    self.assertGreaterEqual(conn.execute("SELECT COUNT(*) FROM llm_requests").fetchone()[0], 2)
+                recent_requests = store.query_usage("deepseek-v4.1-flash", 24)["recent"]
+                online_record = next(row for row in recent_requests if row["route_mode"] == "online")
+                self.assertEqual(online_record["provider"], "Aggregator دلخواه · OpenAI-compatible")
+                self.assertEqual(online_record["model"], "local-stub")
+                deadline = time.time() + 3
+                while time.time() < deadline and hub.active_routes:
+                    time.sleep(0.01)
+                self.assertEqual(hub.active_routes, {})
                 delete_req = urllib.request.Request(f"http://127.0.0.1:{server.server_address[1]}/api/models/account/delete", data=json.dumps({"id": account_id}).encode(), headers={"Content-Type": "application/json"}, method="POST")
                 with urllib.request.urlopen(delete_req, timeout=5) as response:
                     deleted = json.loads(response.read())
@@ -213,6 +222,14 @@ class HttpProxyIntegrationTests(unittest.TestCase):
                     None,
                 )
                 self.assertIsNotNone(progress)
+                active_state = next(
+                    (item[1]["state"] for item in events if item[0] == "state" and item[1].get("state", {}).get("active_routes")),
+                    None,
+                )
+                self.assertIsNotNone(active_state)
+                self.assertEqual(active_state["active_routes"][0]["agent_id"], "omp-stream")
+                self.assertEqual(active_state["active_routes"][0]["provider"], "local")
+                self.assertEqual(hub.active_routes, {})
                 self.assertIsNotNone(upstream.response_finished_at)
                 self.assertLess(progress[2], upstream.response_finished_at)
                 tool = progress[1]["turn"]["tools"][0]

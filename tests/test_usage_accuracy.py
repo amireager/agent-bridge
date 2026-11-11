@@ -14,7 +14,7 @@ class UsageAccuracyTests(unittest.TestCase):
     def tearDown(self):
         self.temp.cleanup()
 
-    def record(self, *, uncached, cached, output, input_reported=True, output_reported=True):
+    def record(self, *, uncached, cached, output, input_reported=True, output_reported=True, provider="", route_mode=""):
         return self.store.record_llm_request(
             agent="pi",
             session_id="test-session",
@@ -31,10 +31,12 @@ class UsageAccuracyTests(unittest.TestCase):
             decode_tps=10,
             shadow_cost_usd=0,
             preview="",
+            provider=provider,
+            route_mode=route_mode,
         )
 
     def test_total_includes_input_cache_and_output_and_peak_includes_output(self):
-        self.record(uncached=80, cached=20, output=40)
+        self.record(uncached=80, cached=20, output=40, provider="OpenRouter", route_mode="online")
         usage = self.store.query_usage("deepseek-v4.1-flash", 24)
         window = usage["window"]
         self.assertEqual(window["total_input"], 100)
@@ -48,6 +50,14 @@ class UsageAccuracyTests(unittest.TestCase):
         self.assertEqual(usage["recent"][0]["input_count_reported"], True)
         self.assertEqual(usage["recent"][0]["cache_count_reported"], True)
         self.assertEqual(usage["recent"][0]["output_count_reported"], True)
+        self.assertEqual(usage["recent"][0]["provider"], "OpenRouter")
+        self.assertEqual(usage["recent"][0]["route_mode"], "online")
+
+    def test_old_request_rows_have_unknown_destination_not_a_guessed_provider(self):
+        self.record(uncached=10, cached=0, output=5)
+        recent = self.store.query_usage("deepseek-v4.1-flash", 24)["recent"][0]
+        self.assertEqual(recent["provider"], "")
+        self.assertEqual(recent["route_mode"], "")
 
     def test_unreported_counts_are_not_silently_presented_as_reported(self):
         self.record(uncached=0, cached=0, output=0, input_reported=False, output_reported=False)

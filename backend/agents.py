@@ -88,6 +88,7 @@ class BridgeHub:
         self.mirrors: dict[str, dict] = {}
         self.pty_heartbeats: dict[str, float] = {}
         self.agent_activity: dict[str, dict] = {}
+        self.active_routes: dict[str, dict] = {}
         self.pending_fa_by_agent: dict[str, dict] = {}
         self.pending_saved_by_agent: dict[str, int] = {}
 
@@ -217,11 +218,33 @@ class BridgeHub:
         self.agent_activity[agent_id] = {"status": "IDLE", "started_at": 0}
         self.broadcast_state()
 
-    def wire_request_started(self, agent_id: str) -> None:
-        self.agent_activity[agent_id] = {"status": "GENERATING", "started_at": time.time()}
+    def wire_request_started(self, agent_id: str, route: dict | None = None) -> None:
+        started_at = time.time()
+        self.agent_activity[agent_id] = {"status": "GENERATING", "started_at": started_at}
+        if route:
+            safe_route = {key: str(route.get(key) or "")[:160] for key in ("route_mode", "provider", "model")}
+            self.active_routes[agent_id] = {
+                "agent_id": agent_id,
+                "started_at": started_at,
+                "status": "IN_FLIGHT",
+                **safe_route,
+            }
         self.broadcast_state()
 
+    def update_wire_route(self, agent_id: str, **route: str) -> None:
+        current = self.active_routes.get(agent_id)
+        if not current:
+            return
+        for key in ("route_mode", "provider", "model"):
+            if key in route:
+                current[key] = str(route[key] or "")[:160]
+        self.broadcast_state()
+
+    def wire_request_completed(self, agent_id: str) -> None:
+        self.active_routes.pop(agent_id, None)
+
     def wire_request_failed(self, agent_id: str) -> None:
+        self.active_routes.pop(agent_id, None)
         self.agent_activity[agent_id] = {"status": "IDLE", "started_at": 0}
         self.broadcast_state()
 
@@ -1341,6 +1364,7 @@ class BridgeHub:
             "view_kind": self.view_kind,
             "view_id": self.view_id,
             "mirrors": mirrors_list,
+            "active_routes": sorted(self.active_routes.values(), key=lambda item: item.get("started_at", 0)),
             "mirror_history": history_list,
             "lab_sessions": lab_list,
             "lab_history": lab_history_list,

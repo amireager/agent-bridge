@@ -1,194 +1,233 @@
-// Live control-room landing page: models, PTY agents, translator, and practical connection guides.
+// Operations-grade routing console: live ingress, selected translation engine, actual target and request history.
 window.ABHomePage = (() => {
   const { esc } = window.ABUtils;
 
+  const ENGINE_NAMES = {
+    'builtin-online': 'Built-in Online',
+    online: 'Built-in Online',
+    'online-google': 'Google Translate',
+    'online-google-gtx': 'Google Translate · GTX',
+    'online-mymemory': 'MyMemory',
+    'custom-offline': 'Offline translator',
+  };
+
+  function providerLabel(provider, routeMode = '') {
+    if (provider === 'local' || routeMode === 'local') return 'سرور مدل محلی';
+    if (routeMode === 'online-fallback') return `${provider || 'ارائه‌دهندهٔ آنلاین'} · fallback`;
+    return provider || 'مقصد در نسخهٔ قدیمی ثبت نشده';
+  }
+
+  function routeModeLabel(mode) {
+    if (mode === 'online') return 'مسیر آنلاین';
+    if (mode === 'online-fallback') return 'Fallback آنلاین';
+    if (mode === 'local') return 'مسیر محلی';
+    return 'مسیر قدیمی / ثبت‌نشده';
+  }
+
   function render(host, state) {
     const upstream = state.upstream || {};
-    const translation = state.config?.translation || {};
-    const modelsCfg = state.config?.models || {};
-    const connected = (state.mirrors || []).filter(agent => agent.pty_live);
-    const modelNames = [...new Set((upstream.available_models || []).filter(Boolean).map(String))];
-    if (!modelNames.length && upstream.online && upstream.detected_model && upstream.detected_model !== 'listening...') {
-      modelNames.push(String(upstream.detected_model));
-    }
-
-    const modelConnected = Boolean(upstream.online);
+    const config = state.config || {};
+    const modelsCfg = config.models || {};
+    const translation = config.translation || {};
+    const mirrors = (state.mirrors || []).filter(agent => agent.pty_live && !agent.archived);
+    const labs = (state.lab_sessions || []).filter(session => !session.archived);
+    const activeRoutes = Array.isArray(state.active_routes) ? state.active_routes : [];
+    const recent = (state.usage?.recent || []).slice(0, 5);
+    const isOnlineMode = modelsCfg.default_mode === 'online';
+    const vault = state.model_vault || {};
+    const activeAccount = (vault.accounts || []).find(account => account.id === modelsCfg.active_account_id && account.enabled !== false);
+    const providerName = activeAccount
+      ? (state.model_providers?.[activeAccount.provider]?.name || activeAccount.provider || 'Online provider')
+      : (vault.locked && isOnlineMode ? 'خزانهٔ حساب‌ها قفل است' : 'حساب آنلاین انتخاب نشده');
+    const localModel = String(modelsCfg.default_model || upstream.detected_model || '').trim();
+    const targetModel = isOnlineMode ? String(modelsCfg.online_model || '').trim() : localModel;
+    const actualModelNames = [...new Set((upstream.available_models || []).filter(Boolean).map(String))];
     const translatorEnabled = translation.enabled !== false;
-    const translatorOffline = translation.engine === 'custom-offline';
-    const translatorTitle = translatorOffline ? 'مترجم آفلاین' : 'مترجم آنلاین';
-    const translatorDetail = translatorOffline
-      ? `${translation.offline_protocol === 'rest' ? 'REST' : 'OpenAI-compatible'} · ${translation.offline_model || 'مدل محلی'}`
-      : 'سرویس ترجمهٔ انتخاب‌شده';
-    const translatorHealth = !translatorEnabled
-      ? 'خاموش'
-      : (translatorOffline ? (state.translator_online ? 'متصل' : 'نیازمند بررسی') : 'فعال');
+    const engineKey = String(translation.engine || 'builtin-online');
+    const engineName = engineKey === 'custom-offline'
+      ? `${translation.offline_model || 'مدل مترجم محلی'} · ${translation.offline_protocol === 'rest' ? 'REST' : 'OpenAI-compatible'}`
+      : (ENGINE_NAMES[engineKey] || engineKey);
+    const translatorReady = engineKey === 'custom-offline' ? Boolean(state.translator_online) : true;
+    const targetReady = isOnlineMode
+      ? Boolean(activeAccount && targetModel && !vault.locked && !state.model_status?.alert)
+      : Boolean(upstream.online);
+    const targetStatus = isOnlineMode
+      ? (vault.locked ? 'خزانه قفل است' : (targetReady ? 'حساب و مدل انتخاب شده' : 'پیکربندی آنلاین ناقص'))
+      : (upstream.online ? 'اتصال سرور برقرار' : 'سرور مدل قطع است');
+    const targetProviderLabel = isOnlineMode ? providerName : 'Inference محلی';
+    const modelPool = isOnlineMode
+      ? (targetModel ? [targetModel] : [])
+      : actualModelNames;
 
-    const modelHtml = modelNames.length
-      ? modelNames.map(name => `
-          <div class="flow-resource model-resource">
-            <span class="resource-glyph" aria-hidden="true">◉</span>
-            <span class="resource-copy"><strong>${esc(name)}</strong><small>${modelConnected ? (modelsCfg.default_mode === 'online' ? 'در دسترس · مسیر پیش‌فرض آنلاین' : 'از سرور مدل محلی') : 'آخرین فهرست · سرور مدل قطع است'}</small></span>
-            <span class="live-pill ${modelConnected ? '' : 'offline'}"><i></i>${modelConnected ? 'آماده' : 'قطع'}</span>
-          </div>`).join('')
-      : `<div class="flow-resource resource-unavailable"><span class="resource-glyph" aria-hidden="true">◌</span><span class="resource-copy"><strong>مدل در دسترس نیست</strong><small>سرور مدل را روشن کن یا نشانی آن را بررسی کن.</small></span><button class="text-action" data-action="models">تنظیمات مدل</button></div>`;
-
-    const agentHtml = connected.map(agent => {
+    const sourceCards = mirrors.map(agent => {
       const busy = agent.activity === 'GENERATING';
-      const subtitle = busy ? 'در حال پاسخ‌گویی' : 'آمادهٔ دریافت پیام';
       return `
-        <button class="flow-resource agent-resource" type="button" data-agent="${esc(agent.agent_id)}" aria-label="بازکردن مکالمهٔ ${esc(agent.agent_id)}">
-          <span class="resource-glyph agent-glyph" aria-hidden="true">⌘</span>
-          <span class="resource-copy"><strong>${esc(agent.agent_id)}</strong><small>${subtitle}</small></span>
-          <span class="live-pill ${busy ? 'busy' : ''}"><i></i>${busy ? 'مشغول' : 'زنده'}</span>
+        <button class="source-card ${busy ? 'is-busy' : ''}" type="button" data-agent="${esc(agent.agent_id)}" aria-label="بازکردن نشست ${esc(agent.agent_id)}">
+          <span class="source-card-mark" aria-hidden="true">TTY</span>
+          <span class="source-card-text"><strong>${esc(agent.agent_id)}</strong><small>${busy ? 'در حال درخواست' : 'PTY زنده · آماده'}</small></span>
+          <span class="source-state ${busy ? 'busy' : ''}"><i></i>${busy ? 'BUSY' : 'LIVE'}</span>
         </button>`;
     }).join('');
 
-    const guideItems = [
-      {
-        icon: '01', title: 'راه‌اندازی Bridge',
-        description: 'ابتدا رابط و پراکسی محلی را اجرا کن؛ عامل‌ها درخواست مدل را از همین مسیر می‌فرستند.',
-        command: 'python3 bridge.py --host 127.0.0.1 --port 18080',
-        tag: 'یک‌بار برای هر اجرا',
-      },
-      {
-        icon: '02', title: 'اتصال یک عامل ترمینالی',
-        description: 'در پوشهٔ پروژه، wrapper عامل را اجرا کن. هر PTY کانال و تاریخچهٔ مستقل دارد.',
-        command: 'python3 cli.py --wrap omp',
-        tag: 'OMP · Pi · Hermes · دیگر adapterها',
-      },
-      {
-        icon: '03', title: 'فرستادن پیام از UI',
-        description: 'برای عامل زنده، پیام را در صفحهٔ گفتگو بفرست؛ متن به همان PTY تایپ و با Enter ارسال می‌شود.',
-        command: 'python3 cli.py --wrap pi',
-        tag: 'بدون نشست ساختگی',
-      },
-    ];
+    const labCards = labs.slice(0, 3).map(session => `
+      <button class="lab-source" type="button" data-lab="${esc(session.id)}" title="بازکردن نشست Lab ${esc(session.title)}">
+        <span class="lab-source-dot"></span><span>${esc(session.title)}</span><small>${Number(session.turn_count || 0)} دور</small>
+      </button>`).join('');
+    const remainingLabs = Math.max(0, labs.length - 3);
+    const sourceEmpty = !mirrors.length && !labs.length
+      ? '<div class="source-empty">هیچ ورودی فعالی پیدا نشد.<br><small>ترمینال را با wrapper اجرا کن یا یک نشست Lab بساز.</small></div>'
+      : '';
+
+    const localModelsHtml = modelPool.length
+      ? `<div class="model-chips">${modelPool.slice(0, 5).map(name => `<span class="model-chip ${name === targetModel ? 'selected' : ''}" title="${esc(name)}"><i></i>${esc(name)}</span>`).join('')}${modelPool.length > 5 ? `<span class="model-chip more">+${modelPool.length - 5} مدل</span>` : ''}</div>`
+      : '<div class="target-unavailable">مدلی برای مسیر انتخاب‌شده گزارش نشده است.</div>';
+
+    const activeRouteRows = activeRoutes.map(route => `
+      <div class="inflight-row">
+        <span class="inflight-led"></span>
+        <strong>${esc(route.agent_id || 'ورودی نامشخص')}</strong>
+        <span class="inflight-arrow">→</span>
+        <span>${esc(providerLabel(route.provider, route.route_mode))}</span>
+        <span class="inflight-arrow">→</span>
+        <b>${esc(route.model || 'مدل در حال resolve')}</b>
+        <small>${esc(routeModeLabel(route.route_mode))} · در حال اجرا</small>
+      </div>`).join('');
+
+    const requestRows = recent.length
+      ? recent.map(request => `
+          <article class="request-row">
+            <div class="request-source"><span class="request-index">${String(request.id || '').padStart(4, '0')}</span><strong>${esc(request.agent || 'منبع نامشخص')}</strong><small>${esc(request.time || '')}</small></div>
+            <span class="request-arrow" aria-hidden="true">⟶</span>
+            <div class="request-destination"><strong>${esc(request.model || 'مدل نامشخص')}</strong><small>${esc(providerLabel(request.provider, request.route_mode))} · ${esc(routeModeLabel(request.route_mode))}</small></div>
+            <div class="request-metrics"><span>${Number(request.total_in || 0).toLocaleString()} in</span><span>${Number(request.out_tok || 0).toLocaleString()} out</span></div>
+          </article>`).join('')
+      : '<div class="request-empty">هنوز درخواست تکمیل‌شده‌ای برای نمایش ثبت نشده است.</div>';
+
+    const engineStatus = !translatorEnabled ? 'BYPASS' : (engineKey === 'custom-offline' && !translatorReady ? 'OFFLINE' : 'SELECTED');
+    const engineDetail = !translatorEnabled
+      ? 'ترجمه خاموش است؛ متن بدون عبور از مترجم می‌رود.'
+      : (engineKey === 'custom-offline'
+        ? (translatorReady ? 'موتور آفلاین پاسخ‌گو است.' : 'موتور انتخاب شده، اما health check پاسخ نمی‌دهد.')
+        : 'موتور آنلاین انتخاب شده؛ مسیر مستقیم CLI الزاماً از ترجمه عبور نمی‌کند.');
+    const bridgeStatus = activeRoutes.length ? `${activeRoutes.length} درخواست در پرواز` : 'در انتظار درخواست';
 
     host.innerHTML = `
-      <main class="ab-home" dir="rtl">
-        <header class="home-hero">
-          <div class="hero-copy">
-            <div class="eyebrow"><span class="hero-pulse"></span> فضای کاری محلی · Agent Bridge</div>
-            <h1>اتاق فرمان</h1>
-            <p>مدل‌ها، مترجم و ترمینال‌های عامل را از یک نمای زنده مدیریت کن.</p>
+      <main class="ab-home ops-console" dir="rtl">
+        <header class="ops-header">
+          <div class="ops-title-block">
+            <span class="ops-eyebrow"><i></i> AGENT BRIDGE / ROUTE CONTROL</span>
+            <h1>کنسول مسیر درخواست</h1>
+            <p>منبع ورودی، موتور پردازش و مقصد واقعی را در یک نمای عملیاتی ببین.</p>
           </div>
-          <div class="hero-actions">
-            <button class="btn primary" type="button" data-action="chat">رفتن به گفتگو <span aria-hidden="true">←</span></button>
-            <button class="btn" type="button" data-action="connections">راهنمای اتصال</button>
+          <div class="ops-header-state ${targetReady ? 'is-ready' : 'is-warning'}">
+            <span class="state-square"></span><div><strong>${esc(targetStatus)}</strong><small>${isOnlineMode ? 'ROUTE · ONLINE' : 'ROUTE · LOCAL'} · /v1</small></div>
           </div>
-          <div class="hero-health">
-            <span class="health-indicator ${upstream.online ? 'is-online' : ''}"></span>
-            <span>${upstream.online ? 'اتصال سرور مدل برقرار' : 'در انتظار اتصال سرور مدل'}</span>
-            <code>127.0.0.1:${Number(state.bridge_port || 18080)}</code>
+          <div class="ops-actions">
+            <button class="btn primary" type="button" data-action="chat">بازکردن نشست</button>
+            <button class="btn" type="button" data-action="models">مسیر مدل</button>
           </div>
         </header>
 
-        <div class="home-control-grid">
-          <section class="flow-board" aria-labelledby="flowBoardTitle">
-            <div class="flow-board-head">
-              <div><span class="section-kicker">LIVE CONTROL FLOW</span><h2 id="flowBoardTitle">مسیر اتصال</h2></div>
-              <span class="live-refresh ${modelConnected ? 'is-connected' : 'is-disconnected'}"><i></i>${modelConnected ? 'پایش زنده · مدل متصل' : 'پایش زنده · مدل قطع'}</span>
-            </div>
-            <div class="flow-canvas ${connected.length ? 'has-agents' : 'without-agents'} ${modelConnected ? 'model-online' : 'model-offline'}" dir="ltr" aria-label="نمودار وضعیت اتصال؛ مدل ${modelConnected ? 'متصل' : 'قطع'}، ${connected.length} عامل ترمینالی زنده">
-              <section class="flow-column" aria-label="مدل‌های دردسترس">
-                <div class="flow-column-head"><span>مدل‌های دردسترس</span><span class="count-chip">${modelNames.length}</span></div>
-                <div class="flow-resource-list">${modelHtml}</div>
-              </section>
-              <div class="flow-connector ${modelConnected ? 'is-active' : 'is-idle'}" aria-hidden="true"><span></span><b>›</b></div>
-              <section class="flow-core ${modelConnected ? 'model-online' : 'model-offline'}" aria-label="Agent Bridge">
-                <div class="core-orbit"><span class="core-mark">AB</span></div>
-                <strong>Agent Bridge</strong>
-                <small>${modelConnected ? 'اتصال مدل برقرار' : 'مدل هنوز متصل نیست'} · پراکسی محلی</small>
-                <code>/v1</code>
-              </section>
-              ${connected.length ? `
-                <div class="flow-connector ${connected.length ? 'is-active' : 'is-idle'}" aria-hidden="true"><span></span><b>›</b></div>
-                <section class="flow-column agent-flow-column" aria-label="عامل‌های متصل">
-                  <div class="flow-column-head"><span>عامل‌های متصل</span><span class="count-chip">${connected.length}</span></div>
-                  <div class="flow-resource-list">${agentHtml}</div>
-                </section>` : ''}
-            </div>
-            <div class="flow-board-foot">
-              <span><i class="legend-dot model-dot"></i> فهرست مدل از endpoint زندهٔ <code>/v1/models</code></span>
-              ${connected.length ? '<span><i class="legend-dot agent-dot"></i> عامل‌ها با heartbeat ترمینال شناسایی می‌شوند</span>' : ''}
-            </div>
-          </section>
+        <section class="ops-metrics" aria-label="خلاصهٔ وضعیت سیستم">
+          <article class="metric-card"><span class="metric-label">PTYهای زنده</span><strong>${mirrors.length.toString().padStart(2, '0')}</strong><small>نشست ترمینال مستقل</small><i class="metric-accent cyan"></i></article>
+          <article class="metric-card"><span class="metric-label">نشست‌های Lab</span><strong>${labs.length.toString().padStart(2, '0')}</strong><small>${remainingLabs ? `+${remainingLabs} بیشتر در فهرست` : 'فضای داخلی مستقل'}</small><i class="metric-accent violet"></i></article>
+          <article class="metric-card"><span class="metric-label">مدل مقصد</span><strong class="metric-model" title="${esc(targetModel || 'تنظیم نشده')}">${esc(targetModel || 'تنظیم نشده')}</strong><small>${esc(targetProviderLabel)}</small><i class="metric-accent ${targetReady ? 'green' : 'amber'}"></i></article>
+          <article class="metric-card"><span class="metric-label">موتور ترجمه</span><strong class="metric-engine" title="${esc(engineName)}">${esc(engineName)}</strong><small>${translatorEnabled ? engineStatus : 'خاموش · متن مستقیم'}</small><i class="metric-accent amber"></i></article>
+        </section>
 
-          <aside class="translator-card" aria-labelledby="translatorTitle">
-            <div class="translator-card-top">
-              <span class="translator-icon" aria-hidden="true">文</span>
-              <span class="translator-state ${translatorEnabled ? 'enabled' : ''}"><i></i>${translatorHealth}</span>
-            </div>
-            <span class="section-kicker">LANGUAGE PIPELINE</span>
-            <h2 id="translatorTitle">${translatorTitle}</h2>
-            <p>${esc(translatorDetail)}</p>
-            <div class="translator-flow" aria-label="فارسی به انگلیسی">
-              <span>فارسی</span><b aria-hidden="true">→</b><span>English</span>
-            </div>
-            <div class="translator-explain">متن ورودی فارسی پیش از ارسال به عامل، طبق تنظیم فعلی آماده می‌شود؛ کد و متن اصلی محفوظ می‌ماند.</div>
-            <div class="translator-actions">
-              <button class="btn ${translatorEnabled ? 'translator-toggle' : 'primary'}" type="button" data-action="toggle-translation">${translatorEnabled ? 'خاموش‌کردن ترجمه' : 'روشن‌کردن ترجمه'}</button>
-              <button class="btn ghost" type="button" data-action="translator-settings">تنظیم مترجم</button>
-            </div>
-          </aside>
-        </div>
+        <section class="route-board" aria-labelledby="routeTitle">
+          <header class="section-head">
+            <div><span class="section-code">01 / LIVE TOPOLOGY</span><h2 id="routeTitle">نقشهٔ اجزا و مسیر جاری</h2><p>نقشه، اجزای ثبت‌شده را نشان می‌دهد؛ مبدأ و مقصد هر درخواست جاری فقط از دادهٔ runtime در ردیف پایین گزارش می‌شوند.</p></div>
+            <div class="route-live-indicator ${activeRoutes.length ? 'is-flowing' : ''}"><i></i><span>${esc(bridgeStatus)}</span><code>127.0.0.1:${Number(state.bridge_port || 18080)}</code></div>
+          </header>
 
-        <details class="guide-section" id="connectionGuides" open>
-          <summary class="guide-heading guide-summary"><div><span class="section-kicker">GET STARTED</span><h2>شروع سریع</h2><p>سه قدم برای وصل‌کردن یک عامل و فرستادن اولین پیام.</p></div><span class="guide-toggle-label"><span class="guide-heading-mark" aria-hidden="true">⌄</span><span>باز / بستن</span></span></summary>
-          <div class="guide-content">
-          <div class="guide-grid">
-            ${guideItems.map((item, index) => `
-              <article class="guide-card">
-                <div class="guide-card-head"><span class="guide-number">${item.icon}</span><span class="guide-step-label">${item.tag}</span></div>
-                <h3>${item.title}</h3><p>${item.description}</p>
-                <div class="guide-command"><code>${esc(item.command)}</code><button type="button" class="copy-command" data-copy="${esc(item.command)}" aria-label="کپی فرمان" title="کپی فرمان">⧉</button></div>
-              </article>`).join('')}
+          <div class="route-stage ${activeRoutes.length ? 'has-traffic' : ''}" dir="ltr">
+            <svg class="route-wires" viewBox="0 0 1000 460" preserveAspectRatio="none" role="presentation" aria-hidden="true">
+              <defs>
+                <linearGradient id="wireIngress" x1="0" x2="1"><stop offset="0" stop-color="#20c8dc" stop-opacity=".12"/><stop offset="1" stop-color="#20c8dc" stop-opacity=".8"/></linearGradient>
+                <linearGradient id="wireEgress" x1="0" x2="1"><stop offset="0" stop-color="#76d9a4" stop-opacity=".8"/><stop offset="1" stop-color="#76d9a4" stop-opacity=".12"/></linearGradient>
+              </defs>
+              <path class="wire-track" d="M294 185 C360 185 370 225 435 225"/>
+              <path class="wire-track" d="M294 250 C360 250 370 225 435 225"/>
+              <path class="wire-track" d="M565 225 C630 225 640 185 706 185"/>
+              <path class="wire-track" d="M565 225 C630 225 640 250 706 250"/>
+              <path class="wire-signal ingress" d="M294 185 C360 185 370 225 435 225"/>
+              <path class="wire-signal ingress" d="M294 250 C360 250 370 225 435 225"/>
+              <path class="wire-signal egress" d="M565 225 C630 225 640 185 706 185"/>
+              <path class="wire-signal egress" d="M565 225 C630 225 640 250 706 250"/>
+              <circle class="wire-port" cx="294" cy="185" r="5"/><circle class="wire-port" cx="294" cy="250" r="5"/>
+              <circle class="wire-port core-port" cx="435" cy="225" r="5"/><circle class="wire-port core-port" cx="565" cy="225" r="5"/>
+              <circle class="wire-port target-port" cx="706" cy="185" r="5"/><circle class="wire-port target-port" cx="706" cy="250" r="5"/>
+            </svg>
+
+            <section class="route-node ingress-node" dir="rtl" aria-label="منابع ورودی واقعی">
+              <div class="node-heading"><div><span class="node-kicker">INGRESS / 01</span><h3>ورودی‌ها</h3></div><span class="node-count">${mirrors.length + labs.length}</span></div>
+              <div class="source-subhead"><span>ترمینال‌های مستقل</span><b>${mirrors.length} LIVE</b></div>
+              <div class="source-grid">${sourceCards || (!labs.length ? '<div class="source-empty compact">ترمینال زنده‌ای متصل نیست.</div>' : '')}</div>
+              <div class="source-subhead lab-subhead"><span>Lab داخلی</span><b>${labs.length} SESSION</b></div>
+              <div class="lab-source-list">${labCards || '<span class="lab-empty">نشست Lab ثبت نشده</span>'}${remainingLabs ? `<span class="lab-more">+${remainingLabs} نشست دیگر</span>` : ''}</div>
+            </section>
+
+            <section class="route-core-column" dir="rtl" aria-label="موتورهای Agent Bridge">
+              <div class="bridge-node ${activeRoutes.length ? 'is-working' : ''}">
+                <div class="bridge-node-top"><span class="bridge-symbol">AB</span><span class="bridge-node-state"><i></i>${activeRoutes.length ? 'ROUTING' : 'READY'}</span></div>
+                <span class="node-kicker">LOCAL GATEWAY</span><h3>Agent Bridge</h3>
+                <p>ورودی یکتا · پراکسی · مدیریت نشست</p>
+                <code>/v1 · :${Number(state.bridge_port || 18080)}</code>
+              </div>
+              <div class="translation-node ${!translatorEnabled ? 'is-bypassed' : (translatorReady ? 'is-selected' : 'is-warning')}">
+                <span class="translation-mark">TR</span><div class="translation-copy"><span class="node-kicker">LANGUAGE ENGINE</span><strong>${esc(engineName)}</strong><small>${esc(engineDetail)}</small></div>
+                <span class="engine-state">${esc(engineStatus)}</span>
+              </div>
+            </section>
+
+            <section class="route-node destination-node" dir="rtl" aria-label="مقصد انتخاب‌شده">
+              <div class="node-heading"><div><span class="node-kicker">EGRESS / 02</span><h3>مقصد مدل</h3></div><span class="destination-mode">${isOnlineMode ? 'ONLINE' : 'LOCAL'}</span></div>
+              <div class="target-primary ${targetReady ? 'ready' : 'offline'}">
+                <span class="target-icon">${isOnlineMode ? 'EXT' : 'LLM'}</span>
+                <div class="target-copy"><strong>${esc(targetModel || 'مدل انتخاب نشده')}</strong><small>${esc(targetProviderLabel)}</small></div>
+                <span class="target-health"><i></i>${targetReady ? (isOnlineMode ? 'SELECTED' : 'LIVE') : 'CHECK'}</span>
+              </div>
+              <div class="target-status-line"><span class="status-led ${targetReady ? 'on' : 'warn'}"></span>${esc(targetStatus)}</div>
+              <div class="target-model-list"><span class="source-subhead-label">${isOnlineMode ? 'مدل آنلاین انتخاب‌شده' : `فهرست واقعی سرور · ${actualModelNames.length}`}</span>${localModelsHtml}</div>
+              <button class="target-settings" type="button" data-action="models">تغییر مدل یا مسیر <span>↗</span></button>
+            </section>
           </div>
+
+          <div class="active-routes" aria-live="polite">
+            ${activeRouteRows || '<div class="route-idle"><span></span>در حال حاضر درخواست فعالی در مسیر نیست؛ اتصال‌ها بر اساس وضعیت واقعی مؤلفه‌ها نمایش داده شده‌اند.</div>'}
+          </div>
+          <footer class="route-legend"><span><i class="legend-source"></i>ورودی‌های زنده</span><span><i class="legend-bridge"></i>هستهٔ Bridge</span><span><i class="legend-target"></i>مقصد انتخاب‌شده / مدل گزارش‌شده</span><span class="legend-note">نام ارائه‌دهنده فقط پس از ثبت درخواست واقعی نمایش داده می‌شود.</span></footer>
+        </section>
+
+        <section class="request-board" aria-labelledby="requestTitle">
+          <header class="section-head request-head">
+            <div><span class="section-code">02 / ROUTE AUDIT</span><h2 id="requestTitle">درخواست‌های اخیر</h2><p>مبدأ → ارائه‌دهنده و مدل پاسخ‌گو؛ ردیف‌های قدیمی ممکن است پیش از ثبت مقصد ایجاد شده باشند.</p></div>
+            <button class="text-action" type="button" data-action="usage">گزارش کامل توکن‌ها <span>↗</span></button>
+          </header>
+          <div class="request-list">${requestRows}</div>
+        </section>
+
+        <details class="guide-section" id="connectionGuides">
+          <summary class="guide-summary"><span><span class="section-code">03 / OPERATIONS</span><strong>راه‌اندازی و اتصال</strong><small>راهنمای کوتاه · قابل‌بستن</small></span><span class="guide-toggle">بازکردن راهنما <b>＋</b></span></summary>
+          <div class="guide-content">
+            <div class="guide-grid">
+              <article class="guide-card"><span class="guide-number">01</span><h3>راه‌اندازی Bridge</h3><p>یک‌بار اجرا کن؛ داشبورد و ورودی سازگار با OpenAI از همین سرویس در دسترس‌اند.</p><div class="guide-command"><code>python3 bridge.py --host 127.0.0.1 --port 18080</code></div></article>
+              <article class="guide-card"><span class="guide-number">02</span><h3>اتصال یک CLI</h3><p>برای هر عامل یک wrapper مستقل اجرا کن؛ نام‌گذاری خودکار و تاریخچهٔ جدا حفظ می‌شود.</p><div class="guide-command"><code>python3 cli.py --wrap pi</code></div></article>
+              <article class="guide-card"><span class="guide-number">03</span><h3>انتخاب مسیر</h3><p>موتور ترجمه و مدل محلی/آنلاین را از تنظیمات بازبینی کن؛ مقصد درخواست در گزارش‌ها ثبت می‌شود.</p><div class="guide-actions"><button class="btn" type="button" data-action="translator">تنظیم مترجم</button><button class="btn" type="button" data-action="models">تنظیم مدل</button></div></article>
+            </div>
           </div>
         </details>
 
-        <section class="usecase-section">
-          <div class="guide-heading"><div><span class="section-kicker">WORKFLOWS</span><h2>کارهایی که اینجا راحت‌تر می‌شوند</h2></div></div>
-          <div class="usecase-grid">
-            <article class="usecase-card"><span>↗</span><div><h3>مکالمهٔ مستقل با هر عامل</h3><p>Pi، OMP و دیگر CLIها کانال و Mirror جدا دارند؛ تاریخچه‌ها با هم قاطی نمی‌شوند.</p></div></article>
-            <article class="usecase-card"><span>⌁</span><div><h3>دیدن رویدادهای واقعی</h3><p>پاسخ جریانی و فراخوانی ابزارها را هم‌زمان با کار عامل در صفحه دنبال کن.</p></div></article>
-            <article class="usecase-card"><span>⇄</span><div><h3>کار با مدل محلی</h3><p>ترافیک CLI را از پراکسی محلی عبور بده و آمار زمینه و KV را بررسی کن.</p></div></article>
-          </div>
-        </section>
-        <footer class="home-footer"><span>Agent Bridge</span><span>داده‌ها و تاریخچه‌ها در مسیر محلی <code>./.data/</code> نگهداری می‌شوند.</span></footer>
+        <footer class="ops-footer"><span>AB / LOCAL OPERATIONS CONSOLE</span><span>پیکربندی و تاریخچه در <code>./.data/</code> · هیچ کلید API در نمای مسیر نمایش داده نمی‌شود.</span></footer>
       </main>`;
 
     host.querySelector('[data-action="chat"]')?.addEventListener('click', () => window.ABApp.navigate('chat'));
-    host.querySelector('[data-action="connections"]')?.addEventListener('click', () => {
-      const guide = host.querySelector('#connectionGuides');
-      if (guide) guide.open = true;
-      guide?.scrollIntoView({ behavior: 'smooth', block: 'start' });
-    });
-    host.querySelector('[data-action="toggle-translation"]')?.addEventListener('click', () => window.ABApp.toggleProxyMode());
-    host.querySelector('[data-action="translator-settings"]')?.addEventListener('click', () => window.ABApp.navigate('set-translate'));
-    host.querySelector('[data-action="models"]')?.addEventListener('click', () => window.ABApp.navigate('set-tap'));
+    host.querySelectorAll('[data-action="models"]').forEach(button => button.addEventListener('click', () => window.ABApp.navigate('set-tap')));
+    host.querySelector('[data-action="translator"]')?.addEventListener('click', () => window.ABApp.navigate('set-translate'));
+    host.querySelector('[data-action="usage"]')?.addEventListener('click', () => window.ABApp.navigate('usage-overview'));
     host.querySelectorAll('[data-agent]').forEach(button => button.addEventListener('click', () => window.ABApp.selectMirror(button.dataset.agent)));
-    host.querySelectorAll('[data-copy]').forEach(button => button.addEventListener('click', () => copyCommand(button)));
-  }
-
-  async function copyCommand(button) {
-    const value = button.dataset.copy || '';
-    try {
-      await navigator.clipboard.writeText(value);
-    } catch (_) {
-      const input = document.createElement('textarea');
-      input.value = value;
-      input.style.position = 'fixed';
-      input.style.opacity = '0';
-      document.body.appendChild(input);
-      input.select();
-      document.execCommand('copy');
-      input.remove();
-    }
-    const original = button.textContent;
-    button.textContent = '✓';
-    button.classList.add('copied');
-    setTimeout(() => { button.textContent = original; button.classList.remove('copied'); }, 1300);
+    host.querySelectorAll('[data-lab]').forEach(button => button.addEventListener('click', () => window.ABApp.selectLab(button.dataset.lab)));
   }
 
   return { render };

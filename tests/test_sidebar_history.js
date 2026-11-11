@@ -23,6 +23,7 @@ function element() {
     },
     classList: classList(), listeners: {},
     addEventListener(type, callback) { this.listeners[type] = callback; },
+    setAttribute() {},
     setPointerCapture() {},
     querySelector() { return null; },
     prepend() {}
@@ -39,6 +40,10 @@ const state = {
 const apiCalls = [];
 global.window = {
   innerWidth:1200,
+  listeners:{},
+  addEventListener(type, callback){this.listeners[type]=callback;},
+  removeEventListener(type){delete this.listeners[type];},
+  setInterval:()=>0,
   ABUtils:{
     ICONS:{terminal:'T',clock:'C',cpu:'P',chart:'U',sliders:'S',chevronDown:'v',chevronRight:'>' ,swap:'⇄'},
     esc:value=>String(value ?? '').replace(/[&<>"']/g, ch=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch])),
@@ -62,10 +67,10 @@ vm.runInThisContext(fs.readFileSync('frontend/core/state.js','utf8'));
   assert.match(els.sbTree.innerHTML,/ABApp\.deleteLabSession\('lab-old',event\)/);
 
   const handle=els.sidebarResizer;
-  handle.listeners.pointerdown({button:0,pointerId:7,clientX:280,preventDefault(){}});
-  handle.listeners.pointermove({pointerId:7,clientX:360});
+  handle.listeners.pointerdown({button:0,pointerId:7,clientX:280,preventDefault(){},stopPropagation(){}});
+  window.listeners.pointermove({pointerId:7,clientX:360});
   assert.equal(els.shellRoot.style.getPropertyValue('--sidebar-width'),'360px');
-  handle.listeners.pointerup({pointerId:7});
+  window.listeners.pointerup({pointerId:7});
   await window.ABApp.deleteLabSession('lab-old');
   assert(apiCalls.some(call=>call.path==='/api/config'&&call.body.ui.sidebar_width===360));
   assert(apiCalls.some(call=>call.path==='/api/lab/delete'&&call.body.session_id==='lab-old'));

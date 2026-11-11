@@ -133,6 +133,14 @@
   display: none;
 }
 .tree-children.open { display: block; }
+/* Independent live terminals read as separate channel tiles, not one long mixed list. */
+.tree-children-mirrors.open { display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:5px;margin-inline-start:0;padding-inline-start:7px; }
+.tree-children-mirrors .tree-node { min-width:0;min-height:56px;flex-direction:column;align-items:stretch;justify-content:space-between;gap:6px;padding:7px 8px;margin:0;border-color:color-mix(in srgb,var(--line) 55%,transparent);background:color-mix(in srgb,var(--bg-1) 75%,transparent); }
+.tree-children-mirrors .tree-node > span { max-width:100%;min-width:0; }
+.tree-children-mirrors .tree-node > span:first-child { width:100%; }
+.tree-children-mirrors .tree-node .mono { font-size:10px; }
+.tree-children-mirrors .tree-node .tiny-tag { font-size:9px;padding:1px 5px; }
+.tree-children-mirrors .tree-node:hover,.tree-children-mirrors .tree-node.active { border-color:color-mix(in srgb,var(--cyan) 45%,var(--line)); }
 
 .tree-node {
   width: 100%;

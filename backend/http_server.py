@@ -594,7 +594,7 @@ def make_handler(hub: BridgeHub):
                 raise RuntimeError("مدل آنلاین پیش‌فرضی انتخاب نشده است.")
             return account, model
 
-        def _make_remote_request(self, payload: dict, path: str) -> tuple[urllib.request.Request, urllib.request.OpenerDirector, str]:
+        def _make_remote_request(self, payload: dict, path: str) -> tuple[urllib.request.Request, urllib.request.OpenerDirector, str, str]:
             account, model = self._selected_online_account()
             base = str(account.get("base_url", "")).rstrip("/")
             if path.startswith("/v1/") and base.endswith("/v1"):
@@ -609,7 +609,9 @@ def make_handler(hub: BridgeHub):
             req = urllib.request.Request(endpoint, data=json.dumps(remote_payload, ensure_ascii=False).encode("utf-8"), headers=headers, method="POST")
             proxy = str(account.get("proxy", "")).strip()
             opener = urllib.request.build_opener(urllib.request.ProxyHandler({"http": proxy, "https": proxy})) if proxy else urllib.request.build_opener()
-            return req, opener, model
+            provider_key = str(account.get("provider", ""))
+            provider_name = str(PROVIDERS.get(provider_key, {}).get("name") or provider_key or "online provider")
+            return req, opener, model, provider_name
 
         def _detect_agent_tag(self, payload: dict) -> str:
             x_ag = self.headers.get("X-Agent-Name", "").strip()
@@ -657,9 +659,11 @@ def make_handler(hub: BridgeHub):
             models_cfg = hub.config.get("models", {})
             remote_active = models_cfg.get("default_mode", "local") == "online"
             remote_model = ""
+            route_provider = "local"
+            route_mode = "online" if remote_active else "local"
             if remote_active:
                 try:
-                    req, request_opener, remote_model = self._make_remote_request(payload, path)
+                    req, request_opener, remote_model, route_provider = self._make_remote_request(payload, path)
                     payload["model"] = remote_model
                 except Exception as exc:
                     hub.wire_request_failed(agent_name)
@@ -673,17 +677,24 @@ def make_handler(hub: BridgeHub):
                 upstream_url = hub.config["tap"]["upstream_url"].rstrip("/") + path
                 req = urllib.request.Request(upstream_url, data=forward_bytes, headers={"Content-Type": "application/json"}, method="POST")
                 request_opener = LOOPBACK_OPENER
+            route_model = str(payload.get("model") or models_cfg.get("default_model") or "").strip()
             t0 = time.perf_counter()
-            hub.wire_request_started(agent_name)
+            hub.wire_request_started(agent_name, {
+                "route_mode": route_mode,
+                "provider": route_provider,
+                "model": route_model,
+            })
             try:
                 resp = request_opener.open(req, timeout=300)
             except (urllib.error.HTTPError, Exception) as err:
                 # Online fallback is explicit opt-in; never send local prompts to a provider silently.
                 if not remote_active and models_cfg.get("online_fallback"):
                     try:
-                        req, request_opener, remote_model = self._make_remote_request(payload, path)
+                        req, request_opener, remote_model, route_provider = self._make_remote_request(payload, path)
+                        hub.update_wire_route(agent_name, route_mode="online-fallback", provider=route_provider, model=remote_model)
                         resp = request_opener.open(req, timeout=300)
                         remote_active = True
+                        route_mode = "online-fallback"
                         payload["model"] = remote_model
                     except Exception as fallback_error:
                         hub.wire_request_failed(agent_name)
@@ -897,6 +908,8 @@ def make_handler(hub: BridgeHub):
                 decode_tps=d_tps,
                 shadow_cost_usd=cost_usd,
                 preview=preview_txt.strip().replace("\n", " ")[:150],
+                provider=route_provider,
+                route_mode=route_mode,
             )
 
             turn_metrics = {
@@ -930,6 +943,7 @@ def make_handler(hub: BridgeHub):
                 tool_calls=[{"id": t.get("id"), "name": t.get("name"), "args": t.get("args")} for t in acc_tools],
             )
 
+            hub.wire_request_completed(agent_name)
             hub.push_inspector(
                 {
                     "ts": time.strftime("%H:%M:%S"),

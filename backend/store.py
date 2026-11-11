@@ -124,7 +124,9 @@ class DataStore:
                     prompt_tps REAL NOT NULL,
                     decode_tps REAL NOT NULL,
                     shadow_cost_usd REAL NOT NULL,
-                    preview TEXT NOT NULL
+                    preview TEXT NOT NULL,
+                    provider TEXT NOT NULL DEFAULT '',
+                    route_mode TEXT NOT NULL DEFAULT ''
                 );
                 """
             )
@@ -139,6 +141,10 @@ class DataStore:
                 conn.execute("ALTER TABLE llm_requests ADD COLUMN saved_fa_tokens INTEGER NOT NULL DEFAULT 0;")
             if "kv_status" not in cols:
                 conn.execute("ALTER TABLE llm_requests ADD COLUMN kv_status TEXT NOT NULL DEFAULT 'cold';")
+            if "provider" not in cols:
+                conn.execute("ALTER TABLE llm_requests ADD COLUMN provider TEXT NOT NULL DEFAULT ''; ")
+            if "route_mode" not in cols:
+                conn.execute("ALTER TABLE llm_requests ADD COLUMN route_mode TEXT NOT NULL DEFAULT ''; ")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_req_ts ON llm_requests(ts);")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_req_agent ON llm_requests(agent);")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_req_model ON llm_requests(model);")
@@ -303,6 +309,8 @@ class DataStore:
         decode_tps: float,
         shadow_cost_usd: float,
         preview: str,
+        provider: str = "",
+        route_mode: str = "",
     ) -> str:
         now = time.time()
         hour_bucket = time.strftime("%Y-%m-%d %H:00", time.localtime(now))
@@ -350,8 +358,8 @@ class DataStore:
                     input_count_reported, cache_count_reported, output_count_reported,
                     saved_fa_tokens, kv_status,
                     prompt_ms, decode_ms, prompt_tps, decode_tps,
-                    shadow_cost_usd, preview
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    shadow_cost_usd, preview, provider, route_mode
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     now,
@@ -373,6 +381,8 @@ class DataStore:
                     float(decode_tps),
                     float(shadow_cost_usd),
                     preview[:200],
+                    str(provider or "")[:100],
+                    str(route_mode or "")[:32],
                 ),
             )
         return kv_status
@@ -549,7 +559,7 @@ class DataStore:
                 f"""
                 SELECT id, ts, agent, session_id, model, uncached_input, cached_input,
                        output_tokens, input_count_reported, cache_count_reported, output_count_reported,
-                       saved_fa_tokens, kv_status, prompt_tps, decode_tps, preview
+                       saved_fa_tokens, kv_status, prompt_tps, decode_tps, preview, provider, route_mode
                 FROM llm_requests WHERE ts >= ? {extra_sql}
                 ORDER BY id DESC LIMIT ?
                 """,
@@ -633,6 +643,8 @@ class DataStore:
                     "agent": r["agent"],
                     "session_id": r["session_id"],
                     "model": r["model"],
+                    "provider": r["provider"],
+                    "route_mode": r["route_mode"],
                     "uncached_in": u_in,
                     "cached_in": c_in,
                     "total_in": tot_in,
