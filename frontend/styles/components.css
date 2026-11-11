@@ -223,6 +223,8 @@
   flex-shrink: 0;
 }
 .hud-group { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.shell.hide-hud .hud-bar { display: none; }
+.shell.hide-hud .page-host { height: 100dvh; }
 .hud-chip {
   padding: 4px 11px;
   border-radius: 999px;

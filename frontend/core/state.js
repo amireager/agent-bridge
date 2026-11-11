@@ -11,7 +11,8 @@ window.ABApp = (() => {
     history: false,
     lab: false,
     usage: false,
-    settings: false
+    settings: false,
+    about: false
   };
 
   function getState() { return state; }
@@ -257,9 +258,7 @@ window.ABApp = (() => {
     const trOn = state.config.translation.enabled !== false;
 
     treeEl.innerHTML = [
-      `<div class="sidebar-shortcuts">${mkLeaf('home', '🏠 داشبورد')}${mkLeaf('chat', '💬 گفتگو')}</div>`,
-      mkRoot('mirrors', '🔌', 'عامل‌های زنده', mirrorHtml),
-      mkRoot('history', '🕘', 'تاریخچهٔ مکالمه‌ها', historyHtml),
+      `<div class="sidebar-shortcuts">${mkLeaf('chat', '💬 گفتگو')}</div>`,
       mkRoot(
         'lab',
         '🧪',
@@ -267,8 +266,10 @@ window.ABApp = (() => {
         labHtml,
         `<button class="tree-add-btn" type="button" title="ساخت نشست آزمایش جدید" onclick="ABApp.createLabSession(event)">＋ <span>جدید</span></button>`
       ),
-      mkRoot('usage', '📊', 'آمار و پایش',
-        mkLeaf('usage-overview', 'داشبورد کش، اسلات‌ها و هزینه', `${kvPct}%`, 'on') +
+      mkRoot('mirrors', '🔌', 'عامل‌های زنده', mirrorHtml),
+      mkRoot('history', '🕘', 'تاریخچهٔ چت‌ها', historyHtml),
+      mkRoot('usage', '📊', 'داشبورد توکن',
+        mkLeaf('usage-overview', 'کش، اسلات‌ها و هزینه', `${kvPct}%`, 'on') +
         mkLeaf('usage-agents', 'مقایسهٔ مدل‌ها و عامل‌ها') +
         mkLeaf('usage-xray', 'بازرس ترافیک (Wire X-Ray)')
       ),
@@ -277,6 +278,12 @@ window.ABApp = (() => {
         mkLeaf('set-translate', 'مترجم و API آفلاین', trOn ? 'ON' : 'OFF', trOn ? 'on' : '') +
         mkLeaf('set-tap', 'مدل محلی و مدل‌های آنلاین') +
         mkLeaf('set-retention', 'نگهداری و پاکسازی', `${state.config.retention.days || '∞'}d`)
+      ),
+      mkRoot('about', 'ℹ️', 'درباره',
+        mkLeaf('about-overview', 'معرفی برنامه') +
+        mkLeaf('about-workflow', 'روش‌های فعالیت') +
+        mkLeaf('about-tests', 'تست‌ها و اعتبارسنجی') +
+        mkLeaf('about-specs', 'مشخصات و محدودیت‌ها')
       )
     ].join('');
   }
@@ -341,13 +348,17 @@ window.ABApp = (() => {
   function renderMainPage(forceFull = false) {
     if (!state) return;
     const host = document.getElementById('pageHost');
+    const shell = document.getElementById('shellRoot');
     host.classList.toggle('is-chat', route === 'chat');
+    shell?.classList.toggle('hide-hud', route !== 'chat');
     if (route === 'home') {
       window.ABHomePage.render(host, state);
     } else if (route === 'chat') {
       window.ABChatPage.render(host, state, forceFull);
     } else if (route.startsWith('usage-')) {
       window.ABUsagePage.render(host, state, route);
+    } else if (route.startsWith('about-')) {
+      window.ABAboutPage.render(host, state, route);
     } else if (route.startsWith('set-')) {
       window.ABSettingsPage.render(host, state, route);
     }
