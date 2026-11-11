@@ -41,6 +41,8 @@ const empty = render(common);
 assert.match(empty, /local-model/);
 assert.match(empty, /local-second-model/);
 assert.match(empty, /مترجم آنلاین/);
+assert.match(empty, /class="guide-section" id="connectionGuides" open/);
+assert.match(empty, /flow-canvas[^\"]*model-online/);
 assert.doesNotMatch(empty, /agent-resource/);
 assert.doesNotMatch(empty, /aria-label="عامل‌های متصل"/);
 
@@ -52,6 +54,18 @@ assert.match(connected, /عامل‌های متصل/);
 assert.match(connected, /omp-2/);
 assert.match(connected, /در حال پاسخ‌گویی/);
 assert.match(connected, /مشغول/);
+assert.match(connected, /اتصال سرور مدل برقرار/);
+assert.match(connected, /class="flow-connector is-active"/);
+
+const staleModelList = render({
+  ...common,
+  upstream: { online: false, available_models: ['cached-model'], detected_model: '' },
+  mirrors: [],
+});
+assert.match(staleModelList, /آخرین فهرست · سرور مدل قطع است/);
+assert.match(staleModelList, /class="live-pill offline"><i><\/i>قطع/);
+assert.match(staleModelList, /class="flow-connector is-idle"/);
+assert.doesNotMatch(staleModelList, /class="flow-connector is-active"/);
 
 const disconnectedModel = render({
   ...common,

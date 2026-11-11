@@ -12,6 +12,7 @@ window.ABHomePage = (() => {
       modelNames.push(String(upstream.detected_model));
     }
 
+    const modelConnected = Boolean(upstream.online);
     const translatorEnabled = translation.enabled !== false;
     const translatorOffline = translation.engine === 'custom-offline';
     const translatorTitle = translatorOffline ? 'مترجم آفلاین' : 'مترجم آنلاین';
@@ -26,8 +27,8 @@ window.ABHomePage = (() => {
       ? modelNames.map(name => `
           <div class="flow-resource model-resource">
             <span class="resource-glyph" aria-hidden="true">◉</span>
-            <span class="resource-copy"><strong>${esc(name)}</strong><small>${modelsCfg.default_mode === 'online' ? 'فهرست محلی · مسیر پیش‌فرض آنلاین' : 'از سرور مدل محلی'}</small></span>
-            <span class="live-pill"><i></i>آماده</span>
+            <span class="resource-copy"><strong>${esc(name)}</strong><small>${modelConnected ? (modelsCfg.default_mode === 'online' ? 'در دسترس · مسیر پیش‌فرض آنلاین' : 'از سرور مدل محلی') : 'آخرین فهرست · سرور مدل قطع است'}</small></span>
+            <span class="live-pill ${modelConnected ? '' : 'offline'}"><i></i>${modelConnected ? 'آماده' : 'قطع'}</span>
           </div>`).join('')
       : `<div class="flow-resource resource-unavailable"><span class="resource-glyph" aria-hidden="true">◌</span><span class="resource-copy"><strong>مدل در دسترس نیست</strong><small>سرور مدل را روشن کن یا نشانی آن را بررسی کن.</small></span><button class="text-action" data-action="models">تنظیمات مدل</button></div>`;
 
@@ -77,7 +78,7 @@ window.ABHomePage = (() => {
           </div>
           <div class="hero-health">
             <span class="health-indicator ${upstream.online ? 'is-online' : ''}"></span>
-            <span>${upstream.online ? 'Bridge آمادهٔ پایش' : 'در انتظار اتصال مدل'}</span>
+            <span>${upstream.online ? 'اتصال سرور مدل برقرار' : 'در انتظار اتصال سرور مدل'}</span>
             <code>127.0.0.1:${Number(state.bridge_port || 18080)}</code>
           </div>
         </header>
@@ -86,22 +87,22 @@ window.ABHomePage = (() => {
           <section class="flow-board" aria-labelledby="flowBoardTitle">
             <div class="flow-board-head">
               <div><span class="section-kicker">LIVE CONTROL FLOW</span><h2 id="flowBoardTitle">مسیر اتصال</h2></div>
-              <span class="live-refresh"><i></i>وضعیت زنده</span>
+              <span class="live-refresh ${modelConnected ? 'is-connected' : 'is-disconnected'}"><i></i>${modelConnected ? 'پایش زنده · مدل متصل' : 'پایش زنده · مدل قطع'}</span>
             </div>
-            <div class="flow-canvas ${connected.length ? 'has-agents' : 'without-agents'}" dir="ltr">
+            <div class="flow-canvas ${connected.length ? 'has-agents' : 'without-agents'} ${modelConnected ? 'model-online' : 'model-offline'}" dir="ltr" aria-label="نمودار وضعیت اتصال؛ مدل ${modelConnected ? 'متصل' : 'قطع'}، ${connected.length} عامل ترمینالی زنده">
               <section class="flow-column" aria-label="مدل‌های دردسترس">
                 <div class="flow-column-head"><span>مدل‌های دردسترس</span><span class="count-chip">${modelNames.length}</span></div>
                 <div class="flow-resource-list">${modelHtml}</div>
               </section>
-              <div class="flow-connector" aria-hidden="true"><span></span><b>›</b></div>
-              <section class="flow-core" aria-label="Agent Bridge">
+              <div class="flow-connector ${modelConnected ? 'is-active' : 'is-idle'}" aria-hidden="true"><span></span><b>›</b></div>
+              <section class="flow-core ${modelConnected ? 'model-online' : 'model-offline'}" aria-label="Agent Bridge">
                 <div class="core-orbit"><span class="core-mark">AB</span></div>
                 <strong>Agent Bridge</strong>
-                <small>پراکسی · آینهٔ گفتگو · پایش</small>
+                <small>${modelConnected ? 'اتصال مدل برقرار' : 'مدل هنوز متصل نیست'} · پراکسی محلی</small>
                 <code>/v1</code>
               </section>
               ${connected.length ? `
-                <div class="flow-connector" aria-hidden="true"><span></span><b>›</b></div>
+                <div class="flow-connector ${connected.length ? 'is-active' : 'is-idle'}" aria-hidden="true"><span></span><b>›</b></div>
                 <section class="flow-column agent-flow-column" aria-label="عامل‌های متصل">
                   <div class="flow-column-head"><span>عامل‌های متصل</span><span class="count-chip">${connected.length}</span></div>
                   <div class="flow-resource-list">${agentHtml}</div>
@@ -132,8 +133,9 @@ window.ABHomePage = (() => {
           </aside>
         </div>
 
-        <section class="guide-section" id="connectionGuides">
-          <div class="guide-heading"><div><span class="section-kicker">GET STARTED</span><h2>شروع سریع</h2><p>سه قدم برای وصل‌کردن یک عامل و فرستادن اولین پیام.</p></div><span class="guide-heading-mark" aria-hidden="true">↙</span></div>
+        <details class="guide-section" id="connectionGuides" open>
+          <summary class="guide-heading guide-summary"><div><span class="section-kicker">GET STARTED</span><h2>شروع سریع</h2><p>سه قدم برای وصل‌کردن یک عامل و فرستادن اولین پیام.</p></div><span class="guide-toggle-label"><span class="guide-heading-mark" aria-hidden="true">⌄</span><span>باز / بستن</span></span></summary>
+          <div class="guide-content">
           <div class="guide-grid">
             ${guideItems.map((item, index) => `
               <article class="guide-card">
@@ -142,7 +144,8 @@ window.ABHomePage = (() => {
                 <div class="guide-command"><code>${esc(item.command)}</code><button type="button" class="copy-command" data-copy="${esc(item.command)}" aria-label="کپی فرمان" title="کپی فرمان">⧉</button></div>
               </article>`).join('')}
           </div>
-        </section>
+          </div>
+        </details>
 
         <section class="usecase-section">
           <div class="guide-heading"><div><span class="section-kicker">WORKFLOWS</span><h2>کارهایی که اینجا راحت‌تر می‌شوند</h2></div></div>
@@ -156,7 +159,11 @@ window.ABHomePage = (() => {
       </main>`;
 
     host.querySelector('[data-action="chat"]')?.addEventListener('click', () => window.ABApp.navigate('chat'));
-    host.querySelector('[data-action="connections"]')?.addEventListener('click', () => host.querySelector('#connectionGuides')?.scrollIntoView({ behavior: 'smooth', block: 'start' }));
+    host.querySelector('[data-action="connections"]')?.addEventListener('click', () => {
+      const guide = host.querySelector('#connectionGuides');
+      if (guide) guide.open = true;
+      guide?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    });
     host.querySelector('[data-action="toggle-translation"]')?.addEventListener('click', () => window.ABApp.toggleProxyMode());
     host.querySelector('[data-action="translator-settings"]')?.addEventListener('click', () => window.ABApp.navigate('set-translate'));
     host.querySelector('[data-action="models"]')?.addEventListener('click', () => window.ABApp.navigate('set-tap'));
