@@ -258,7 +258,6 @@ window.ABApp = (() => {
     const trOn = state.config.translation.enabled !== false;
 
     treeEl.innerHTML = [
-      `<div class="sidebar-shortcuts">${mkLeaf('chat', '💬 گفتگو')}</div>`,
       mkRoot(
         'lab',
         '🧪',

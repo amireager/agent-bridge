@@ -100,7 +100,6 @@
   padding: 12px 10px 18px;
 }
 
-.sidebar-shortcuts { display: grid; gap: 4px; margin: 0 0 14px; padding-bottom: 12px; border-bottom: 1px solid var(--line); }
 .tree-group { margin-bottom: 7px; }
 .tree-group-heading { display: flex; align-items: center; gap: 4px; }
 .tree-root-btn {
@@ -125,7 +124,6 @@
 .tree-add-btn { padding: 4px 7px; border: 1px solid color-mix(in srgb,var(--phosphor) 25%,var(--line)); border-radius: 7px; color: var(--phosphor); background: var(--phosphor-dim); cursor: pointer; font-size: 10px !important; font-weight: 800 !important; white-space: nowrap; }
 .tree-root-btn:hover { background: rgba(255, 255, 255, 0.05); color: var(--fg-0); }
 .tree-root-btn[aria-expanded="true"] { color: var(--fg-0); background: color-mix(in srgb,var(--bg-2) 72%,transparent); }
-.sidebar-shortcuts .tree-node { font-weight: 750; }
 
 .tree-children {
   margin-left: 8px;
