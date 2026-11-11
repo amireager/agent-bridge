@@ -126,7 +126,9 @@ class DataStore:
                     shadow_cost_usd REAL NOT NULL,
                     preview TEXT NOT NULL,
                     provider TEXT NOT NULL DEFAULT '',
-                    route_mode TEXT NOT NULL DEFAULT ''
+                    route_mode TEXT NOT NULL DEFAULT '',
+                    latency_ms INTEGER NOT NULL DEFAULT 0,
+                    translation_status TEXT NOT NULL DEFAULT 'unknown'
                 );
                 """
             )
@@ -145,6 +147,31 @@ class DataStore:
                 conn.execute("ALTER TABLE llm_requests ADD COLUMN provider TEXT NOT NULL DEFAULT ''; ")
             if "route_mode" not in cols:
                 conn.execute("ALTER TABLE llm_requests ADD COLUMN route_mode TEXT NOT NULL DEFAULT ''; ")
+            if "latency_ms" not in cols:
+                conn.execute("ALTER TABLE llm_requests ADD COLUMN latency_ms INTEGER NOT NULL DEFAULT 0;")
+            if "translation_status" not in cols:
+                conn.execute("ALTER TABLE llm_requests ADD COLUMN translation_status TEXT NOT NULL DEFAULT 'unknown';")
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS route_failures (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    ts REAL NOT NULL,
+                    agent TEXT NOT NULL,
+                    session_id TEXT NOT NULL,
+                    route_mode TEXT NOT NULL DEFAULT '',
+                    provider TEXT NOT NULL DEFAULT '',
+                    model TEXT NOT NULL DEFAULT '',
+                    http_status INTEGER NOT NULL DEFAULT 0,
+                    error_kind TEXT NOT NULL,
+                    latency_ms INTEGER NOT NULL DEFAULT 0,
+                    translation_status TEXT NOT NULL DEFAULT 'unknown'
+                );
+                """
+            )
+            failure_cols = {r[1] for r in conn.execute("PRAGMA table_info(route_failures);").fetchall()}
+            if "translation_status" not in failure_cols:
+                conn.execute("ALTER TABLE route_failures ADD COLUMN translation_status TEXT NOT NULL DEFAULT 'unknown';")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_route_failures_ts ON route_failures(ts);")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_req_ts ON llm_requests(ts);")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_req_agent ON llm_requests(agent);")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_req_model ON llm_requests(model);")
@@ -311,6 +338,8 @@ class DataStore:
         preview: str,
         provider: str = "",
         route_mode: str = "",
+        latency_ms: int = 0,
+        translation_status: str = "unknown",
     ) -> str:
         now = time.time()
         hour_bucket = time.strftime("%Y-%m-%d %H:00", time.localtime(now))
@@ -358,8 +387,8 @@ class DataStore:
                     input_count_reported, cache_count_reported, output_count_reported,
                     saved_fa_tokens, kv_status,
                     prompt_ms, decode_ms, prompt_tps, decode_tps,
-                    shadow_cost_usd, preview, provider, route_mode
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    shadow_cost_usd, preview, provider, route_mode, latency_ms, translation_status
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     now,
@@ -383,20 +412,53 @@ class DataStore:
                     preview[:200],
                     str(provider or "")[:100],
                     str(route_mode or "")[:32],
+                    max(0, int(latency_ms)),
+                    translation_status if translation_status in {"used", "bypassed", "unknown"} else "unknown",
                 ),
             )
         return kv_status
+
+    def record_route_failure(
+        self,
+        *,
+        agent: str,
+        session_id: str,
+        route_mode: str,
+        provider: str,
+        model: str,
+        error_kind: str,
+        http_status: int = 0,
+        latency_ms: int = 0,
+        translation_status: str = "unknown",
+    ) -> None:
+        allowed_error_kinds = {"configuration", "upstream-http", "connection", "fallback"}
+        safe_error_kind = error_kind if error_kind in allowed_error_kinds else "connection"
+        with self._db_lock, self._connection() as conn:
+            conn.execute(
+                """INSERT INTO route_failures
+                   (ts, agent, session_id, route_mode, provider, model, http_status, error_kind, latency_ms, translation_status)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    time.time(), str(agent or "")[:160], str(session_id or "")[:160],
+                    str(route_mode or "")[:32], str(provider or "")[:100],
+                    str(model or "")[:160], max(0, int(http_status)), safe_error_kind,
+                    max(0, int(latency_ms)),
+                    translation_status if translation_status in {"used", "bypassed", "unknown"} else "unknown",
+                ),
+            )
 
     def prune_expired(self, days: int | None = None) -> dict:
         cfg = self.load_config()
         keep_days = cfg["retention"]["days"] if days is None else int(days)
         if keep_days <= 0:
-            return {"deleted_requests": 0, "deleted_sessions": 0, "retention_days": 0}
+            return {"deleted_requests": 0, "deleted_failures": 0, "deleted_sessions": 0, "retention_days": 0}
 
         cutoff = time.time() - (keep_days * 86400.0)
         with self._db_lock, self._connection() as conn:
             cur = conn.execute("DELETE FROM llm_requests WHERE ts < ?", (cutoff,))
             deleted_reqs = cur.rowcount or 0
+            failed_cur = conn.execute("DELETE FROM route_failures WHERE ts < ?", (cutoff,))
+            deleted_failures = failed_cur.rowcount or 0
 
         deleted_sess = 0
         for folder in (self.sessions_dir, self.mirrors_dir):
@@ -409,6 +471,7 @@ class DataStore:
                     pass
         return {
             "deleted_requests": deleted_reqs,
+            "deleted_failures": deleted_failures,
             "deleted_sessions": deleted_sess,
             "retention_days": keep_days,
         }
@@ -416,6 +479,7 @@ class DataStore:
     def clear_telemetry(self) -> None:
         with self._db_lock, self._connection() as conn:
             conn.execute("DELETE FROM llm_requests;")
+            conn.execute("DELETE FROM route_failures;")
             conn.commit()
             conn.execute("VACUUM;")
 
@@ -559,10 +623,17 @@ class DataStore:
                 f"""
                 SELECT id, ts, agent, session_id, model, uncached_input, cached_input,
                        output_tokens, input_count_reported, cache_count_reported, output_count_reported,
-                       saved_fa_tokens, kv_status, prompt_tps, decode_tps, preview, provider, route_mode
+                       saved_fa_tokens, kv_status, prompt_tps, decode_tps, preview, provider, route_mode, latency_ms, translation_status
                 FROM llm_requests WHERE ts >= ? {extra_sql}
                 ORDER BY id DESC LIMIT ?
                 """,
+                [win_since, *params_extra, max(1, min(100, int(recent_limit)))],
+            ).fetchall()
+            recent_failure_rows = conn.execute(
+                f"""SELECT id, ts, agent, session_id, route_mode, provider, model,
+                          http_status, error_kind, latency_ms, translation_status
+                   FROM route_failures WHERE ts >= ? {extra_sql}
+                   ORDER BY id DESC LIMIT ?""",
                 [win_since, *params_extra, max(1, min(100, int(recent_limit)))],
             ).fetchall()
             win_summary = agg_since(win_since)
@@ -639,12 +710,16 @@ class DataStore:
             recent.append(
                 {
                     "id": int(r["id"]),
+                    "ts": float(r["ts"]),
                     "time": time.strftime("%H:%M:%S", time.localtime(float(r["ts"]))),
                     "agent": r["agent"],
                     "session_id": r["session_id"],
                     "model": r["model"],
                     "provider": r["provider"],
                     "route_mode": r["route_mode"],
+                    "latency_ms": int(r["latency_ms"]),
+                    "translation_status": r["translation_status"],
+                    "status": "success",
                     "uncached_in": u_in,
                     "cached_in": c_in,
                     "total_in": tot_in,
@@ -662,6 +737,25 @@ class DataStore:
                     "preview": r["preview"],
                 }
             )
+
+        recent_failures = [
+            {
+                "id": int(r["id"]),
+                "ts": float(r["ts"]),
+                "time": time.strftime("%H:%M:%S", time.localtime(float(r["ts"]))),
+                "agent": r["agent"],
+                "session_id": r["session_id"],
+                "route_mode": r["route_mode"],
+                "provider": r["provider"],
+                "model": r["model"],
+                "http_status": int(r["http_status"]),
+                "error_kind": r["error_kind"],
+                "latency_ms": int(r["latency_ms"]),
+                "translation_status": r["translation_status"],
+                "status": "failed",
+            }
+            for r in recent_failure_rows
+        ]
 
         return {
             "window_hours": window_hours,
@@ -681,6 +775,7 @@ class DataStore:
             "hourly": hourly,
             "chart_granularity": chart_granularity,
             "recent": recent,
+            "recent_failures": recent_failures,
         }
 
     def data_dir_stats(self) -> dict:

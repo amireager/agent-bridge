@@ -1,3 +1,4 @@
+import time
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -20,7 +21,7 @@ class LiveRouteTraceTests(unittest.TestCase):
                 "api_key": "must-never-be-copied",
             })
             self.assertEqual(set(hub.active_routes["omp-2"]), {
-                "agent_id", "started_at", "status", "route_mode", "provider", "model"
+                "agent_id", "started_at", "status", "route_mode", "provider", "model", "translation_status"
             })
             self.assertEqual(hub.active_routes["omp-2"]["model"], "MiniCPM-2B")
 
@@ -30,6 +31,26 @@ class LiveRouteTraceTests(unittest.TestCase):
 
             hub.wire_request_completed("omp-2")
             self.assertNotIn("omp-2", hub.active_routes)
+
+    def test_translation_marker_is_carried_only_as_explicit_web_metadata(self):
+        with TemporaryDirectory() as temp_dir:
+            hub = BridgeHub(DataStore(Path(temp_dir) / ".data"), 18080)
+            hub.broadcast_state = Mock()
+            hub.view_kind = "mirror"
+            hub.view_id = "pi"
+            hub.pty_heartbeats["pi"] = time.time()
+
+            hub.submit_prompt("سلام", "Hello", translation_used=True)
+            self.assertEqual(hub.pending_fa_by_agent["pi"]["translation_status"], "used")
+            hub.wire_request_started("pi", {
+                "route_mode": "local", "provider": "local", "model": "m",
+                "translation_status": "used",
+            })
+            self.assertEqual(hub.active_routes["pi"]["translation_status"], "used")
+
+            hub.wire_request_completed("pi")
+            hub.submit_prompt("hello", "hello", translation_used=False)
+            self.assertEqual(hub.pending_fa_by_agent["pi"]["translation_status"], "bypassed")
 
     def test_failed_route_is_removed_and_agent_returns_idle(self):
         with TemporaryDirectory() as temp_dir:

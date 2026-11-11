@@ -36,6 +36,15 @@ class CleanupFlowTests(unittest.TestCase):
             conn.execute("UPDATE llm_requests SET ts=?", (time.time() - 60 * 86400,))
             conn.commit()
 
+    def _failed_request(self):
+        self.store.record_route_failure(
+            agent="tester", session_id="s1", route_mode="local", provider="local",
+            model="local-test", error_kind="connection", http_status=502,
+        )
+        with closing(sqlite3.connect(self.store.db_path)) as conn:
+            conn.execute("UPDATE route_failures SET ts=?", (time.time() - 60 * 86400,))
+            conn.commit()
+
     def test_preview_groups_categories_and_protects_live_mirrors(self):
         lab = self.hub.create_lab_session("old lab")
         lab_path = self.data_dir / "sessions" / "lab" / f"{lab['id']}.json"
@@ -53,13 +62,14 @@ class CleanupFlowTests(unittest.TestCase):
         self.hub.pty_heartbeats["active-pty"] = time.time()
         self.hub._inspector_ring = [{"frame": 1}, {"frame": 2}]
         self._request()
+        self._failed_request()
 
         preview = self.hub.cleanup_preview(7, ["telemetry", "lab", "mirrors", "xray"])
-        self.assertEqual(preview["categories"]["telemetry"]["items"], 1)
+        self.assertEqual(preview["categories"]["telemetry"]["items"], 2)
         self.assertEqual(preview["categories"]["lab"]["items"], 1)
         self.assertEqual(preview["categories"]["mirrors"]["items"], 1)
         self.assertEqual(preview["categories"]["xray"]["items"], 2)
-        self.assertEqual(preview["total_items"], 5)
+        self.assertEqual(preview["total_items"], 6)
         self.assertNotIn("active-pty", [item["id"] for item in preview["files"]])
 
     def test_run_cleanup_reports_per_category_and_keeps_live_pty_history(self):
@@ -76,15 +86,18 @@ class CleanupFlowTests(unittest.TestCase):
         self.hub.pty_heartbeats["live"] = time.time()
         self.hub._inspector_ring = [{"frame": 1}]
         self._request()
+        self._failed_request()
 
         result = self.hub.run_cleanup(7, ["telemetry", "lab", "mirrors", "xray"])
-        self.assertEqual(result["deleted_by_scope"], {"telemetry": 1, "xray": 1, "lab": 1, "mirrors": 1})
+        self.assertEqual(result["deleted_by_scope"], {"telemetry": 2, "xray": 1, "lab": 1, "mirrors": 1})
+        self.assertEqual(result["deleted_failures"], 1)
         self.assertFalse((self.data_dir / "sessions" / "lab" / f"{lab['id']}.json").exists())
         self.assertFalse((self.data_dir / "mirrors" / "offline.json").exists())
         self.assertTrue((self.data_dir / "mirrors" / "live.json").exists())
         self.assertEqual(len(self.hub._inspector_ring), 0)
         with closing(sqlite3.connect(self.store.db_path)) as conn:
             self.assertEqual(conn.execute("SELECT COUNT(*) FROM llm_requests").fetchone()[0], 0)
+            self.assertEqual(conn.execute("SELECT COUNT(*) FROM route_failures").fetchone()[0], 0)
 
 
 if __name__ == "__main__":

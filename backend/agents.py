@@ -223,6 +223,8 @@ class BridgeHub:
         self.agent_activity[agent_id] = {"status": "GENERATING", "started_at": started_at}
         if route:
             safe_route = {key: str(route.get(key) or "")[:160] for key in ("route_mode", "provider", "model")}
+            translation_status = route.get("translation_status", "unknown")
+            safe_route["translation_status"] = translation_status if translation_status in {"used", "bypassed", "unknown"} else "unknown"
             self.active_routes[agent_id] = {
                 "agent_id": agent_id,
                 "started_at": started_at,
@@ -238,6 +240,9 @@ class BridgeHub:
         for key in ("route_mode", "provider", "model"):
             if key in route:
                 current[key] = str(route[key] or "")[:160]
+        if "translation_status" in route:
+            value = route["translation_status"]
+            current["translation_status"] = value if value in {"used", "bypassed", "unknown"} else "unknown"
         self.broadcast_state()
 
     def wire_request_completed(self, agent_id: str) -> None:
@@ -357,7 +362,10 @@ class BridgeHub:
             with self.store._db_lock:
                 import sqlite3
                 with closing(sqlite3.connect(self.store.db_path)) as conn:
-                    req_count = int(conn.execute("SELECT COUNT(*) FROM llm_requests WHERE ts < ?", (cutoff or time.time() + 1,)).fetchone()[0])
+                    stale_cutoff = cutoff or time.time() + 1
+                    completed_count = int(conn.execute("SELECT COUNT(*) FROM llm_requests WHERE ts < ?", (stale_cutoff,)).fetchone()[0])
+                    failed_count = int(conn.execute("SELECT COUNT(*) FROM route_failures WHERE ts < ?", (stale_cutoff,)).fetchone()[0])
+                    req_count = completed_count + failed_count
         categories = {
             "telemetry": {"items": req_count, "bytes": None, "unit": "درخواست"},
             "xray": {"items": xray_count, "bytes": None, "unit": "قاب"},
@@ -376,6 +384,7 @@ class BridgeHub:
         preview = self.cleanup_preview(days, scopes)
         cutoff = 0.0 if int(days) <= 0 else time.time() - int(days) * 86400.0
         deleted_requests = 0
+        deleted_failures = 0
         deleted_xray = 0
         if "xray" in scopes:
             with self._lock:
@@ -386,8 +395,11 @@ class BridgeHub:
             with self.store._db_lock:
                 import sqlite3
                 with closing(sqlite3.connect(self.store.db_path)) as conn:
-                    cur = conn.execute("DELETE FROM llm_requests WHERE ts < ?", (cutoff or time.time()+1,))
+                    stale_cutoff = cutoff or time.time() + 1
+                    cur = conn.execute("DELETE FROM llm_requests WHERE ts < ?", (stale_cutoff,))
                     deleted_requests = cur.rowcount or 0
+                    failed_cur = conn.execute("DELETE FROM route_failures WHERE ts < ?", (stale_cutoff,))
+                    deleted_failures = failed_cur.rowcount or 0
                     conn.commit()
                     conn.execute("VACUUM;")
         db_size_after = self.store.db_path.stat().st_size if self.store.db_path.exists() else 0
@@ -424,10 +436,11 @@ class BridgeHub:
         self.broadcast_state()
         return {
             "deleted_requests": deleted_requests,
+            "deleted_failures": deleted_failures,
             "deleted_files": deleted_files,
             "deleted_xray_frames": deleted_xray,
             "deleted_lab_sessions": len(deleted_lab_ids),
-            "deleted_by_scope": {"telemetry": deleted_requests, "xray": deleted_xray, **deleted_by_scope},
+            "deleted_by_scope": {"telemetry": deleted_requests + deleted_failures, "xray": deleted_xray, **deleted_by_scope},
             "freed_file_bytes": freed_file_bytes,
             "freed_database_bytes": freed_db_bytes,
             "freed_bytes": freed_file_bytes + freed_db_bytes,
@@ -827,11 +840,13 @@ class BridgeHub:
         # Pair Persian draft if injected from Web UI moments ago
         user_display = last_user_txt
         saved_tok = 0
+        translation_status = "unknown"
         pend = self.pending_fa_by_agent.get(agent_name)
         if pend and (time.time() - pend["ts"] < 45.0):
             if pend["en"].strip()[:40] in last_user_txt:
                 user_display = pend["fa"]
                 saved_tok = pend["saved"]
+                translation_status = pend.get("translation_status", "unknown")
                 self.pending_fa_by_agent.pop(agent_name, None)
 
         turn = {
@@ -844,6 +859,7 @@ class BridgeHub:
             "user_raw": user_display,
             "prompt_sent": last_user_txt,
             "saved_fa_tokens": saved_tok,
+            "translation_status": translation_status,
             "kv_status": kv_status,
             "thinking": extracted_think,
             "thinking_fa": "",
@@ -1127,8 +1143,9 @@ class BridgeHub:
             self.broadcast_state()
 
     # ---- Unified Prompt Dispatch ----
-    def submit_prompt(self, user_raw: str, prompt_sent: str) -> dict:
+    def submit_prompt(self, user_raw: str, prompt_sent: str, translation_used: bool | None = None) -> dict:
         savings = estimate_persian_token_savings(user_raw, prompt_sent)
+        translation_status = "used" if translation_used is True else ("bypassed" if translation_used is False else "unknown")
 
         # Case 1: Built-in Direct Model & Tool Lab
         if self.view_kind == "lab":
@@ -1156,6 +1173,7 @@ class BridgeHub:
                 "user_raw": user_raw,
                 "prompt_sent": prompt_sent,
                 "saved_fa_tokens": savings["saved"],
+                "translation_status": translation_status,
                 "kv_status": "warm",
                 "thinking": "",
                 "thinking_fa": "",
@@ -1188,6 +1206,7 @@ class BridgeHub:
             "fa": user_raw,
             "en": prompt_sent,
             "saved": savings["saved"],
+            "translation_status": translation_status,
             "ts": time.time(),
         }
         self.emit_event("pty_inject", {"agent_id": target_agent, "message": prompt_sent})

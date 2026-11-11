@@ -4,6 +4,7 @@ window.ABChatPage = (() => {
   const PERSIAN_SEQ_RE = /[\u0600-\u06FF\uFB50-\uFDFF\uFE70-\uFEFF]+(?:\s+[\u0600-\u06FF\uFB50-\uFDFF\uFE70-\uFEFF]+)*/g;
 
   let lastTranslatedDraft = '';
+  let lastTranslationUsed = false;
   let showMdPreviewInComposer = false;
   let lastSessionId = null;
   let lastTurnCount = 0;
@@ -145,6 +146,7 @@ window.ABChatPage = (() => {
     const wireEl = document.getElementById('wireInput');
 
     rawEl.addEventListener('input', () => {
+      lastTranslationUsed = false;
       rawEl.style.height = 'auto';
       rawEl.style.height = Math.min(150, rawEl.scrollHeight) + 'px';
       const bubble = document.getElementById('trChatBubble');
@@ -261,6 +263,7 @@ window.ABChatPage = (() => {
     }
     wireEl.value = res.translation || raw;
     lastTranslatedDraft = raw;
+    lastTranslationUsed = true;
     document.getElementById('staleNotice').classList.remove('show');
     document.getElementById('trMetaTag').textContent = `${res.engine} · ${res.elapsed_ms}ms`;
     updateSavingsPill(raw, wireEl.value);
@@ -290,6 +293,7 @@ window.ABChatPage = (() => {
         user_raw: rawTxt,
         prompt_sent: rawTxt,
         allow_persian: true,
+        translation_used: false,
         source: 'web',
         agent_id: st?.active_agent
       });
@@ -313,6 +317,7 @@ window.ABChatPage = (() => {
       }
       wireEl.value = rawTxt;
       lastTranslatedDraft = rawTxt;
+      lastTranslationUsed = false;
       bubble.classList.add('open');
     }
 
@@ -337,6 +342,7 @@ window.ABChatPage = (() => {
       user_raw: rawTxt || outgoingEn,
       prompt_sent: outgoingEn,
       allow_persian: allowFa,
+      translation_used: lastTranslationUsed,
       source: 'web',
       agent_id: st?.active_agent
     });
@@ -352,6 +358,7 @@ window.ABChatPage = (() => {
     rawEl.style.height = 'auto';
     wireEl.value = '';
     lastTranslatedDraft = '';
+    lastTranslationUsed = false;
     if (document.getElementById('allowPersianCheck')) {
       document.getElementById('allowPersianCheck').checked = false;
     }

@@ -1,3 +1,4 @@
+import sqlite3
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -14,7 +15,7 @@ class UsageAccuracyTests(unittest.TestCase):
     def tearDown(self):
         self.temp.cleanup()
 
-    def record(self, *, uncached, cached, output, input_reported=True, output_reported=True, provider="", route_mode=""):
+    def record(self, *, uncached, cached, output, input_reported=True, output_reported=True, provider="", route_mode="", latency_ms=0, translation_status="unknown"):
         return self.store.record_llm_request(
             agent="pi",
             session_id="test-session",
@@ -33,10 +34,12 @@ class UsageAccuracyTests(unittest.TestCase):
             preview="",
             provider=provider,
             route_mode=route_mode,
+            latency_ms=latency_ms,
+            translation_status=translation_status,
         )
 
     def test_total_includes_input_cache_and_output_and_peak_includes_output(self):
-        self.record(uncached=80, cached=20, output=40, provider="OpenRouter", route_mode="online")
+        self.record(uncached=80, cached=20, output=40, provider="OpenRouter", route_mode="online", latency_ms=438, translation_status="used")
         usage = self.store.query_usage("deepseek-v4.1-flash", 24)
         window = usage["window"]
         self.assertEqual(window["total_input"], 100)
@@ -52,6 +55,9 @@ class UsageAccuracyTests(unittest.TestCase):
         self.assertEqual(usage["recent"][0]["output_count_reported"], True)
         self.assertEqual(usage["recent"][0]["provider"], "OpenRouter")
         self.assertEqual(usage["recent"][0]["route_mode"], "online")
+        self.assertEqual(usage["recent"][0]["latency_ms"], 438)
+        self.assertEqual(usage["recent"][0]["status"], "success")
+        self.assertEqual(usage["recent"][0]["translation_status"], "used")
 
     def test_old_request_rows_have_unknown_destination_not_a_guessed_provider(self):
         self.record(uncached=10, cached=0, output=5)
@@ -81,6 +87,42 @@ class UsageAccuracyTests(unittest.TestCase):
             with self.subTest(hours=hours):
                 usage = self.store.query_usage("deepseek-v4.1-flash", hours)
                 self.assertEqual(usage["chart_granularity"], expected)
+
+    def test_existing_telemetry_database_migrates_route_detail_columns(self):
+        legacy_dir = Path(self.temp.name) / "legacy-data"
+        legacy_dir.mkdir()
+        db_path = legacy_dir / "telemetry.sqlite"
+        with sqlite3.connect(db_path) as conn:
+            conn.execute(
+                """CREATE TABLE llm_requests (
+                    id INTEGER PRIMARY KEY, ts REAL NOT NULL, agent TEXT NOT NULL,
+                    model TEXT NOT NULL, provider TEXT NOT NULL DEFAULT '',
+                    route_mode TEXT NOT NULL DEFAULT ''
+                )"""
+            )
+        DataStore(legacy_dir)
+        with sqlite3.connect(db_path) as conn:
+            columns = {row[1] for row in conn.execute("PRAGMA table_info(llm_requests)")}
+            self.assertIn("latency_ms", columns)
+            self.assertIn("translation_status", columns)
+            failed_columns = {row[1] for row in conn.execute("PRAGMA table_info(route_failures)")}
+            self.assertIn("translation_status", failed_columns)
+
+    def test_failed_route_is_auditable_without_logging_prompt_or_secret(self):
+        self.store.record_route_failure(
+            agent="omp-2", session_id="omp-2", route_mode="online-fallback",
+            provider="OpenRouter", model="model-x", error_kind="fallback",
+            http_status=502, latency_ms=913,
+        )
+        usage = self.store.query_usage("deepseek-v4.1-flash", 24)
+        failure = usage["recent_failures"][0]
+        self.assertEqual(failure["agent"], "omp-2")
+        self.assertEqual(failure["provider"], "OpenRouter")
+        self.assertEqual(failure["route_mode"], "online-fallback")
+        self.assertEqual(failure["http_status"], 502)
+        self.assertEqual(failure["error_kind"], "fallback")
+        self.assertEqual(failure["latency_ms"], 913)
+        self.assertEqual(failure["status"], "failed")
 
     def test_cache_drop_is_heuristic_and_requires_previously_warm_cache(self):
         self.record(uncached=100, cached=900, output=10)

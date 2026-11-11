@@ -42,9 +42,13 @@ assert.match(empty, /Google Translate · GTX/);
 assert.match(empty, /Inference محلی/);
 assert.match(empty, /source-empty/);
 assert.match(empty, /route-wires/);
-assert.match(empty, /در حال حاضر درخواست فعالی در مسیر نیست/);
+assert.match(empty, /در انتظار درخواست/);
+assert.doesNotMatch(empty, /در حال حاضر درخواست فعالی در مسیر نیست/);
 assert.match(empty, /درخواست‌های اخیر/);
 assert.match(empty, /Lab داخلی/);
+assert.match(empty, /موفق در ۲۴ ساعت اخیر/);
+assert.doesNotMatch(empty, /metric-card|metric-model|metric-engine/);
+assert.doesNotMatch(empty, /ops-header-state/);
 
 const connected = render({
   ...common,
@@ -54,28 +58,44 @@ const connected = render({
     { agent_id: 'old-offline', pty_live: false, activity: 'IDLE' },
   ],
   lab_sessions: [{ id: 'lab-session-01', title: 'نمونه Lab', turn_count: 4, archived: false }],
-  active_routes: [{ agent_id: 'omp-2', route_mode: 'local', provider: 'local', model: 'local-model', status: 'IN_FLIGHT' }],
+  active_routes: [{ agent_id: 'omp-2', route_mode: 'local', provider: 'local', model: 'local-model', translation_status: 'used', status: 'IN_FLIGHT' }],
 });
 assert.match(connected, /data-agent="pi-1"/);
 assert.match(connected, /data-agent="omp-2"/);
 assert.doesNotMatch(connected, /data-agent="old-offline"/);
-assert.match(connected, /PTYهای زنده/);
+assert.match(connected, /ترمینال‌های مستقل/);
 assert.match(connected, /data-lab="lab-session-01"/);
 assert.match(connected, /has-traffic/);
 assert.match(connected, /1 درخواست در پرواز/);
 assert.match(connected, /omp-2/);
 assert.match(connected, /local-model/);
 assert.match(connected, /در حال اجرا/);
+assert.match(connected, /استفاده از مترجم ثبت شد/);
 
 const recent = render({
   ...common,
-  usage: { recent: [{ id: 34, time: '12:05:06', agent: 'hermes-2', model: 'Qwen-Test', provider: 'OpenRouter', route_mode: 'online', total_in: 1234, out_tok: 250 }] },
+  usage: { recent: [{ id: 34, time: '12:05:06', agent: 'hermes-2', model: 'Qwen-Test', provider: 'OpenRouter', route_mode: 'online', total_in: 1234, cached_in: 200, out_tok: 250, latency_ms: 438, input_count_reported: true, cache_count_reported: true, output_count_reported: true }] },
 });
 assert.match(recent, /hermes-2/);
 assert.match(recent, /Qwen-Test/);
 assert.match(recent, /OpenRouter · مسیر آنلاین/);
 assert.match(recent, /1,234 in/);
+assert.match(recent, /جزئیات درخواست/);
+assert.match(recent, /مترجم/);
+assert.match(recent, /مصرف مترجم نامعلوم/);
+assert.match(recent, /438 ms/);
 
+const failed = render({
+  ...common,
+  usage: {
+    recent: [{ id: 35, ts: 200, time: '12:07:00', agent: 'omp-4', model: 'mistral-x', provider: 'OpenRouter', route_mode: 'online', status: 'success', total_in: 50, out_tok: 10 }],
+    recent_failures: [{ id: 6, ts: 201, time: '12:07:01', agent: 'pi-5', session_id: 'pi-5', model: 'mistral-x', provider: 'OpenRouter', route_mode: 'online', status: 'failed', error_kind: 'upstream-http', http_status: 503, latency_ms: 300 }],
+  },
+});
+assert.match(failed, /ناموفق · HTTP 503/);
+assert.match(failed, /مقصد پاسخ HTTP ناموفق داده است/);
+assert.match(failed, /300 ms/);
+assert.match(failed, /mistral-x/);
 const online = render({
   ...common,
   config: {
@@ -89,6 +109,9 @@ assert.match(online, /OpenRouter/);
 assert.match(online, /translator-v2/);
 assert.match(online, /BYPASS/);
 assert.match(online, /ONLINE/);
+assert.match(online, /target-primary configured/);
+assert.match(online, /اتصال مقصد تست نشده/);
+assert.doesNotMatch(online, /target-primary ready/);
 
 const offline = render({
   ...common,

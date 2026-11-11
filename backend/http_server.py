@@ -369,6 +369,7 @@ def make_handler(hub: BridgeHub):
                 user_raw = body.get("user_raw", "")
                 prompt_sent = body.get("prompt_sent", "")
                 allow_persian = bool(body.get("allow_persian", False))
+                translation_used = body.get("translation_used") if isinstance(body.get("translation_used"), bool) else None
 
                 has_fa = any("\u0600" <= ch <= "\u06ff" for ch in prompt_sent)
                 if has_fa and not allow_persian:
@@ -381,7 +382,7 @@ def make_handler(hub: BridgeHub):
                         400,
                     )
                 try:
-                    res = hub.submit_prompt(user_raw=user_raw or prompt_sent, prompt_sent=prompt_sent)
+                    res = hub.submit_prompt(user_raw=user_raw or prompt_sent, prompt_sent=prompt_sent, translation_used=translation_used)
                     return self._send_json({"ok": True, "result": res})
                 except Exception as exc:
                     return self._send_json({"ok": False, "error": str(exc)}, 500)
@@ -656,16 +657,44 @@ def make_handler(hub: BridgeHub):
                     else:
                         preview_txt = str(c)
 
+            last_user_text = ""
+            for message in reversed(msgs):
+                if isinstance(message, dict) and message.get("role") == "user":
+                    content = message.get("content", "")
+                    if isinstance(content, list):
+                        last_user_text = " ".join(str(item.get("text", "")) for item in content if isinstance(item, dict) and item.get("type") == "text").strip()
+                    else:
+                        last_user_text = str(content).strip()
+                    if last_user_text:
+                        break
+            pending_translation = hub.pending_fa_by_agent.get(agent_name)
+            translation_status = "unknown"
+            if (
+                pending_translation
+                and time.time() - float(pending_translation.get("ts", 0)) < 45.0
+                and str(pending_translation.get("en", "")).strip()[:40]
+                and str(pending_translation.get("en", "")).strip()[:40] in last_user_text
+            ):
+                candidate_status = pending_translation.get("translation_status", "unknown")
+                translation_status = candidate_status if candidate_status in {"used", "bypassed", "unknown"} else "unknown"
+
             models_cfg = hub.config.get("models", {})
             remote_active = models_cfg.get("default_mode", "local") == "online"
             remote_model = ""
             route_provider = "local"
             route_mode = "online" if remote_active else "local"
+            route_started = time.perf_counter()
             if remote_active:
                 try:
                     req, request_opener, remote_model, route_provider = self._make_remote_request(payload, path)
                     payload["model"] = remote_model
                 except Exception as exc:
+                    hub.store.record_route_failure(
+                        agent=agent_name, session_id=agent_name, route_mode="online",
+                        provider="", model=str(models_cfg.get("online_model") or ""),
+                        error_kind="configuration", latency_ms=int((time.perf_counter() - route_started) * 1000),
+                        translation_status=translation_status,
+                    )
                     hub.wire_request_failed(agent_name)
                     self._send_json({"error": str(exc)}, 503)
                     return
@@ -683,24 +712,43 @@ def make_handler(hub: BridgeHub):
                 "route_mode": route_mode,
                 "provider": route_provider,
                 "model": route_model,
+                "translation_status": translation_status,
             })
             try:
                 resp = request_opener.open(req, timeout=300)
             except (urllib.error.HTTPError, Exception) as err:
                 # Online fallback is explicit opt-in; never send local prompts to a provider silently.
                 if not remote_active and models_cfg.get("online_fallback"):
+                    fallback_provider = ""
+                    fallback_model = ""
                     try:
-                        req, request_opener, remote_model, route_provider = self._make_remote_request(payload, path)
+                        req, request_opener, fallback_model, fallback_provider = self._make_remote_request(payload, path)
+                        remote_model, route_provider = fallback_model, fallback_provider
                         hub.update_wire_route(agent_name, route_mode="online-fallback", provider=route_provider, model=remote_model)
                         resp = request_opener.open(req, timeout=300)
                         remote_active = True
                         route_mode = "online-fallback"
                         payload["model"] = remote_model
                     except Exception as fallback_error:
+                        hub.store.record_route_failure(
+                            agent=agent_name, session_id=agent_name, route_mode="online-fallback",
+                            provider=fallback_provider, model=fallback_model,
+                            error_kind="fallback", http_status=int(getattr(fallback_error, "code", 0) or 0),
+                            latency_ms=int((time.perf_counter() - route_started) * 1000),
+                            translation_status=translation_status,
+                        )
                         hub.wire_request_failed(agent_name)
                         self._send_json({"error": f"Local model failed ({err}); online fallback failed ({fallback_error})"}, 502)
                         return
                 else:
+                    hub.store.record_route_failure(
+                        agent=agent_name, session_id=agent_name, route_mode=route_mode,
+                        provider=route_provider, model=route_model,
+                        error_kind="upstream-http" if isinstance(err, urllib.error.HTTPError) else "connection",
+                        http_status=int(getattr(err, "code", 0) or 0),
+                        latency_ms=int((time.perf_counter() - route_started) * 1000),
+                        translation_status=translation_status,
+                    )
                     hub.wire_request_failed(agent_name)
                     if isinstance(err, urllib.error.HTTPError):
                         eb = err.read()
@@ -910,6 +958,8 @@ def make_handler(hub: BridgeHub):
                 preview=preview_txt.strip().replace("\n", " ")[:150],
                 provider=route_provider,
                 route_mode=route_mode,
+                latency_ms=int(elapsed_s * 1000),
+                translation_status=translation_status,
             )
 
             turn_metrics = {

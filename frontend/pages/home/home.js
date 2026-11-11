@@ -24,6 +24,12 @@ window.ABHomePage = (() => {
     return 'مسیر قدیمی / ثبت‌نشده';
   }
 
+  function translationStatusLabel(status) {
+    if (status === 'used') return 'استفاده از مترجم ثبت شد';
+    if (status === 'bypassed') return 'بدون عبور از مترجم';
+    return 'مصرف مترجم نامعلوم';
+  }
+
   function render(host, state) {
     const upstream = state.upstream || {};
     const config = state.config || {};
@@ -32,7 +38,11 @@ window.ABHomePage = (() => {
     const mirrors = (state.mirrors || []).filter(agent => agent.pty_live && !agent.archived);
     const labs = (state.lab_sessions || []).filter(session => !session.archived);
     const activeRoutes = Array.isArray(state.active_routes) ? state.active_routes : [];
-    const recent = (state.usage?.recent || []).slice(0, 5);
+    const successfulRequests = state.usage?.recent || [];
+    const failedRequests = state.usage?.recent_failures || [];
+    const recent = [...successfulRequests, ...failedRequests]
+      .sort((a, b) => Number(b.ts || 0) - Number(a.ts || 0))
+      .slice(0, 5);
     const isOnlineMode = modelsCfg.default_mode === 'online';
     const vault = state.model_vault || {};
     const activeAccount = (vault.accounts || []).find(account => account.id === modelsCfg.active_account_id && account.enabled !== false);
@@ -48,11 +58,13 @@ window.ABHomePage = (() => {
       ? `${translation.offline_model || 'مدل مترجم محلی'} · ${translation.offline_protocol === 'rest' ? 'REST' : 'OpenAI-compatible'}`
       : (ENGINE_NAMES[engineKey] || engineKey);
     const translatorReady = engineKey === 'custom-offline' ? Boolean(state.translator_online) : true;
-    const targetReady = isOnlineMode
-      ? Boolean(activeAccount && targetModel && !vault.locked && !state.model_status?.alert)
-      : Boolean(upstream.online);
+    const targetConfigured = Boolean(activeAccount && targetModel && !vault.locked);
+    const targetAvailable = !isOnlineMode && Boolean(upstream.online);
+    const targetNodeState = isOnlineMode
+      ? (targetConfigured ? 'configured' : 'offline')
+      : (targetAvailable ? 'ready' : 'offline');
     const targetStatus = isOnlineMode
-      ? (vault.locked ? 'خزانه قفل است' : (targetReady ? 'حساب و مدل انتخاب شده' : 'پیکربندی آنلاین ناقص'))
+      ? (vault.locked ? 'خزانه قفل است' : (targetConfigured ? 'حساب و مدل انتخاب شده · اتصال مقصد تست نشده' : 'پیکربندی آنلاین ناقص'))
       : (upstream.online ? 'اتصال سرور برقرار' : 'سرور مدل قطع است');
     const targetProviderLabel = isOnlineMode ? providerName : 'Inference محلی';
     const modelPool = isOnlineMode
@@ -74,9 +86,6 @@ window.ABHomePage = (() => {
         <span class="lab-source-dot"></span><span>${esc(session.title)}</span><small>${Number(session.turn_count || 0)} دور</small>
       </button>`).join('');
     const remainingLabs = Math.max(0, labs.length - 3);
-    const sourceEmpty = !mirrors.length && !labs.length
-      ? '<div class="source-empty">هیچ ورودی فعالی پیدا نشد.<br><small>ترمینال را با wrapper اجرا کن یا یک نشست Lab بساز.</small></div>'
-      : '';
 
     const localModelsHtml = modelPool.length
       ? `<div class="model-chips">${modelPool.slice(0, 5).map(name => `<span class="model-chip ${name === targetModel ? 'selected' : ''}" title="${esc(name)}"><i></i>${esc(name)}</span>`).join('')}${modelPool.length > 5 ? `<span class="model-chip more">+${modelPool.length - 5} مدل</span>` : ''}</div>`
@@ -90,18 +99,50 @@ window.ABHomePage = (() => {
         <span>${esc(providerLabel(route.provider, route.route_mode))}</span>
         <span class="inflight-arrow">→</span>
         <b>${esc(route.model || 'مدل در حال resolve')}</b>
-        <small>${esc(routeModeLabel(route.route_mode))} · در حال اجرا</small>
+        <small>${esc(routeModeLabel(route.route_mode))} · ${esc(translationStatusLabel(route.translation_status))} · در حال اجرا</small>
       </div>`).join('');
 
+    const failureLabels = {
+      configuration: 'تنظیم مقصد یا حساب کامل نیست',
+      'upstream-http': 'مقصد پاسخ HTTP ناموفق داده است',
+      connection: 'اتصال به مقصد برقرار نشد',
+      fallback: 'مسیر fallback نیز ناموفق شد',
+    };
     const requestRows = recent.length
-      ? recent.map(request => `
-          <article class="request-row">
-            <div class="request-source"><span class="request-index">${String(request.id || '').padStart(4, '0')}</span><strong>${esc(request.agent || 'منبع نامشخص')}</strong><small>${esc(request.time || '')}</small></div>
-            <span class="request-arrow" aria-hidden="true">⟶</span>
-            <div class="request-destination"><strong>${esc(request.model || 'مدل نامشخص')}</strong><small>${esc(providerLabel(request.provider, request.route_mode))} · ${esc(routeModeLabel(request.route_mode))}</small></div>
-            <div class="request-metrics"><span>${Number(request.total_in || 0).toLocaleString()} in</span><span>${Number(request.out_tok || 0).toLocaleString()} out</span></div>
-          </article>`).join('')
-      : '<div class="request-empty">هنوز درخواست تکمیل‌شده‌ای برای نمایش ثبت نشده است.</div>';
+      ? recent.map(request => {
+        const failed = request.status === 'failed';
+        const requestMode = routeModeLabel(request.route_mode);
+        const statusLabel = failed ? 'ناموفق' : 'پاسخ گرفت';
+        const eventId = `${failed ? 'F' : 'R'}${String(request.id || '').padStart(4, '0')}`;
+        const timing = Number(request.latency_ms || 0);
+        const inputReported = request.input_count_reported === true;
+        const cacheReported = request.cache_count_reported === true;
+        const outputReported = request.output_count_reported === true;
+        const costReported = inputReported && cacheReported && outputReported;
+        return `
+          <article class="request-card ${failed ? 'is-failed' : 'is-success'}">
+            <div class="request-row">
+              <div class="request-source"><span class="request-index">${eventId}</span><strong>${esc(request.agent || 'منبع نامشخص')}</strong><small>${esc(request.time || '')} · ${esc(statusLabel)}</small></div>
+              <span class="request-arrow" aria-hidden="true">⟶</span>
+              <div class="request-destination"><strong>${esc(request.model || (failed ? 'مقصد پاسخ نداد' : 'مدل نامشخص'))}</strong><small>${esc(providerLabel(request.provider, request.route_mode))} · ${esc(requestMode)}</small></div>
+              <div class="request-metrics">${failed ? `<span class="request-fail-badge">ناموفق${request.http_status ? ` · HTTP ${Number(request.http_status)}` : ''}</span>` : `<span>${inputReported ? `${Number(request.total_in || 0).toLocaleString()} in` : 'in نامعلوم'}</span><span>${outputReported ? `${Number(request.out_tok || 0).toLocaleString()} out` : 'out نامعلوم'}</span>`}<span>${timing ? `${timing.toLocaleString()} ms` : 'زمان نامعلوم'}</span></div>
+            </div>
+            <details class="request-detail">
+              <summary>جزئیات درخواست</summary>
+              <div class="request-detail-grid">
+                <span>شناسهٔ نشست <b>${esc(request.session_id || request.agent || 'ثبت نشده')}</b></span>
+                <span>مسیر <b>${esc(requestMode)}</b></span>
+                <span>مبدأ <b>${esc(request.agent || 'نامشخص')}</b></span>
+                <span>مدت‌زمان <b>${timing ? `${timing.toLocaleString()} ms` : 'ثبت نشده'}</b></span>
+                ${failed
+                  ? `<span class="request-detail-wide">نتیجه <b>${esc(failureLabels[request.error_kind] || 'درخواست ناموفق')}</b>${request.http_status ? ` · HTTP ${Number(request.http_status)}` : ''}</span>`
+                  : `<span>ورودی <b>${inputReported ? `${Number(request.total_in || 0).toLocaleString()} توکن` : 'گزارش نشده'}</b></span><span>از ورودی، cache <b>${cacheReported ? `${Number(request.cached_in || 0).toLocaleString()} توکن` : 'گزارش نشده'}</b></span><span>خروجی <b>${outputReported ? `${Number(request.out_tok || 0).toLocaleString()} توکن` : 'گزارش نشده'}</b></span><span>هزینهٔ سایه، تخمینی <b>${costReported ? `$${Number(request.cost_usd || 0).toFixed(5)}` : 'دادهٔ توکن ناقص'}</b></span>`}
+                <span class="request-detail-wide">مترجم <b>${esc(translationStatusLabel(request.translation_status))}</b></span>
+              </div>
+            </details>
+          </article>`;
+      }).join('')
+      : '<div class="request-empty">هنوز درخواستی برای نمایش ثبت نشده است.</div>';
 
     const engineStatus = !translatorEnabled ? 'BYPASS' : (engineKey === 'custom-offline' && !translatorReady ? 'OFFLINE' : 'SELECTED');
     const engineDetail = !translatorEnabled
@@ -110,6 +151,7 @@ window.ABHomePage = (() => {
         ? (translatorReady ? 'موتور آفلاین پاسخ‌گو است.' : 'موتور انتخاب شده، اما health check پاسخ نمی‌دهد.')
         : 'موتور آنلاین انتخاب شده؛ مسیر مستقیم CLI الزاماً از ترجمه عبور نمی‌کند.');
     const bridgeStatus = activeRoutes.length ? `${activeRoutes.length} درخواست در پرواز` : 'در انتظار درخواست';
+    const successful24h = Number(state.usage?.last_24h?.requests || 0);
 
     host.innerHTML = `
       <main class="ab-home ops-console" dir="rtl">
@@ -119,25 +161,16 @@ window.ABHomePage = (() => {
             <h1>کنسول مسیر درخواست</h1>
             <p>منبع ورودی، موتور پردازش و مقصد واقعی را در یک نمای عملیاتی ببین.</p>
           </div>
-          <div class="ops-header-state ${targetReady ? 'is-ready' : 'is-warning'}">
-            <span class="state-square"></span><div><strong>${esc(targetStatus)}</strong><small>${isOnlineMode ? 'ROUTE · ONLINE' : 'ROUTE · LOCAL'} · /v1</small></div>
-          </div>
           <div class="ops-actions">
-            <button class="btn primary" type="button" data-action="chat">بازکردن نشست</button>
+            <button class="btn primary" type="button" data-action="chat">رفتن به گفت‌وگو</button>
             <button class="btn" type="button" data-action="models">مسیر مدل</button>
           </div>
         </header>
 
-        <section class="ops-metrics" aria-label="خلاصهٔ وضعیت سیستم">
-          <article class="metric-card"><span class="metric-label">PTYهای زنده</span><strong>${mirrors.length.toString().padStart(2, '0')}</strong><small>نشست ترمینال مستقل</small><i class="metric-accent cyan"></i></article>
-          <article class="metric-card"><span class="metric-label">نشست‌های Lab</span><strong>${labs.length.toString().padStart(2, '0')}</strong><small>${remainingLabs ? `+${remainingLabs} بیشتر در فهرست` : 'فضای داخلی مستقل'}</small><i class="metric-accent violet"></i></article>
-          <article class="metric-card"><span class="metric-label">مدل مقصد</span><strong class="metric-model" title="${esc(targetModel || 'تنظیم نشده')}">${esc(targetModel || 'تنظیم نشده')}</strong><small>${esc(targetProviderLabel)}</small><i class="metric-accent ${targetReady ? 'green' : 'amber'}"></i></article>
-          <article class="metric-card"><span class="metric-label">موتور ترجمه</span><strong class="metric-engine" title="${esc(engineName)}">${esc(engineName)}</strong><small>${translatorEnabled ? engineStatus : 'خاموش · متن مستقیم'}</small><i class="metric-accent amber"></i></article>
-        </section>
 
         <section class="route-board" aria-labelledby="routeTitle">
           <header class="section-head">
-            <div><span class="section-code">01 / LIVE TOPOLOGY</span><h2 id="routeTitle">نقشهٔ اجزا و مسیر جاری</h2><p>نقشه، اجزای ثبت‌شده را نشان می‌دهد؛ مبدأ و مقصد هر درخواست جاری فقط از دادهٔ runtime در ردیف پایین گزارش می‌شوند.</p></div>
+            <div><span class="section-code">01 / LIVE TOPOLOGY</span><h2 id="routeTitle">نقشهٔ اجزا و مسیر جاری</h2><p>نقشه وضعیت اجزاست؛ مسیر هر درخواست فقط از رکورد runtime نمایش داده می‌شود، نه از خطوط شماتیک.</p></div>
             <div class="route-live-indicator ${activeRoutes.length ? 'is-flowing' : ''}"><i></i><span>${esc(bridgeStatus)}</span><code>127.0.0.1:${Number(state.bridge_port || 18080)}</code></div>
           </header>
 
@@ -183,27 +216,25 @@ window.ABHomePage = (() => {
 
             <section class="route-node destination-node" dir="rtl" aria-label="مقصد انتخاب‌شده">
               <div class="node-heading"><div><span class="node-kicker">EGRESS / 02</span><h3>مقصد مدل</h3></div><span class="destination-mode">${isOnlineMode ? 'ONLINE' : 'LOCAL'}</span></div>
-              <div class="target-primary ${targetReady ? 'ready' : 'offline'}">
+              <div class="target-primary ${targetNodeState}">
                 <span class="target-icon">${isOnlineMode ? 'EXT' : 'LLM'}</span>
                 <div class="target-copy"><strong>${esc(targetModel || 'مدل انتخاب نشده')}</strong><small>${esc(targetProviderLabel)}</small></div>
-                <span class="target-health"><i></i>${targetReady ? (isOnlineMode ? 'SELECTED' : 'LIVE') : 'CHECK'}</span>
+                <span class="target-health"><i></i>${isOnlineMode ? (targetConfigured ? 'CONFIGURED' : 'CHECK') : (targetAvailable ? 'LIVE' : 'OFFLINE')}</span>
               </div>
-              <div class="target-status-line"><span class="status-led ${targetReady ? 'on' : 'warn'}"></span>${esc(targetStatus)}</div>
+              <div class="target-status-line"><span class="status-led ${isOnlineMode ? (targetConfigured ? 'configured' : 'warn') : (targetAvailable ? 'on' : 'warn')}"></span>${esc(targetStatus)}</div>
               <div class="target-model-list"><span class="source-subhead-label">${isOnlineMode ? 'مدل آنلاین انتخاب‌شده' : `فهرست واقعی سرور · ${actualModelNames.length}`}</span>${localModelsHtml}</div>
               <button class="target-settings" type="button" data-action="models">تغییر مدل یا مسیر <span>↗</span></button>
             </section>
           </div>
 
-          <div class="active-routes" aria-live="polite">
-            ${activeRouteRows || '<div class="route-idle"><span></span>در حال حاضر درخواست فعالی در مسیر نیست؛ اتصال‌ها بر اساس وضعیت واقعی مؤلفه‌ها نمایش داده شده‌اند.</div>'}
-          </div>
+          <div class="active-routes" aria-live="polite">${activeRouteRows}</div>
           <footer class="route-legend"><span><i class="legend-source"></i>ورودی‌های زنده</span><span><i class="legend-bridge"></i>هستهٔ Bridge</span><span><i class="legend-target"></i>مقصد انتخاب‌شده / مدل گزارش‌شده</span><span class="legend-note">نام ارائه‌دهنده فقط پس از ثبت درخواست واقعی نمایش داده می‌شود.</span></footer>
         </section>
 
         <section class="request-board" aria-labelledby="requestTitle">
           <header class="section-head request-head">
-            <div><span class="section-code">02 / ROUTE AUDIT</span><h2 id="requestTitle">درخواست‌های اخیر</h2><p>مبدأ → ارائه‌دهنده و مدل پاسخ‌گو؛ ردیف‌های قدیمی ممکن است پیش از ثبت مقصد ایجاد شده باشند.</p></div>
-            <button class="text-action" type="button" data-action="usage">گزارش کامل توکن‌ها <span>↗</span></button>
+            <div><span class="section-code">02 / ROUTE AUDIT</span><h2 id="requestTitle">درخواست‌های اخیر</h2><p>موفقیت و خطای مسیر همراه مبدأ، مقصد و زمان؛ جزئیات فقط از دادهٔ ثبت‌شده تکمیل می‌شوند.</p></div>
+            <div class="request-head-actions"><span class="request-count-chip">موفق در ۲۴ ساعت اخیر <b>${successful24h.toLocaleString()}</b></span><button class="text-action" type="button" data-action="usage">گزارش کامل توکن‌ها <span>↗</span></button></div>
           </header>
           <div class="request-list">${requestRows}</div>
         </section>

@@ -4,6 +4,7 @@ This validates bridge plumbing, not model quality; real llama-server testing is 
 """
 import json
 import os
+import socket
 import sqlite3
 import threading
 from contextlib import closing
@@ -151,6 +152,78 @@ class HttpProxyIntegrationTests(unittest.TestCase):
                 hub.shutdown()
             upstream.shutdown()
             upstream.server_close()
+
+    def test_prompt_endpoint_passes_only_boolean_translation_marker(self):
+        server = None
+        hub = None
+        try:
+            with TemporaryDirectory() as temp_dir:
+                hub = BridgeHub(DataStore(Path(temp_dir) / ".data"), 0)
+                server = run_http_server(hub, "127.0.0.1", 0)
+                threading.Thread(target=server.serve_forever, daemon=True).start()
+                with patch.object(hub, "submit_prompt", return_value={"dispatched": "pty"}) as submit:
+                    for marker in (True, False, "true"):
+                        request = urllib.request.Request(
+                            f"http://127.0.0.1:{server.server_address[1]}/api/prompt",
+                            data=json.dumps({"user_raw": "hello", "prompt_sent": "hello", "translation_used": marker}).encode(),
+                            headers={"Content-Type": "application/json"},
+                            method="POST",
+                        )
+                        with urllib.request.urlopen(request, timeout=5) as response:
+                            self.assertTrue(json.loads(response.read())["ok"])
+                    self.assertEqual(submit.call_args_list[0].kwargs["translation_used"], True)
+                    self.assertEqual(submit.call_args_list[1].kwargs["translation_used"], False)
+                    self.assertIsNone(submit.call_args_list[2].kwargs["translation_used"])
+        finally:
+            if server:
+                server.shutdown()
+                server.server_close()
+            if hub:
+                hub.shutdown()
+
+    def test_failed_local_route_is_logged_without_prompt_content(self):
+        with socket.socket() as probe:
+            probe.bind(("127.0.0.1", 0))
+            unused_port = probe.getsockname()[1]
+        server = None
+        hub = None
+        try:
+            with TemporaryDirectory() as temp_dir:
+                store = DataStore(Path(temp_dir) / ".data")
+                hub = BridgeHub(store, 0)
+                hub.config["tap"]["upstream_url"] = f"http://127.0.0.1:{unused_port}"
+                hub.pending_fa_by_agent["pi"] = {
+                    "fa": "سلام خصوصی", "en": "translated prompt words", "saved": 0,
+                    "translation_status": "used", "ts": time.time(),
+                }
+                server = run_http_server(hub, "127.0.0.1", 0)
+                threading.Thread(target=server.serve_forever, daemon=True).start()
+                request = urllib.request.Request(
+                    f"http://127.0.0.1:{server.server_address[1]}/v1/chat/completions",
+                    data=json.dumps({"model": "private-model", "messages": [{"role": "user", "content": "translated prompt words"}]}).encode(),
+                    headers={"Content-Type": "application/json"},
+                    method="POST",
+                )
+                with self.assertRaises(urllib.error.HTTPError) as raised:
+                    urllib.request.urlopen(request, timeout=5)
+                self.assertEqual(raised.exception.code, 502)
+                failures = store.query_usage("deepseek-v4.1-flash", 24)["recent_failures"]
+                self.assertEqual(len(failures), 1)
+                self.assertEqual(failures[0]["agent"], "pi")
+                self.assertEqual(failures[0]["model"], "private-model")
+                self.assertEqual(failures[0]["route_mode"], "local")
+                self.assertEqual(failures[0]["error_kind"], "connection")
+                self.assertEqual(failures[0]["translation_status"], "used")
+                self.assertGreaterEqual(failures[0]["latency_ms"], 0)
+                self.assertNotIn("translated prompt words", json.dumps(failures))
+                self.assertNotIn("سلام خصوصی", json.dumps(failures))
+                self.assertEqual(hub.active_routes, {})
+        finally:
+            if server:
+                server.shutdown()
+                server.server_close()
+            if hub:
+                hub.shutdown()
 
     def test_streaming_tool_progress_is_broadcast_before_upstream_finishes(self):
         class StreamingToolStub(BaseHTTPRequestHandler):
