@@ -2,9 +2,22 @@
 window.ABChatPage = (() => {
   const { esc, api } = window.ABUtils;
   const PERSIAN_SEQ_RE = /[\u0600-\u06FF\uFB50-\uFDFF\uFE70-\uFEFF]+(?:\s+[\u0600-\u06FF\uFB50-\uFDFF\uFE70-\uFEFF]+)*/g;
+  const NON_LATIN_SEQ_RE = /[\u0370-\u052F\u0590-\u08FF\u0900-\u1FFF\u2C00-\uD7FF\uF900-\uFAFF]+(?:\s+[\u0370-\u052F\u0590-\u08FF\u0900-\u1FFF\u2C00-\uD7FF\uF900-\uFAFF]+)*/g;
+  const TRANSLATION_ENGINES = [
+    ['builtin-online', 'آنلاین · خودکار'],
+    ['online-google', 'آنلاین · Google'],
+    ['online-google-gtx', 'آنلاین · Google GTX'],
+    ['online-mymemory', 'آنلاین · MyMemory'],
+    ['offline', 'آفلاین · API محلی']
+  ];
 
   let lastTranslatedDraft = '';
   let lastTranslationUsed = false;
+  let selectedDraftEngine = null;
+  let draftBusy = false;
+  let contextPanelOpen = false;
+  let activeThinkTurnId = null;
+  let autoClosedThinkIds = new Set();
   let showMdPreviewInComposer = false;
   let lastSessionId = null;
   let lastTurnCount = 0;
@@ -44,7 +57,6 @@ window.ABChatPage = (() => {
     host.innerHTML = `
       <div id="chatRoot" class="chat-root">
         <div id="chatSubBar" class="chat-subbar"></div>
-        <div id="chatContextPanel" class="chat-context-panel"></div>
         <div id="selectionTranslatePanel" class="selection-translate" hidden>
           <div class="selection-head"><strong>ترجمه‌ی متن انتخاب‌شده</strong><button class="mini-action" onclick="ABChatPage.closeSelectionTranslate()">×</button></div>
           <select id="selectionEngine" class="btn" aria-label="موتور ترجمهٔ متن انتخاب‌شده"></select>
@@ -63,45 +75,41 @@ window.ABChatPage = (() => {
         </button>
 
         <div class="chat-composer-dock">
+          <div id="chatContextPanel" class="chat-context-popover" hidden></div>
           <div class="chat-composer">
             <div id="trChatBubble" class="tr-chat-bubble">
               <div class="tr-bubble-head">
-                <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
-                  <strong>پیش‌نمایش انگلیسی ارسالی</strong>
-                  <span id="trSavingsBadge" class="kv-pill warm" style="display:none;"></span>
-                </div>
-                <div style="display:flex;gap:6px;align-items:center;direction:ltr;">
-                  <span id="trMetaTag" class="mono muted" style="font-size:10.5px;"></span>
-                  <button class="btn ghost" onclick="ABChatPage.toggleComposerMd()">MD</button>
-                  <button class="btn ghost" onclick="ABChatPage.copyOutgoing(this)">Copy EN</button>
-                  <button class="btn ghost" onclick="ABChatPage.closePreview()">×</button>
+                <div class="translation-preview-title"><span class="translation-spark" aria-hidden="true">文</span><div><strong>پیش‌نمایش پیام ارسالی</strong><small>متن اصلی حفظ می‌شود؛ این نسخه را پیش از ارسال بازبینی کن.</small></div></div>
+                <div class="translation-preview-actions">
+                  <select id="chatTranslationEngine" class="translation-engine-select" aria-label="انتخاب موتور ترجمه"></select>
+                  <span id="trMetaTag" class="translation-engine-status"></span>
+                  <button class="icon-action" type="button" onclick="ABChatPage.toggleComposerMd()" title="پیش‌نمایش Markdown" aria-label="پیش‌نمایش Markdown">MD</button>
+                  <button class="icon-action" type="button" onclick="ABChatPage.copyOutgoing(this)" title="کپی ترجمه" aria-label="کپی ترجمه"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="8" y="8" width="12" height="12" rx="2"/><path d="M16 8V5a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h3"/></svg></button>
+                  <button class="icon-action" type="button" onclick="ABChatPage.closePreview()" title="بستن پیش‌نمایش" aria-label="بستن پیش‌نمایش"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"/></svg></button>
                 </div>
               </div>
-
-              <textarea id="wireInput" class="tr-editor" placeholder="Translated English prompt (editable)..."></textarea>
+              <textarea id="wireInput" class="tr-editor" placeholder="ترجمهٔ انگلیسی؛ در صورت نیاز ویرایشش کن…" aria-label="پیش‌نمایش و ویرایش متن ارسالی"></textarea>
               <div id="wireMdPreview" class="tr-md-preview"></div>
-
-              <div id="staleNotice" class="stale-notice">
-                <span>متن فارسی تغییر کرد؛ برای به‌روزرسانی ترجمه کلیک کن:</span>
-                <button class="btn ghost on" onclick="ABChatPage.translateDraft()">ترجمه مجدد ↻</button>
-              </div>
-
-              <div id="persianGuard" class="persian-guard">
-                <div id="persianGuardMsg"></div>
-                <label class="guard-check-lbl">
-                  <input type="checkbox" id="allowPersianCheck" onchange="ABChatPage.validateOutgoing()" />
-                  <span>تایید می‌کنم عبارت فارسی بالا عمداً بدون ترجمه ارسال شود</span>
-                </label>
-              </div>
+              <div id="trSavingsBadge" class="translation-savings" style="display:none;"></div>
+              <div id="staleNotice" class="stale-notice"><span>متن اصلی تغییر کرده؛ ترجمه را به‌روز کن.</span></div>
+              <div id="persianGuard" class="persian-guard"><div id="persianGuardMsg"></div></div>
             </div>
-
-            <div id="sendErrBanner" style="display:none;color:var(--red);font-size:12.2px;direction:rtl;padding:2px 6px;"></div>
-
-            <div class="composer-bar">
-              <button id="btnAbortChat" class="btn danger" style="display:none;" onclick="ABChatPage.abort()">توقف</button>
-              <button id="btnSendFinal" class="btn primary" onclick="ABChatPage.sendFinal()">ارسال ↵</button>
-              <button id="btnTranslateDraft" class="btn" onclick="ABChatPage.translateDraft()">ترجمه پیش‌نمایش</button>
-              <textarea id="composerRaw" class="composer-raw" rows="1" placeholder="پیامت را به فارسی (یا همراه با کد) بنویس...  (Ctrl+Enter = ترجمه / ارسال)"></textarea>
+            <div id="sendErrBanner" class="send-error" role="status" aria-live="polite"></div>
+            <textarea id="composerRaw" class="composer-raw" rows="2" placeholder="پیامت را به هر زبانی بنویس…" aria-label="پیام"></textarea>
+            <div class="composer-toolbar">
+              <div class="composer-toolbar-start">
+                <button id="btnTranslateDraft" class="composer-icon-btn" type="button" onclick="ABChatPage.translateDraft()" title="ترجمه یا ترجمهٔ دوباره" aria-label="ترجمه یا ترجمهٔ دوباره"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5h10M9 3v2c0 5-2 8-6 10M6 9c1.2 2.2 3 3.8 5.4 5M14 20l4.2-11L22 20M15.4 16h5.2"/></svg></button>
+                <label class="source-language-toggle" title="ارسال متن اصلی بدون ترجمه یا اجازهٔ متن غیرا‌نگلیسی در پیش‌نمایش">
+                  <input type="checkbox" id="allowPersianCheck" onchange="ABChatPage.validateOutgoing()" />
+                  <span class="toggle-track" aria-hidden="true"></span><span>زبان اصلی</span>
+                </label>
+                <div id="chatDisplayMenuHost" class="composer-menu-host"></div>
+              </div>
+              <div class="composer-toolbar-end">
+                <button id="chatContextTrigger" class="context-trigger" type="button" onclick="ABChatPage.toggleContext()" aria-expanded="false" aria-controls="chatContextPanel" title="گزارش مصرف زمینه"><span class="context-trigger-glyph" aria-hidden="true">◔</span><span id="chatContextTriggerText">توکن‌ها</span></button>
+                <button id="btnAbortChat" class="composer-icon-btn abort-control" type="button" style="display:none;" onclick="ABChatPage.abort()" title="توقف تولید" aria-label="توقف تولید"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="6" y="6" width="12" height="12" rx="2"/></svg></button>
+                <button id="btnSendFinal" class="send-button is-translate" type="button" onclick="ABChatPage.sendFinal()" aria-label="ترجمه و بازبینی"><span id="btnSendIcon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M4 12h15M13 5l7 7-7 7"/></svg></span><span id="btnSendLabel">ترجمه و بازبینی</span></button>
+              </div>
             </div>
           </div>
         </div>
@@ -152,10 +160,18 @@ window.ABChatPage = (() => {
       rawEl.style.height = 'auto';
       rawEl.style.height = Math.min(150, rawEl.scrollHeight) + 'px';
       const bubble = document.getElementById('trChatBubble');
-      if (bubble.classList.contains('open')) {
-        const isStale = rawEl.value.trim() !== lastTranslatedDraft;
-        document.getElementById('staleNotice').classList.toggle('show', isStale);
-      }
+      const isStale = rawEl.value.trim() !== lastTranslatedDraft;
+      if (bubble.classList.contains('open')) document.getElementById('staleNotice').classList.toggle('show', isStale);
+      updateSendButton();
+    });
+
+    document.getElementById('allowPersianCheck')?.addEventListener('change', () => {
+      if (document.getElementById('allowPersianCheck')?.checked) document.getElementById('persianGuard')?.classList.remove('show');
+      updateSendButton();
+    });
+    document.getElementById('chatTranslationEngine')?.addEventListener('change', () => {
+      selectedDraftEngine = document.getElementById('chatTranslationEngine')?.value;
+      if (document.getElementById('composerRaw')?.value.trim()) translateDraft();
     });
 
     rawEl.addEventListener('keydown', e => {
@@ -203,21 +219,42 @@ window.ABChatPage = (() => {
     return (String(text || '').match(PERSIAN_SEQ_RE) || []).slice(0, 4);
   }
 
+  function updateSendButton(state = window.ABApp.getState?.()) {
+    const button = document.getElementById('btnSendFinal');
+    const label = document.getElementById('btnSendLabel');
+    const bubble = document.getElementById('trChatBubble');
+    const raw = document.getElementById('composerRaw')?.value.trim() || '';
+    const allowSource = !!document.getElementById('allowPersianCheck')?.checked;
+    if (!button || !label) return;
+    const outgoing = document.getElementById('wireInput')?.value.trim() || '';
+    const hasNonLatin = (outgoing.match(NON_LATIN_SEQ_RE) || []).length > 0;
+    const ready = !!raw && !draftBusy && bubble?.classList.contains('open') &&
+      raw === lastTranslatedDraft && !!outgoing && (!hasNonLatin || allowSource);
+    const trEnabled = state?.config?.translation?.enabled !== false;
+    button.classList.toggle('is-ready', ready);
+    button.classList.toggle('is-translate', !ready);
+    button.disabled = !raw || draftBusy;
+    label.textContent = ready ? 'ارسال پیام' : (allowSource || !trEnabled ? 'آماده‌سازی و بازبینی' : 'ترجمه و بازبینی');
+    button.setAttribute('aria-label', label.textContent);
+    button.title = ready ? 'با کلیک دوباره پیام را ارسال کن' : 'ابتدا متن ارسالی را آماده و بازبینی کن';
+  }
+
   function validateOutgoing() {
     const wireTxt = document.getElementById('wireInput')?.value || '';
     const guardEl = document.getElementById('persianGuard');
     const msgEl = document.getElementById('persianGuardMsg');
     const chkEl = document.getElementById('allowPersianCheck');
-    const matches = findPersianMatches(wireTxt);
+    const matches = (wireTxt.match(NON_LATIN_SEQ_RE) || []).slice(0, 4);
 
     if (matches.length > 0) {
       const quoted = matches.map(m => `«${esc(m)}»`).join(' ، ');
-      msgEl.innerHTML = `⚠ <strong>کاراکتر فارسی در متن خروجی دیده شد:</strong> ${quoted} — اصلاحش کن یا در صورت عمدی بودن تیک زیر را بزن:`;
+      msgEl.innerHTML = `⚠ <strong>متن خروجی نویسه‌های غیرا‌نگلیسی دارد:</strong> ${quoted} — ترجمه‌اش کن یا با «زبان اصلی» ارسال عمدی را تأیید کن.`;
       guardEl.classList.add('show');
-      return !!chkEl.checked;
+      updateSendButton();
+      return !!chkEl?.checked;
     }
     guardEl.classList.remove('show');
-    if (chkEl) chkEl.checked = false;
+    updateSendButton();
     return true;
   }
 
@@ -234,6 +271,7 @@ window.ABChatPage = (() => {
     document.getElementById('trChatBubble')?.classList.remove('open');
     document.getElementById('staleNotice')?.classList.remove('show');
     document.getElementById('persianGuard')?.classList.remove('show');
+    updateSendButton();
   }
 
   function copyOutgoing(btn) {
@@ -245,35 +283,69 @@ window.ABChatPage = (() => {
     setTimeout(() => { btn.textContent = old; }, 1200);
   }
 
+  function renderTranslationEngines(state = window.ABApp.getState?.()) {
+    const select = document.getElementById('chatTranslationEngine');
+    if (!select) return;
+    const tested = state?.tested_translators || [];
+    const testedByMode = new Map(tested.map(item => [item.mode === 'online' ? 'builtin-online' : item.mode, item]));
+    const configured = state?.config?.translation?.engine || 'builtin-online';
+    const current = selectedDraftEngine || (configured === 'custom-offline' ? 'offline' : configured);
+    select.innerHTML = TRANSLATION_ENGINES.map(([id, name]) => {
+      const test = testedByMode.get(id);
+      const status = test ? ` · ${Number(test.latency_ms || 0)}ms` : '';
+      return `<option value="${esc(id)}" ${id === current ? 'selected' : ''}>${esc(name + status)}</option>`;
+    }).join('');
+    if (![...select.options].some(option => option.value === current)) select.value = 'builtin-online';
+    selectedDraftEngine = select.value;
+  }
+
+  function toggleContext() {
+    contextPanelOpen = !contextPanelOpen;
+    const panel = document.getElementById('chatContextPanel');
+    const button = document.getElementById('chatContextTrigger');
+    if (panel) panel.hidden = !contextPanelOpen;
+    button?.setAttribute('aria-expanded', String(contextPanelOpen));
+  }
+
   async function translateDraft() {
     const rawEl = document.getElementById('composerRaw');
     const wireEl = document.getElementById('wireInput');
     const raw = rawEl.value.trim();
-    if (!raw) return;
+    if (!raw || draftBusy) return;
 
     document.getElementById('sendErrBanner').style.display = 'none';
     document.getElementById('trChatBubble').classList.add('open');
-    document.getElementById('trMetaTag').textContent = 'translating...';
-
-    const res = await api('/api/translate', { text: raw, to: 'en' });
-    if (res.error) {
-      document.getElementById('trMetaTag').textContent = 'ERR';
-      const errEl = document.getElementById('sendErrBanner');
-      errEl.textContent = `خطای مترجم: ${res.error}`;
-      errEl.style.display = 'block';
-      return;
+    const sourceAllowed = !!document.getElementById('allowPersianCheck')?.checked;
+    const needsTranslation = findPersianMatches(raw).length > 0 && !sourceAllowed;
+    if (needsTranslation) {
+      draftBusy = true;
+      updateSendButton();
+      document.getElementById('trMetaTag').textContent = 'در حال ترجمه…';
+      const engine = document.getElementById('chatTranslationEngine')?.value || selectedDraftEngine || 'builtin-online';
+      const res = await api('/api/translate', { text: raw, to: 'en', engine_mode: engine });
+      draftBusy = false;
+      if (res.error) {
+        document.getElementById('trMetaTag').textContent = 'ترجمه ناموفق';
+        const errEl = document.getElementById('sendErrBanner');
+        errEl.textContent = `ترجمه انجام نشد؛ موتور ${engine} را عوض کن یا «زبان اصلی» را فعال کن. ${res.error}`;
+        errEl.style.display = 'block';
+        updateSendButton();
+        return;
+      }
+      wireEl.value = res.translation || raw;
+      lastTranslationUsed = true;
+      document.getElementById('trMetaTag').textContent = `${res.engine || engine} · ${res.elapsed_ms || 0}ms`;
+    } else {
+      wireEl.value = raw;
+      lastTranslationUsed = false;
+      document.getElementById('trMetaTag').textContent = sourceAllowed ? 'متن اصلی · ارسال عمدی' : 'بدون نیاز به ترجمه';
     }
-    wireEl.value = res.translation || raw;
     lastTranslatedDraft = raw;
-    lastTranslationUsed = true;
     document.getElementById('staleNotice').classList.remove('show');
-    document.getElementById('trMetaTag').textContent = `${res.engine} · ${res.elapsed_ms}ms`;
     updateSavingsPill(raw, wireEl.value);
-
-    if (showMdPreviewInComposer) {
-      document.getElementById('wireMdPreview').innerHTML = window.ABMarkdown.render(wireEl.value);
-    }
+    if (showMdPreviewInComposer) document.getElementById('wireMdPreview').innerHTML = window.ABMarkdown.render(wireEl.value);
     validateOutgoing();
+    updateSendButton();
     wireEl.focus();
   }
 
@@ -288,43 +360,15 @@ window.ABChatPage = (() => {
     const trEnabled = st?.config?.translation?.enabled !== false;
     const rawTxt = rawEl.value.trim();
 
-    if (!trEnabled) {
-      // Pure Proxy Mode: send directly without translation!
-      if (!rawTxt) return;
-      const res = await api('/api/prompt', {
-        user_raw: rawTxt,
-        prompt_sent: rawTxt,
-        allow_persian: true,
-        translation_used: false,
-        source: 'web',
-        agent_id: st?.active_agent
-      });
-      if (!res.ok) {
-        navigator.clipboard?.writeText(rawTxt);
-        errEl.textContent = res.error;
-        errEl.style.display = 'block';
-        return;
-      }
-      rawEl.value = '';
-      rawEl.style.height = 'auto';
-      scrollToBottom(true);
+    if (!rawTxt) return;
+    const ready = bubble.classList.contains('open') && rawTxt === lastTranslatedDraft && !!wireEl.value.trim();
+    if (!ready) {
+      await translateDraft();
       return;
     }
 
-    if (!bubble.classList.contains('open') || !wireEl.value.trim()) {
-      if (!rawTxt) return;
-      if (findPersianMatches(rawTxt).length > 0) {
-        await translateDraft();
-        return;
-      }
-      wireEl.value = rawTxt;
-      lastTranslatedDraft = rawTxt;
-      lastTranslationUsed = false;
-      bubble.classList.add('open');
-    }
-
-    if (rawTxt && rawTxt !== lastTranslatedDraft && findPersianMatches(rawTxt).length > 0 && !document.getElementById('allowPersianCheck').checked) {
-      document.getElementById('staleNotice').classList.add('show');
+    if (!trEnabled && !document.getElementById('allowPersianCheck')?.checked && findPersianMatches(rawTxt).length) {
+      // Translation can still be explicitly selected for an outgoing draft while inbound translation is disabled.
       await translateDraft();
       return;
     }
@@ -544,6 +588,10 @@ window.ABChatPage = (() => {
       </section>`;
     const details = panel.querySelector('.context-details');
     details?.addEventListener('toggle', () => { contextDetailsOpen = details.open; });
+    panel.hidden = !contextPanelOpen;
+    const triggerText = document.getElementById('chatContextTriggerText');
+    if (triggerText) triggerText.textContent = reported ? `${pct}% زمینه` : 'زمینه';
+    document.getElementById('chatContextTrigger')?.setAttribute('aria-expanded', String(contextPanelOpen));
   }
 
   function useStarter(text) {
@@ -562,44 +610,39 @@ window.ABChatPage = (() => {
     const trEnabled = state.config.translation.enabled !== false;
     const chatMode = !trEnabled ? 'en_only' : (ui.chat_mode || 'interleaved');
 
-    document.getElementById('btnTranslateDraft').style.display = trEnabled ? 'inline-flex' : 'none';
-
     const chatTurns = state.active_conversation?.turns || [];
     const isLabView = state.view_kind === 'lab';
     const currentModel = chatTurns.at(-1)?.model || state.upstream?.detected_model || 'مدل انتخاب نشده';
-    const routeLabel = state.config?.models?.default_mode === 'online' ? 'آنلاین' : (state.upstream?.online ? 'مدل محلی' : 'مدل در دسترس نیست');
-    const statusLabel = state.session_state && !['IDLE','ERROR'].includes(state.session_state) ? 'در حال اجرا' : 'آماده';
+    const routeLabel = state.config?.models?.default_mode === 'online' ? 'آنلاین' : (state.upstream?.online ? 'محلی' : 'آفلاین');
+    const busyNow = state.session_state && !['IDLE','ERROR'].includes(state.session_state);
+    const statusLabel = busyNow ? 'در حال پاسخ' : 'آماده';
     document.getElementById('chatSubBar').innerHTML = `
-      <div class="chat-heading-row">
-        <div class="chat-heading-copy">
-          <span class="chat-eyebrow">AGENT BRIDGE · CHAT</span>
-          <h1>گفت‌وگو</h1>
-          <p>ترجمهٔ قابل‌بازبینی و آزمایش مستقیم مدل؛ ابزارهای سیستمی در این گفتگو فعال نیستند.</p>
-        </div>
-        <div class="chat-heading-meta">
-          <span class="chat-model-chip"><i class="model-status-dot ${state.upstream?.online ? 'online' : ''}"></i><span>${esc(currentModel)}</span><small>${routeLabel}</small></span>
-          <span class="chat-live-status ${state.session_state && !['IDLE','ERROR'].includes(state.session_state) ? 'busy' : ''}"><i></i>${statusLabel}</span>
-        </div>
-      </div>
-      <div class="chat-toolbar-row">
-        <div class="chat-translation-state"><span class="translation-state-dot ${trEnabled ? 'enabled' : ''}"></span><span>${trEnabled ? 'ترجمهٔ ورودی فعال' : 'ترجمه خاموش'}</span><span class="toolbar-separator">·</span><span>${esc(routeLabel)}</span></div>
-        <div class="chat-toolbar-actions">
-          <button class="chat-translation-toggle ${trEnabled ? 'is-on' : ''}" type="button" onclick="ABApp.toggleProxyMode()">${trEnabled ? 'ترجمه روشن' : 'ترجمه خاموش'}</button>
-          <details class="chat-display-menu"><summary>نمایش و ترجمه <span>⌄</span></summary><div class="chat-display-menu-popover">
-            <strong>شیوهٔ نمایش پاسخ</strong>
-            <div class="seg-group" title="متن اصلی و ترجمه را بدون جایگزینی متن کاربر نمایش می‌دهد">
+      <div class="chat-compact-identity"><span class="chat-brand-mark">AB</span><strong>گفت‌وگو</strong><span class="chat-header-divider"></span><span class="chat-model-chip"><i class="model-status-dot ${state.upstream?.online ? 'online' : ''}"></i><span>${esc(currentModel)}</span><small>${routeLabel}</small></span></div>
+      <div class="chat-compact-status"><span class="chat-live-status ${busyNow ? 'busy' : ''}"><i></i>${statusLabel}</span><span class="chat-conversation-count">${chatTurns.length ? `${chatTurns.length} نوبت` : 'گفتگوی تازه'}</span></div>
+    `;
+
+    const displayHost = document.getElementById('chatDisplayMenuHost');
+    if (displayHost) {
+      const wasSettingsOpen = !!displayHost.querySelector('details')?.open;
+      displayHost.innerHTML = `
+        <details class="chat-options-menu" ${wasSettingsOpen ? 'open' : ''}>
+          <summary class="composer-icon-btn" title="تنظیمات گفتگو" aria-label="تنظیمات گفتگو"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h10M18 7h2M4 17h2m4 0h10M14 4v6M8 14v6"/></svg></summary>
+          <div class="chat-options-popover" dir="rtl">
+            <div class="options-title">تنظیمات گفتگو</div>
+            <div class="options-label">نمایش پاسخ</div>
+            <div class="seg-group">
               <button class="seg-btn ${chatMode === 'interleaved' ? 'on' : ''}" onclick="ABChatPage.setChatMode('interleaved')">همراه ترجمه</button>
               <button class="seg-btn ${chatMode === 'fa_only' ? 'on' : ''}" onclick="ABChatPage.setChatMode('fa_only')">فارسی</button>
               <button class="seg-btn ${chatMode === 'fa_after' ? 'on' : ''}" onclick="ABChatPage.setChatMode('fa_after')">اصل سپس ترجمه</button>
               <button class="seg-btn ${chatMode === 'side_by_side' ? 'on' : ''}" onclick="ABChatPage.setChatMode('side_by_side')">کنار هم</button>
               <button class="seg-btn ${chatMode === 'en_only' ? 'on' : ''}" onclick="ABChatPage.setChatMode('en_only')">اصل</button>
             </div>
-            <div class="chat-display-toggles"><button class="btn ghost ${ui.show_think ? 'on' : ''}" onclick="ABChatPage.toggleUiFlag('show_think')">Think</button>${isLabView ? '' : `<button class="btn ghost ${ui.show_tools ? 'on' : ''}" onclick="ABChatPage.toggleUiFlag('show_tools')">رویدادهای ابزار</button>`}</div>
-          </div></details>
-          <span class="chat-conversation-count">${chatTurns.length ? `${chatTurns.length} نوبت` : 'گفتگوی تازه'}</span>
-        </div>
-      </div>
-    `;
+            <div class="options-toggles"><button class="btn ghost ${ui.show_think ? 'on' : ''}" onclick="ABChatPage.toggleUiFlag('show_think')">تفکر مدل</button>${isLabView ? '' : `<button class="btn ghost ${ui.show_tools ? 'on' : ''}" onclick="ABChatPage.toggleUiFlag('show_tools')">رویدادهای ابزار</button>`}<button class="btn ghost ${trEnabled ? 'on' : ''}" onclick="ABApp.toggleProxyMode()">${trEnabled ? 'ترجمه روشن' : 'ترجمه خاموش'}</button></div>
+          </div>
+        </details>`;
+    }
+    renderTranslationEngines(state);
+    updateSendButton(state);
 
     const isBusy = state.session_state !== 'IDLE' && state.session_state !== 'ERROR';
     document.getElementById('btnAbortChat').style.display = isBusy ? 'inline-flex' : 'none';
@@ -616,6 +659,16 @@ window.ABChatPage = (() => {
       [...feedInner.querySelectorAll('details[data-acc-id]')].map(d => [d.getAttribute('data-acc-id'), d.open])
     );
     const wasOpen = (id, defaultOpen = false) => detailsState.has(id) ? detailsState.get(id) : defaultOpen;
+    const latestTurn = turns[turns.length - 1];
+    const streamActive = !!latestTurn && state.session_state && !['IDLE','ERROR'].includes(state.session_state);
+    const currentThinkTurnId = streamActive && latestTurn.thinking ? String(latestTurn.id) : null;
+    const completedThinkThisRender = new Set();
+    if (activeThinkTurnId && activeThinkTurnId !== currentThinkTurnId) {
+      autoClosedThinkIds.add(activeThinkTurnId);
+      completedThinkThisRender.add(activeThinkTurnId);
+    }
+    if (currentThinkTurnId) autoClosedThinkIds.delete(currentThinkTurnId);
+    activeThinkTurnId = currentThinkTurnId;
 
     if (!turns.length) {
       const isLab = state.view_kind === 'lab';
@@ -663,9 +716,12 @@ window.ABChatPage = (() => {
 
       const thinkId = `${t.id}-think`;
       const globalThinkMode = getThinkMode(thinkId, ui.think_default_mode || 'half');
+      const isThinkingNow = String(latestTurn?.id) === String(t.id) && !!streamActive && !!t.thinking;
+      const thinkDefaultOpen = isThinkingNow && globalThinkMode !== 'closed';
+      const thinkOpen = completedThinkThisRender.has(String(t.id)) ? false : (detailsState.has(thinkId) ? wasOpen(thinkId) : (thinkDefaultOpen && !autoClosedThinkIds.has(String(t.id))));
       const thinkAcc = (ui.show_think && t.thinking) ? `
-        <details class="think-drawer think-mode-${globalThinkMode}" data-acc-id="${esc(thinkId)}" ${globalThinkMode !== 'closed' ? 'open' : ''}>
-          <summary><span>تفکر مدل · Think · ${t.thinking.length} chars</span>${thinkModeControls(thinkId, ui.think_default_mode || 'half')}</summary>
+        <details class="think-drawer think-mode-${globalThinkMode}" data-acc-id="${esc(thinkId)}" ${thinkOpen ? 'open' : ''}>
+          <summary><span>تفکر مدل · Think · ${t.thinking.length} نویسه${isThinkingNow ? ' · در حال رشد' : ''}</span>${thinkModeControls(thinkId, ui.think_default_mode || 'half')}</summary>
           <div class="think-body">${window.ABMarkdown.renderBlocks(t.think_blocks || [], t.thinking, t.thinking_fa || '', chatMode)}<button class="btn ghost think-translate-btn" onclick="ABChatPage.translateThink('${esc(t.id)}',-1,event)">${t.thinking_fa ? 'ترجمه‌ی مجدد تفکر' : 'ترجمه‌ی تفکر'}</button></div>
         </details>` : '';
 
@@ -693,7 +749,9 @@ window.ABChatPage = (() => {
           const toolId = `${t.id}-step-${sIdx}-tool-${tIdx}`;
           return `<details class="tool-pill kind-${kind}" data-acc-id="${esc(toolId)}"><summary><span class="tool-badge">${esc(nm)}</span><span class="tool-cmd-preview">${esc(summarizeToolArgs(tool))}</span><span class="tiny-tag">${esc(tool.status || 'done')}</span></summary><div class="tool-render">${renderToolContent(tool, ui.tool_output_mode || 'terminal')}</div></details>`;
         }).join('') : '';
-        const reasoning = ui.show_think && step.thinking ? `<details class="think-drawer think-mode-${stepThinkMode}" data-acc-id="${esc(stepThinkId)}" ${stepThinkMode !== 'closed' ? 'open' : ''}><summary><span>تفکر · مرحله ${sIdx + 1} · ${step.thinking.length} chars</span>${thinkModeControls(stepThinkId, ui.think_default_mode || 'half')}</summary><div class="think-body md-body">${window.ABMarkdown.render(step.thinking)}${step.thinking_fa ? `<div class="think-translation">${window.ABMarkdown.render(step.thinking_fa)}</div>` : ''}<button class="btn ghost think-translate-btn" onclick="ABChatPage.translateThink('${esc(t.id)}',${sIdx},event)">${step.thinking_fa ? 'ترجمه دوباره' : 'ترجمه‌ی این مرحله'}</button></div></details>` : '';
+        const stepLive = String(latestTurn?.id) === String(t.id) && !!streamActive && sIdx === (t.steps?.length || 0) - 1;
+        const stepOpen = completedThinkThisRender.has(String(t.id)) ? false : (detailsState.has(stepThinkId) ? wasOpen(stepThinkId) : (stepLive && stepThinkMode !== 'closed'));
+        const reasoning = ui.show_think && step.thinking ? `<details class="think-drawer think-mode-${stepThinkMode}" data-acc-id="${esc(stepThinkId)}" ${stepOpen ? 'open' : ''}><summary><span>تفکر · مرحله ${sIdx + 1} · ${step.thinking.length} نویسه${stepLive ? ' · در حال رشد' : ''}</span>${thinkModeControls(stepThinkId, ui.think_default_mode || 'half')}</summary><div class="think-body md-body">${window.ABMarkdown.render(step.thinking)}${step.thinking_fa ? `<div class="think-translation">${window.ABMarkdown.render(step.thinking_fa)}</div>` : ''}<button class="btn ghost think-translate-btn" onclick="ABChatPage.translateThink('${esc(t.id)}',${sIdx},event)">${step.thinking_fa ? 'ترجمه دوباره' : 'ترجمه‌ی این مرحله'}</button></div></details>` : '';
         return `<details class="agent-step" data-acc-id="${esc(stageId)}" ${wasOpen(stageId, true) ? 'open' : ''}><summary class="step-label">مرحله ${sIdx + 1} · ${esc(step.status || 'در حال اجرا')} · تفکر و ابزارهای این دور</summary><div class="step-content">${reasoning}${stepTools}</div></details>`;
       }).join('') : '';
 
