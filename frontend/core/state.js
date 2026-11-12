@@ -34,12 +34,15 @@ window.ABApp = (() => {
     await api('/api/view/select', { kind: 'mirror', id: agentId });
     route = 'chat';
     renderTree();
+    renderMainPage(true);
   }
 
   async function selectLab(sessionId) {
     await api('/api/view/select', { kind: 'lab', id: sessionId });
     route = 'chat';
+    openBranches.lab = true;
     renderTree();
+    renderMainPage(true);
   }
 
   async function createLabSession(ev) {
@@ -49,6 +52,8 @@ window.ABApp = (() => {
     openBranches.lab = true;
     await api('/api/lab/new', { title: title.trim() || 'تست مدل جدید' });
     route = 'chat';
+    renderTree();
+    renderMainPage(true);
   }
 
   async function renameLabSession(sessionId, ev) {

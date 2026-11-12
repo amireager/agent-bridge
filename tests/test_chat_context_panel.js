@@ -3,10 +3,11 @@ const vm = require('vm');
 const assert = require('assert');
 
 const panel = {
-  innerHTML: '',
+  innerHTML: '', hidden: true,
   querySelector() { return null; },
 };
-global.document = { getElementById: id => id === 'chatContextPanel' ? panel : null };
+const trigger = { attributes:{}, setAttribute(name, value) { this.attributes[name] = value; } };
+global.document = { getElementById: id => id === 'chatContextPanel' ? panel : (id === 'chatContextTrigger' ? trigger : null) };
 global.window = { ABUtils: { esc: value => String(value ?? '').replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch])) } };
 vm.runInThisContext(fs.readFileSync('frontend/pages/chat/chat.js', 'utf8'));
 
@@ -34,4 +35,11 @@ window.ABChatPage.renderContextPanel(state, [{ model: 'unknown-model', metrics: 
 assert.match(panel.innerHTML, /شمارندهٔ دقیق پس از گزارش runtime نمایش داده می‌شود/);
 assert.match(panel.innerHTML, /بدون تخمین ساختگی/);
 assert.match(panel.innerHTML, /قابل محاسبه نیست/);
-console.log('chat context meter and truthful fallback tests: OK');
+assert.equal(panel.hidden, true, 'context panel stays out of the way by default');
+window.ABChatPage.toggleContext();
+assert.equal(panel.hidden, false, 'context control opens the details popover');
+assert.equal(trigger.attributes['aria-expanded'], 'true');
+window.ABChatPage.toggleContext();
+assert.equal(panel.hidden, true, 'context control closes the details popover');
+assert.equal(trigger.attributes['aria-expanded'], 'false');
+console.log('chat context meter, popover controls, and truthful fallback tests: OK');

@@ -823,11 +823,18 @@ button.image-swatch.revealed { filter:saturate(1.35) brightness(1.08); box-shado
 .options-label { color:var(--fg-3); font-size:9px; }
 .options-toggles { display:flex; flex-wrap:wrap; gap:6px; padding-top:8px; border-top:1px solid var(--line); }
 .options-toggles .btn { padding:5px 8px; font-size:9px; }
-.think-drawer { border:0; border-inline-start:2px solid color-mix(in srgb,var(--violet) 38%,transparent); border-radius:0; background:transparent; box-shadow:none; }
-.think-drawer > summary { min-height:31px; padding:4px 9px; color:var(--fg-3); background:transparent; font-size:10px; }
-.think-drawer > summary:hover { color:var(--fg-1); background:color-mix(in srgb,var(--violet) 4%,transparent); }
-.think-body { padding:5px 12px 8px; color:var(--fg-2); font-size:12px; line-height:1.75; }
+.agent-step { margin:7px 0 10px; padding:0; border:0; }
+.step-label { display:flex; align-items:center; gap:8px; padding:3px 0; color:var(--fg-3); font:10px var(--sans); }
+.step-content { gap:5px; padding:0; }
+.step-live-indicator { color:var(--cyan); font-size:9px; }
+.think-drawer { margin:2px 0; border:0; border-radius:0; background:transparent; box-shadow:none; }
+.think-drawer > summary { display:flex; align-items:center; gap:12px; min-height:29px; padding:3px 2px; color:var(--fg-3); background:transparent; font-size:10px; }
+.think-drawer > summary:hover,.think-drawer[open] > summary { color:var(--fg-2); background:transparent; }
+.think-drawer > summary::after { content:""; display:none; }
+.think-body { margin-inline-start:5px; padding:5px 11px 7px; border-inline-start:1px solid var(--line); color:var(--fg-2); font-size:11.5px; line-height:1.72; background:transparent; }
+.think-drawer .think-modes { opacity:.62; }
 .think-drawer .think-modes button { background:transparent; font-size:9px; }
+.think-drawer .think-modes button.selected { color:var(--fg-2); border-color:var(--line-strong); background:var(--bg-2); }
 @media(max-width:700px) {
  .chat-subbar { padding:8px 12px; }
  .chat-compact-identity,.chat-compact-status { gap:6px; }
@@ -844,27 +851,8 @@ button.image-swatch.revealed { filter:saturate(1.35) brightness(1.08); box-shado
  .chat-context-popover { inset-inline:8px; width:auto; }
 }
 
-/* A calm, paper-like chat surface independent of the app's chrome theme. */
-.chat-root {
-  --bg-0:#f7f9fc;
-  --bg-1:#ffffff;
-  --bg-2:#eef2f7;
-  --fg-0:#172334;
-  --fg-1:#2a394d;
-  --fg-2:#536379;
-  --fg-3:#78869a;
-  --line:#e2e8f0;
-  --line-strong:#d3dce7;
-  --cyan:#2676c5;
-  --cyan-dim:rgba(38,118,197,.09);
-  --phosphor:#15845d;
-  --amber:#a96d17;
-  --red:#bd3e46;
-  --violet:#7458b4;
-  --violet-dim:rgba(116,88,180,.09);
-  --shadow-soft:0 9px 28px rgba(28,47,75,.09);
-  background:var(--bg-0);
-}
-.chat-subbar { background:rgba(255,255,255,.92); }
-.chat-composer { border-color:var(--line-strong); box-shadow:0 8px 30px rgba(28,47,75,.09); }
-.chat-context-popover,.chat-options-popover,.selection-translate { box-shadow:0 16px 42px rgba(28,47,75,.16); }
+/* The chat canvas follows the application dark palette; hierarchy stays quiet, not white. */
+.chat-root { background:radial-gradient(ellipse at 50% -28%, color-mix(in srgb,var(--cyan) 5%,transparent), transparent 58%),var(--bg-0); }
+.chat-subbar { background:color-mix(in srgb,var(--bg-1) 94%,transparent); }
+.chat-composer { border-color:var(--line-strong); box-shadow:0 8px 30px #0004; }
+.chat-context-popover,.chat-options-popover,.selection-translate { box-shadow:0 16px 42px #0008; }
