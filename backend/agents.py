@@ -886,65 +886,14 @@ class BridgeHub:
         if self.view_kind == "mirror" and self.view_id not in self.mirrors:
             self.view_id = agent_name
 
-    # ---- Built-in Direct Lab & Safe Local Tool Workbench ----
+    # ---- Direct Model Chat & Explicitly Opt-in Research Tools ----
     def _lab_tools_schema(self) -> list[dict]:
-        return [
-            {
-                "type": "function",
-                "function": {
-                    "name": "list_files",
-                    "description": "List files and directories inside the target path.",
-                    "parameters": {
-                        "type": "object",
-                        "properties": {"path": {"type": "string", "description": "Relative or absolute directory path"}},
-                    },
-                },
-            },
-            {
-                "type": "function",
-                "function": {
-                    "name": "read_file",
-                    "description": "Read up to 160 lines of a UTF-8 text file.",
-                    "parameters": {
-                        "type": "object",
-                        "properties": {"path": {"type": "string"}},
-                        "required": ["path"],
-                    },
-                },
-            },
-        ]
-
-    def _lab_safe_path(self, value: str) -> Path:
-        """Resolve a Lab path and reject absolute paths, traversal, and symlink escapes."""
-        raw = Path(value or ".")
-        if raw.is_absolute():
-            raise PermissionError("Lab file tools accept workspace-relative paths only.")
-        root = self.lab_workspace.resolve()
-        target = (root / raw).resolve()
-        if target != root and root not in target.parents:
-            raise PermissionError("Path escapes the isolated agent-team workspace.")
-        return target
+        """The public chat starts tool-free; opt-in research tools are added separately."""
+        return []
 
     def _exec_lab_tool(self, name: str, args: dict) -> tuple[str, bool]:
-        """Read-only starter tools, jailed to ./agent-team; no shell or repo access."""
-        try:
-            if name == "list_files":
-                target = self._lab_safe_path(str(args.get("path", ".") or "."))
-                if not target.is_dir():
-                    return "Not a directory.", True
-                entries = sorted(p.name + ("/" if p.is_dir() else "") for p in target.iterdir())[:80]
-                return "\\n".join(entries) or "(empty directory)", False
-            if name == "read_file":
-                target = self._lab_safe_path(str(args.get("path", "")))
-                if not target.is_file():
-                    return "Not a regular file.", True
-                if target.stat().st_size > 128 * 1024:
-                    return "File exceeds the 128 KiB Lab read limit.", True
-                lines = target.read_text(encoding="utf-8", errors="replace").splitlines()[:160]
-                return "\\n".join(f"{i+1}: {ln}" for i, ln in enumerate(lines)), False
-            return f"Tool not enabled in the starter Lab: {name}", True
-        except Exception as exc:
-            return f"Tool error: {exc}", True
+        """Fail closed: this chat does not read/write files or execute system commands."""
+        return f"Tool not enabled in the conversational test bench: {name}", True
 
     def _run_lab_turn_thread(self, sess: dict, turn: dict) -> None:
         self.session_state = "THINKING"
@@ -953,13 +902,14 @@ class BridgeHub:
 
         custom_prompt = self.config["tap"].get("lab_system_prompt", "").strip()
         sys_prompt = (
-            "You are the starter agent-team workspace assistant. Work only inside the dedicated "
-            "agent-team workspace. The only available tools are read-only list_files and read_file; "
-            "there is no shell, write, or access to the Agent Bridge repository or other folders. "
-            "Do not pretend that files were changed. Build capabilities incrementally only when asked.\n\n"
+            "You are a lightweight conversational model test bench, not a coding agent. "
+            "No filesystem, shell, or system tools are available in this chat. Do not claim to inspect "
+            "or modify files on the user's device. Answer from the conversation context only.\n\n"
             + custom_prompt
         )
-        use_tools = bool(self.config["tap"].get("lab_enable_tools", True))
+        # Lab chat has no system/file tools. Opt-in web research is added as a separate,
+        # explicitly enabled capability rather than inheriting workspace access.
+        use_tools = False
 
         # Build clean OpenAI conversation history so KV prefix stays 100% static across turns!
         api_msgs: list[dict] = []
@@ -1030,14 +980,29 @@ class BridgeHub:
                             else:
                                 uncached_count = max(0, int(tm.get("prompt_n", 0) or 0))
                             output_count = int(tm.get("predicted_n", 0) or 0) or int(usage_obj.get("completion_tokens", 0) or 0)
+                            prompt_reported = "prompt_n" in tm or "prompt_tokens" in usage_obj
+                            output_reported = "predicted_n" in tm or "completion_tokens" in usage_obj
+                            prompt_tokens = max(0, uncached_count + cached_count)
                             step_metrics = {
                                 "uncached_in": uncached_count,
                                 "cached_in": cached_count,
                                 "out_tok": max(0, output_count),
+                                "prompt_tokens": prompt_tokens,
+                                "prompt_reported": prompt_reported,
+                                "output_reported": output_reported,
                                 "pp_tps": round(float(tm.get("prompt_per_second", 0.0)), 1),
                                 "tg_tps": round(float(tm.get("predicted_per_second", 0.0)), 1),
                             }
                             turn["metrics"] = step_metrics
+                            ctx = turn.setdefault("context_usage", {})
+                            ctx["prompt_tokens"] = prompt_tokens
+                            ctx["output_tokens"] = max(0, output_count)
+                            ctx["prompt_reported"] = prompt_reported
+                            ctx["output_reported"] = output_reported
+                            ctx["reported"] = prompt_reported
+                            ctx["used_tokens"] = prompt_tokens + (max(0, output_count) if output_reported else 0)
+                            if ctx.get("limit_tokens"):
+                                ctx["remaining_tokens"] = max(0, int(ctx["limit_tokens"]) - int(ctx["used_tokens"]))
                         for ch in chunk.get("choices", []):
                             d = ch.get("delta", {})
                             if d.get("reasoning_content"):
@@ -1187,6 +1152,14 @@ class BridgeHub:
                 "status": "streaming",
                 "elapsed_s": 0.0,
                 "metrics": {"uncached_in": 0, "cached_in": 0, "out_tok": 0, "tg_tps": 0.0},
+                "context_usage": {
+                    "limit_tokens": int(up.get("server_ctx") or 0)
+                    if self.config.get("models", {}).get("default_mode", "local") == "local"
+                    and not self.config.get("models", {}).get("online_fallback", False) else 0,
+                    "prompt_tokens": 0, "output_tokens": 0, "used_tokens": 0,
+                    "remaining_tokens": 0, "prompt_reported": False,
+                    "output_reported": False, "reported": False,
+                },
             }
             sess["turns"].append(turn)
             self._persist_lab_session(sess)

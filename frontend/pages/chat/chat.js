@@ -9,6 +9,7 @@ window.ABChatPage = (() => {
   let lastSessionId = null;
   let lastTurnCount = 0;
   let stickToBottom = true;
+  let contextDetailsOpen = false;
 
   function getThinkMode(key, defaultMode = 'half') {
     try { return localStorage.getItem(`ab-think:${key}`) || defaultMode; } catch (_) { return defaultMode; }
@@ -43,6 +44,7 @@ window.ABChatPage = (() => {
     host.innerHTML = `
       <div id="chatRoot" class="chat-root">
         <div id="chatSubBar" class="chat-subbar"></div>
+        <div id="chatContextPanel" class="chat-context-panel"></div>
         <div id="selectionTranslatePanel" class="selection-translate" hidden>
           <div class="selection-head"><strong>ترجمه‌ی متن انتخاب‌شده</strong><button class="mini-action" onclick="ABChatPage.closeSelectionTranslate()">×</button></div>
           <select id="selectionEngine" class="btn" aria-label="موتور ترجمهٔ متن انتخاب‌شده"></select>
@@ -480,6 +482,78 @@ window.ABChatPage = (() => {
     return `<div class="terminal-view"><div class="terminal-chrome"><i></i><i></i><i></i><span>${esc(tl.name || 'tool')} · ${esc(tl.status || 'done')}</span></div><div class="terminal-content">${rows}</div></div>`;
   }
 
+  function formatCount(value) {
+    const n = Number(value);
+    return Number.isFinite(n) && n >= 0 ? Math.round(n).toLocaleString() : '—';
+  }
+
+  function renderContextPanel(state, turns) {
+    const panel = document.getElementById('chatContextPanel');
+    if (!panel) return;
+    const latest = turns[turns.length - 1] || {};
+    const metrics = latest.metrics || {};
+    const context = latest.context_usage || {};
+    const limit = Number(context.limit_tokens || 0);
+    const used = Number(context.used_tokens || 0);
+    const reported = context.reported === true && limit > 0 && used >= 0;
+    const pct = reported ? Math.max(0, Math.min(100, Math.round((used / limit) * 100))) : 0;
+    const remaining = reported ? Math.max(0, limit - used) : 0;
+    const totalInput = Number(metrics.uncached_in || 0) + Number(metrics.cached_in || 0);
+    const output = Number(metrics.out_tok || 0);
+    const inputRecorded = context.prompt_reported === true;
+    const outputRecorded = context.output_reported === true;
+    const routeMode = state.config?.models?.default_mode === 'online' ? 'آنلاین' : 'محلی';
+    const modelName = latest.model || state.upstream?.detected_model || 'مدل انتخاب نشده';
+    const stateLabel = state.session_state && state.session_state !== 'IDLE'
+      ? (state.session_state === 'STREAMING' ? 'در حال پاسخ' : 'در حال اجرا')
+      : (turns.length ? 'آماده' : 'آمادهٔ شروع');
+    const statusClass = state.session_state && state.session_state !== 'IDLE' ? 'is-running' : 'is-idle';
+    const percentLabel = reported ? `${pct}٪` : 'داده‌ای ثبت نشده';
+    const usedLabel = reported ? `${formatCount(used)} / ${formatCount(limit)}` : 'پس از نخستین درخواست';
+    const detailsWasOpen = panel.querySelector('.context-details')?.open ?? contextDetailsOpen;
+
+    panel.innerHTML = `
+      <section class="context-card" aria-label="مصرف زمینهٔ مدل">
+        <div class="context-card-main">
+          <div class="context-ident">
+            <span class="context-icon" aria-hidden="true">◉</span>
+            <div class="context-titles">
+              <div class="context-title-row"><strong>زمینهٔ مدل</strong><span class="context-state ${statusClass}"><i></i>${esc(stateLabel)}</span></div>
+              <div class="context-model-line"><span>${esc(modelName)}</span><span class="context-route">${routeMode}</span></div>
+            </div>
+          </div>
+          <div class="context-meter-block">
+            <div class="context-meter-labels"><span>${reported ? 'مصرف‌شدهٔ درخواست اخیر' : 'ظرفیت زمینه'}</span><strong>${usedLabel}</strong></div>
+            <div class="context-meter" role="progressbar" aria-label="درصد مصرف زمینه" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${pct}"><span style="width:${pct}%"></span></div>
+            <div class="context-meter-foot"><span>${reported ? `${percentLabel} مصرف` : 'شمارندهٔ دقیق پس از گزارش runtime نمایش داده می‌شود'}</span><span>${reported ? `${formatCount(remaining)} توکن برآوردی باقی‌مانده` : 'بدون تخمین ساختگی'}</span></div>
+          </div>
+        </div>
+        <details class="context-details" ${detailsWasOpen ? 'open' : ''}>
+          <summary><span>گزارش مصرف</span><span class="context-details-hint">${turns.length ? `نوبت ${turns.length}` : 'هنوز درخواستی نیست'}</span></summary>
+          <div class="context-breakdown">
+            <div><span>ورودی درخواست اخیر</span><strong>${inputRecorded ? `${formatCount(context.prompt_tokens)} توکن` : 'در دسترس نیست'}</strong></div>
+            <div><span>ورودی cache‌شده · کل نوبت</span><strong>${formatCount(metrics.cached_in)} توکن</strong></div>
+            <div><span>ورودی بدون cache · کل نوبت</span><strong>${formatCount(metrics.uncached_in)} توکن</strong></div>
+            <div><span>خروجی درخواست اخیر</span><strong>${outputRecorded ? `${formatCount(context.output_tokens)} توکن` : 'در دسترس نیست'}</strong></div>
+            <div><span>خروجی کل نوبت</span><strong>${output ? `${formatCount(output)} توکن` : 'در دسترس نیست'}</strong></div>
+            <div><span>ظرفیت زمینه</span><strong>${limit ? `${formatCount(limit)} توکن` : 'از مدل گزارش نشده'}</strong></div>
+            <div><span>باقی‌مانده</span><strong>${reported ? `~${formatCount(remaining)} توکن` : 'قابل محاسبه نیست'}</strong></div>
+            <p>${reported ? 'مصرف بر پایهٔ شمارندهٔ واقعی مدل است؛ باقی‌مانده برای درخواست اخیر برآورد می‌شود و تضمین ظرفیت پاسخ بعدی نیست.' : 'Agent Bridge فقط شمارنده‌هایی را نشان می‌دهد که مدل یا runtime واقعاً گزارش کرده باشد؛ برآورد متنی با شمارندهٔ tokenizer یکی نیست.'}</p>
+          </div>
+        </details>
+      </section>`;
+    const details = panel.querySelector('.context-details');
+    details?.addEventListener('toggle', () => { contextDetailsOpen = details.open; });
+  }
+
+  function useStarter(text) {
+    const input = document.getElementById('composerRaw');
+    if (!input) return;
+    input.value = text;
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+    input.focus();
+  }
+
   function render(host, state, forceFull = false) {
     if (forceFull) host.innerHTML = '';
     ensureSkeleton(host);
@@ -490,22 +564,40 @@ window.ABChatPage = (() => {
 
     document.getElementById('btnTranslateDraft').style.display = trEnabled ? 'inline-flex' : 'none';
 
+    const chatTurns = state.active_conversation?.turns || [];
+    const isLabView = state.view_kind === 'lab';
+    const currentModel = chatTurns.at(-1)?.model || state.upstream?.detected_model || 'مدل انتخاب نشده';
+    const routeLabel = state.config?.models?.default_mode === 'online' ? 'آنلاین' : (state.upstream?.online ? 'مدل محلی' : 'مدل در دسترس نیست');
+    const statusLabel = state.session_state && !['IDLE','ERROR'].includes(state.session_state) ? 'در حال اجرا' : 'آماده';
     document.getElementById('chatSubBar').innerHTML = `
-      <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;">
-        <span>Proxy: <code>http://127.0.0.1:${state.bridge_port}/v1</code></span>
-        <span>·</span>
-        <span>ترمینال عامل: <code>python3 cli.py --wrap &lt;agent&gt;</code></span>
-      </div>
-      <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
-        <div class="seg-group" title="حالت نمایش متن و ترجمه (کدها همیشه فقط یک‌بار و دست‌نخورده نمایش داده می‌شوند)">
-          <button class="seg-btn ${chatMode === 'interleaved' ? 'on' : ''}" onclick="ABChatPage.setChatMode('interleaved')">زیرِ هم (EN + FA)</button>
-          <button class="seg-btn ${chatMode === 'fa_only' ? 'on' : ''}" onclick="ABChatPage.setChatMode('fa_only')">تمام‌صفحه فارسی</button>
-          <button class="seg-btn ${chatMode === 'fa_after' ? 'on' : ''}" onclick="ABChatPage.setChatMode('fa_after')">اصل، سپس ترجمه</button>
-          <button class="seg-btn ${chatMode === 'side_by_side' ? 'on' : ''}" onclick="ABChatPage.setChatMode('side_by_side')">کنارهم</button>
-          <button class="seg-btn ${chatMode === 'en_only' ? 'on' : ''}" onclick="ABChatPage.setChatMode('en_only')">فقط متن اصلی</button>
+      <div class="chat-heading-row">
+        <div class="chat-heading-copy">
+          <span class="chat-eyebrow">AGENT BRIDGE · CHAT</span>
+          <h1>گفت‌وگو</h1>
+          <p>ترجمهٔ قابل‌بازبینی و آزمایش مستقیم مدل؛ ابزارهای سیستمی در این گفتگو فعال نیستند.</p>
         </div>
-        <button class="btn ghost ${ui.show_think ? 'on' : ''}" onclick="ABChatPage.toggleUiFlag('show_think')">Think</button>
-        <button class="btn ghost ${ui.show_tools ? 'on' : ''}" onclick="ABChatPage.toggleUiFlag('show_tools')">Tools</button>
+        <div class="chat-heading-meta">
+          <span class="chat-model-chip"><i class="model-status-dot ${state.upstream?.online ? 'online' : ''}"></i><span>${esc(currentModel)}</span><small>${routeLabel}</small></span>
+          <span class="chat-live-status ${state.session_state && !['IDLE','ERROR'].includes(state.session_state) ? 'busy' : ''}"><i></i>${statusLabel}</span>
+        </div>
+      </div>
+      <div class="chat-toolbar-row">
+        <div class="chat-translation-state"><span class="translation-state-dot ${trEnabled ? 'enabled' : ''}"></span><span>${trEnabled ? 'ترجمهٔ ورودی فعال' : 'ترجمه خاموش'}</span><span class="toolbar-separator">·</span><span>${esc(routeLabel)}</span></div>
+        <div class="chat-toolbar-actions">
+          <button class="chat-translation-toggle ${trEnabled ? 'is-on' : ''}" type="button" onclick="ABApp.toggleProxyMode()">${trEnabled ? 'ترجمه روشن' : 'ترجمه خاموش'}</button>
+          <details class="chat-display-menu"><summary>نمایش و ترجمه <span>⌄</span></summary><div class="chat-display-menu-popover">
+            <strong>شیوهٔ نمایش پاسخ</strong>
+            <div class="seg-group" title="متن اصلی و ترجمه را بدون جایگزینی متن کاربر نمایش می‌دهد">
+              <button class="seg-btn ${chatMode === 'interleaved' ? 'on' : ''}" onclick="ABChatPage.setChatMode('interleaved')">همراه ترجمه</button>
+              <button class="seg-btn ${chatMode === 'fa_only' ? 'on' : ''}" onclick="ABChatPage.setChatMode('fa_only')">فارسی</button>
+              <button class="seg-btn ${chatMode === 'fa_after' ? 'on' : ''}" onclick="ABChatPage.setChatMode('fa_after')">اصل سپس ترجمه</button>
+              <button class="seg-btn ${chatMode === 'side_by_side' ? 'on' : ''}" onclick="ABChatPage.setChatMode('side_by_side')">کنار هم</button>
+              <button class="seg-btn ${chatMode === 'en_only' ? 'on' : ''}" onclick="ABChatPage.setChatMode('en_only')">اصل</button>
+            </div>
+            <div class="chat-display-toggles"><button class="btn ghost ${ui.show_think ? 'on' : ''}" onclick="ABChatPage.toggleUiFlag('show_think')">Think</button>${isLabView ? '' : `<button class="btn ghost ${ui.show_tools ? 'on' : ''}" onclick="ABChatPage.toggleUiFlag('show_tools')">رویدادهای ابزار</button>`}</div>
+          </div></details>
+          <span class="chat-conversation-count">${chatTurns.length ? `${chatTurns.length} نوبت` : 'گفتگوی تازه'}</span>
+        </div>
       </div>
     `;
 
@@ -516,6 +608,7 @@ window.ABChatPage = (() => {
     const feedInner = document.getElementById('chatFeedInner');
     const sessId = `${state.view_kind || 'mirror'}:${state.view_id || ''}`;
     const turns = state.active_conversation?.turns || [];
+    renderContextPanel(state, turns);
 
     // Capture open <details> IDs & scroll position BEFORE updating DOM
     const prevScrollTop = feed.scrollTop;
@@ -525,19 +618,23 @@ window.ABChatPage = (() => {
     const wasOpen = (id, defaultOpen = false) => detailsState.has(id) ? detailsState.get(id) : defaultOpen;
 
     if (!turns.length) {
-      feedInner.innerHTML = `
-        <div class="panel rtl" style="margin:36px auto;max-width:680px;">
-          <div class="panel-head">
-            <h3>آماده شنود، شکار کش KV و ترجمه پاراگرافی — <span class="mono">${esc(state.view_id || 'ترمینال زنده‌ای انتخاب نشده')}</span></h3>
-          </div>
-          <p class="fg-1" style="line-height:1.9;margin:0 0 12px;">
-            ۱. اگر در ترمینال عادی یا سندباکس، عاملت (مثل <code>pi</code>) به <code>http://127.0.0.1:${state.bridge_port}/v1</code> وصل باشد، تمام پاسخ‌ها، ابزارها و آمار دقیق کش <strong>به‌صورت زنده اینجا استخراج می‌شوند</strong> و کدها فقط یک‌بار بدون تکرار نمایش داده می‌شوند.
-          </p>
-          <p class="fg-1" style="line-height:1.9;margin:0;">
-            ۲. برای بازماندن TUI واقعی هر عامل و تایپ پیام UI در همان ترمینال، در ترمینال پروژه بزن:
-            <code>python3 cli.py --wrap &lt;agent&gt;</code>؛ مثلاً <code>--wrap pi</code> یا <code>--wrap omp</code>. اجرای دوباره خودکار نام تازه می‌گیرد.
-          </p>
-        </div>`;
+      const isLab = state.view_kind === 'lab';
+      feedInner.innerHTML = isLab ? `
+        <section class="chat-welcome" aria-label="شروع گفت‌وگوی تازه">
+          <div class="welcome-mark" aria-hidden="true"><span>AB</span><i></i></div>
+          <span class="welcome-kicker">LOCAL-FIRST MODEL CHAT</span>
+          <h2>یک گفت‌وگوی روشن،<br><em>بدون شلوغی اضافه.</em></h2>
+          <p>به زبان خودت بنویس. متن اصلی حفظ می‌شود و پیش از ارسال می‌توانی ترجمهٔ انگلیسی را بازبینی کنی.</p>
+          <div class="welcome-capabilities"><span>ترجمهٔ قابل‌بازبینی</span><span>پاسخ زنده</span><span>بدون دسترسی سیستمی</span></div>
+          <div class="welcome-examples"><button type="button" onclick="ABChatPage.useStarter('این پاسخ را به زبان ساده توضیح بده.')"><span>ساده‌سازی</span><small>این پاسخ را به زبان ساده توضیح بده</small><b>↗</b></button><button type="button" onclick="ABChatPage.useStarter('این دو گزینه را با مزایا و محدودیت‌هایشان مقایسه کن.')"><span>مقایسه</span><small>این دو گزینه را با مزایا و محدودیت‌هایشان مقایسه کن</small><b>↗</b></button><button type="button" onclick="ABChatPage.useStarter('برای این موضوع یک توضیح کوتاه و دقیق بنویس.')"><span>پرسش</span><small>یک توضیح کوتاه و دقیق بخواه</small><b>↗</b></button></div>
+        </section>` : `
+        <section class="chat-welcome chat-welcome-mirror" aria-label="در انتظار نشست عامل">
+          <div class="welcome-mark" aria-hidden="true"><span>AB</span><i></i></div>
+          <span class="welcome-kicker">LIVE AGENT MIRROR</span>
+          <h2>در انتظار رویدادهای نشست</h2>
+          <p>این نما آینهٔ ترمینال‌های متصل است؛ برای گفت‌وگوی مستقیم، یک نشست Lab را از فهرست کناری انتخاب کن.</p>
+          <div class="mirror-command"><span>اجرای عامل با آینهٔ مستقل</span><code>python3 cli.py --wrap pi</code></div>
+        </section>`;
       lastSessionId = sessId;
       lastTurnCount = 0;
       return;
@@ -572,7 +669,7 @@ window.ABChatPage = (() => {
           <div class="think-body">${window.ABMarkdown.renderBlocks(t.think_blocks || [], t.thinking, t.thinking_fa || '', chatMode)}<button class="btn ghost think-translate-btn" onclick="ABChatPage.translateThink('${esc(t.id)}',-1,event)">${t.thinking_fa ? 'ترجمه‌ی مجدد تفکر' : 'ترجمه‌ی تفکر'}</button></div>
         </details>` : '';
 
-      const toolsAcc = ui.show_tools ? (t.tools || []).map((tl, tIdx) => {
+      const toolsAcc = (!isLabView && ui.show_tools) ? (t.tools || []).map((tl, tIdx) => {
         const cls = tl.status === 'running' ? 'run' : (tl.is_error ? 'err' : 'ok');
         const stTxt = tl.status === 'running' ? 'RUN' : (tl.is_error ? 'ERR' : 'OK');
         const detId = `${t.id}-tool-${tIdx}`;
@@ -590,7 +687,7 @@ window.ABChatPage = (() => {
         const stepThinkId = `${t.id}-step-${sIdx}-think`;
         const stepThinkMode = getThinkMode(stepThinkId, ui.think_default_mode || 'half');
         const stageId = `${t.id}-stage-${sIdx}`;
-        const stepTools = ui.show_tools ? (step.tools || []).map((tool, tIdx) => {
+        const stepTools = (!isLabView && ui.show_tools) ? (step.tools || []).map((tool, tIdx) => {
           const nm = String(tool.name || 'tool');
           const kind = /shell|bash|terminal|exec/i.test(nm) ? 'shell' : (/read|list|search/i.test(nm) ? 'read' : (/edit|write|patch/i.test(nm) ? 'edit' : 'other'));
           const toolId = `${t.id}-step-${sIdx}-tool-${tIdx}`;
@@ -602,7 +699,9 @@ window.ABChatPage = (() => {
 
       const bodyContent = (t.reply_en || (t.blocks && t.blocks.length))
         ? window.ABMarkdown.renderBlocks(t.blocks, t.reply_en, t.reply_fa, chatMode)
-        : (t.tools?.length ? '' : '<div class="mono muted">[در حال دریافت پاسخ مدل...]</div>');
+        : (t.tools?.length && isLabView
+          ? '<div class="mono muted">در این نشست قدیمی رویداد ابزار ثبت شده؛ ابزارهای سیستم در گفت‌وگوی فعلی غیرفعال‌اند.</div>'
+          : (t.tools?.length ? '' : '<div class="mono muted">[در حال دریافت پاسخ مدل...]</div>'));
 
       const src = (t.source || 'web').toUpperCase();
       const inputEst = t.token_estimates || {};
@@ -662,7 +761,7 @@ window.ABChatPage = (() => {
   }
 
   return {
-    render, translateDraft, sendFinal, validateOutgoing,
+    render, renderContextPanel, useStarter, translateDraft, sendFinal, validateOutgoing,
     toggleComposerMd, closePreview, copyOutgoing,
     setChatMode, toggleUiFlag, retranslate, translatePrompt, translateThink, setThinkMode, translateSelection, closeSelectionTranslate, abort, scrollToBottom
   };

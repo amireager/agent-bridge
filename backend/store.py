@@ -227,7 +227,7 @@ class DataStore:
                 "upstream_url": os.environ.get("LLAMA_UPSTREAM", "http://127.0.0.1:8080"),
                 "pi_bin": detect_pi_binary(),
                 "workdir": str(Path.cwd()),
-                "lab_enable_tools": True,
+                "lab_enable_tools": False,
                 "lab_system_prompt": "You are a sharp, concise coding and systems assistant. Think clearly and write clean code.",
             },
             "pricing": {

@@ -349,7 +349,7 @@ window.ABApp = (() => {
     const host = document.getElementById('pageHost');
     const shell = document.getElementById('shellRoot');
     host.classList.toggle('is-chat', route === 'chat');
-    shell?.classList.toggle('hide-hud', route !== 'chat');
+    shell?.classList.toggle('hide-hud', route !== 'chat' || state.view_kind === 'lab');
     if (route === 'home') {
       window.ABHomePage.render(host, state);
     } else if (route === 'chat') {
