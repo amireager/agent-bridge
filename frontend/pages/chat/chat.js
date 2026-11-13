@@ -23,6 +23,32 @@ window.ABChatPage = (() => {
   let lastTurnCount = 0;
   let stickToBottom = true;
   let contextDetailsOpen = false;
+  let activeRunDetailIds = new Set();
+  let forceCloseRunDetailIds = new Set();
+
+  function redactSensitiveText(value) {
+    return String(value ?? '')
+      .replace(/\bBearer\s+[A-Za-z0-9._~+/=-]{8,}/gi, 'Bearer [پوشانده‌شده]')
+      .replace(/\b(?:sk-[A-Za-z0-9_-]{16,}|gh[pousr]_[A-Za-z0-9_]{16,}|github_pat_[A-Za-z0-9_]{16,}|xox[baprs]-[A-Za-z0-9-]{16,}|AIza[0-9A-Za-z_-]{30,}|AKIA[0-9A-Z]{16})\b/g, '[کلید پوشانده‌شده]')
+      .replace(/(\b(?:api[_-]?key|access[_-]?token|refresh[_-]?token|password|passwd|client_secret|secret)\b\s*[:=]\s*)(["']?)[^\s,;"'}]+/gi, '$1[پوشانده‌شده]');
+  }
+
+  function runDetailsOpen(id, isActive, detailsState, defaultOpen = false) {
+    if (isActive) {
+      activeRunDetailIds.add(id);
+      forceCloseRunDetailIds.delete(id);
+      return true;
+    }
+    if (activeRunDetailIds.has(id)) {
+      activeRunDetailIds.delete(id);
+      forceCloseRunDetailIds.add(id);
+    }
+    if (forceCloseRunDetailIds.has(id)) {
+      forceCloseRunDetailIds.delete(id);
+      return false;
+    }
+    return detailsState.has(id) ? detailsState.get(id) : defaultOpen;
+  }
 
   function getThinkMode(key, defaultMode = 'half') {
     try { return localStorage.getItem(`ab-think:${key}`) || defaultMode; } catch (_) { return defaultMode; }
@@ -476,10 +502,10 @@ window.ABChatPage = (() => {
 
   function summarizeToolArgs(tl) {
     const a = tl.args || {};
-    if (typeof a === 'string') return a.slice(0, 74);
-    if (a.command) return `$ ${String(a.command).replace(/\\s+/g, ' ').slice(0, 74)}`;
-    if (a.path) return a.path;
-    return JSON.stringify(a).slice(0, 72);
+    if (typeof a === 'string') return redactSensitiveText(a).slice(0, 74);
+    if (a.command) return `$ ${redactSensitiveText(String(a.command).replace(/\\s+/g, ' ')).slice(0, 74)}`;
+    if (a.path) return redactSensitiveText(a.path);
+    return redactSensitiveText(JSON.stringify(a)).slice(0, 72);
   }
 
   function formatToolBody(tl) {
@@ -492,31 +518,34 @@ window.ABChatPage = (() => {
     } else if (tl.name === 'edit' && (a.oldText || a.newText)) {
       head = `--- old\n${a.oldText || ''}\n+++ new\n${a.newText || ''}`;
     }
-    return `${head}${tl.output ? `\n\n// output\n${tl.output}` : ''}`;
+    const outputLine = tl.output
+      ? `\n\n// output\n${tl.output}`
+      : (tl.status === 'running' ? '\n\n// output\nدر انتظار خروجی ابزار…' : '');
+    return `${head}${outputLine}`;
   }
 
   function renderToolContent(tl, displayMode = 'terminal') {
     if (displayMode === 'json') {
       const args = tl.args || {};
-      const argsText = typeof args === 'string' ? args : JSON.stringify(args, null, 2);
-      const raw = typeof tl.output === 'string' ? tl.output : JSON.stringify(tl.output ?? '', null, 2);
+      const argsText = redactSensitiveText(typeof args === 'string' ? args : JSON.stringify(args, null, 2));
+      const raw = redactSensitiveText(typeof tl.output === 'string' ? tl.output : JSON.stringify(tl.output ?? '', null, 2));
       let output;
       try { output = JSON.stringify(JSON.parse(raw), null, 2); } catch (_) { output = raw; }
-      return `<div class="tool-readable-content"><details class="tool-args"><summary>ورودی ساخت‌یافتهٔ ابزار · ${esc(tl.name || 'tool')}</summary><pre>${esc(argsText || '')}</pre></details><pre class="tool-plain-body tool-json-output">${esc(output || 'خروجی ساخت‌یافته‌ای ندارد.')}</pre></div>`;
+      return `<div class="tool-readable-content"><details class="tool-args"><summary>ورودی ساخت‌یافتهٔ ابزار · ${esc(tl.name || 'tool')}</summary><pre>${esc(argsText || '')}</pre></details><pre class="tool-plain-body tool-json-output">${esc(output || (tl.status === 'running' ? 'در انتظار خروجی ابزار…' : 'ابزار خروجی ساخت‌یافته‌ای نداد.'))}</pre></div>`;
     }
     if (displayMode === 'plain') {
       const args = tl.args || {};
-      const argsText = typeof args === 'string' ? args : JSON.stringify(args, null, 2);
-      const output = typeof tl.output === 'string' ? tl.output : JSON.stringify(tl.output ?? '', null, 2);
-      return `<div class="tool-readable-content tool-plain-output"><details class="tool-args"><summary>ورودی ابزار · ${esc(tl.name || 'tool')}</summary><pre>${esc(argsText || '')}</pre></details><pre class="tool-plain-body">${esc(output || 'خروجی متنی ندارد.')}</pre></div>`;
+      const argsText = redactSensitiveText(typeof args === 'string' ? args : JSON.stringify(args, null, 2));
+      const output = redactSensitiveText(typeof tl.output === 'string' ? tl.output : JSON.stringify(tl.output ?? '', null, 2));
+      return `<div class="tool-readable-content tool-plain-output"><details class="tool-args"><summary>ورودی ابزار · ${esc(tl.name || 'tool')}</summary><pre>${esc(argsText || '')}</pre></details><pre class="tool-plain-body">${esc(output || (tl.status === 'running' ? 'در انتظار خروجی ابزار…' : 'ابزار خروجی متنی نداد.'))}</pre></div>`;
     }
     if (displayMode === 'markdown') {
       const args = tl.args || {};
-      const argsText = typeof args === 'string' ? args : JSON.stringify(args, null, 2);
-      const output = typeof tl.output === 'string' ? tl.output : JSON.stringify(tl.output ?? '', null, 2);
-      return `<div class="tool-readable-content"><details class="tool-args"><summary>ورودی ابزار · ${esc(tl.name || 'tool')}</summary><pre>${esc(argsText || '')}</pre></details>${output ? `<div class="tool-markdown-output">${window.ABMarkdown.render(output)}</div>` : '<p class="muted">خروجی متنی ندارد.</p>'}</div>`;
+      const argsText = redactSensitiveText(typeof args === 'string' ? args : JSON.stringify(args, null, 2));
+      const output = redactSensitiveText(typeof tl.output === 'string' ? tl.output : JSON.stringify(tl.output ?? '', null, 2));
+      return `<div class="tool-readable-content"><details class="tool-args"><summary>ورودی ابزار · ${esc(tl.name || 'tool')}</summary><pre>${esc(argsText || '')}</pre></details>${output ? `<div class="tool-markdown-output">${window.ABMarkdown.render(output)}</div>` : `<p class="muted">${tl.status === 'running' ? 'در انتظار خروجی ابزار…' : 'ابزار خروجی متنی نداد.'}</p>`}</div>`;
     }
-    const safe = esc(formatToolBody(tl));
+    const safe = esc(redactSensitiveText(formatToolBody(tl)));
     const highlighted = safe
       .replace(/(^|\s)(sudo|cd|ls|cat|grep|find|git|python3?|nix|curl|mkdir|rm|cp|mv|pytest|node)(?=\s|$)/gm, '$1<span class="term-command">$2</span>')
       .replace(/(--[a-zA-Z0-9_-]+)/g, '<span class="term-flag">$1</span>')
@@ -729,12 +758,15 @@ window.ABChatPage = (() => {
         const cls = tl.status === 'running' ? 'run' : (tl.is_error ? 'err' : 'ok');
         const stTxt = tl.status === 'running' ? 'RUN' : (tl.is_error ? 'ERR' : 'OK');
         const detId = `${t.id}-tool-${tIdx}`;
-        const isOpen = wasOpen(detId, tl.status === 'running');
+        const toolActive = String(latestTurn?.id) === String(t.id) && !!streamActive && tl.status === 'running';
+        const isOpen = runDetailsOpen(detId, toolActive, detailsState, false);
         const toolName = String(tl.name || 'tool');
         const kind = /shell|bash|terminal|exec/i.test(toolName) ? 'shell' : (/read|list|search/i.test(toolName) ? 'read' : (/edit|write|patch/i.test(toolName) ? 'edit' : 'other'));
+        const outputPreview = redactSensitiveText(String(tl.output || '')).replace(/\\s+/g, ' ').trim();
+        const toolPreview = outputPreview ? `خروجی: ${outputPreview.slice(0, 105)}${outputPreview.length > 105 ? '…' : ''}` : summarizeToolArgs(tl);
         return `
           <details class="tool-pill kind-${kind}" data-acc-id="${esc(detId)}" ${isOpen ? 'open' : ''}>
-            <summary><span class="tool-badge">${esc(toolName)}</span><span class="tool-cmd-preview">${esc(summarizeToolArgs(tl))}</span><span class="tiny-tag">${stTxt}</span></summary>
+            <summary><span class="tool-state-dot" aria-hidden="true"></span><span class="tool-badge">${esc(toolName)}</span><span class="tool-cmd-preview">${esc(toolPreview)}</span><span class="tiny-tag">${stTxt}</span></summary>
             <div class="tool-render">${renderToolContent(tl, ui.tool_output_mode || 'terminal')}</div>
           </details>`;
       }).join('') : '';
@@ -743,18 +775,53 @@ window.ABChatPage = (() => {
         const stepThinkId = `${t.id}-step-${sIdx}-think`;
         const stepThinkMode = getThinkMode(stepThinkId, ui.think_default_mode || 'half');
         const stageId = `${t.id}-stage-${sIdx}`;
+        const stepLive = String(latestTurn?.id) === String(t.id) && !!streamActive && sIdx === (t.steps?.length || 0) - 1;
         const stepTools = (!isLabView && ui.show_tools) ? (step.tools || []).map((tool, tIdx) => {
           const nm = String(tool.name || 'tool');
           const kind = /shell|bash|terminal|exec/i.test(nm) ? 'shell' : (/read|list|search/i.test(nm) ? 'read' : (/edit|write|patch/i.test(nm) ? 'edit' : 'other'));
           const toolId = `${t.id}-step-${sIdx}-tool-${tIdx}`;
-          return `<details class="tool-pill kind-${kind}" data-acc-id="${esc(toolId)}"><summary><span class="tool-badge">${esc(nm)}</span><span class="tool-cmd-preview">${esc(summarizeToolArgs(tool))}</span><span class="tiny-tag">${esc(tool.status || 'done')}</span></summary><div class="tool-render">${renderToolContent(tool, ui.tool_output_mode || 'terminal')}</div></details>`;
+          const active = stepLive && tool.status === 'running';
+          const isOpen = runDetailsOpen(toolId, active, detailsState, false);
+          const toolState = tool.status === 'running' ? 'running' : (tool.is_error || tool.status === 'error' ? 'error' : 'done');
+          const stTxt = toolState === 'running' ? 'در حال اجرا' : toolState === 'error' ? 'ناموفق' : 'تمام شد';
+          const toolOutput = redactSensitiveText(typeof tool.output === 'string' ? tool.output : JSON.stringify(tool.output ?? '')).replace(/\s+/g, ' ').trim();
+          const toolPreview = toolOutput ? `${toolState === 'error' ? 'خطا' : 'خروجی'}: ${toolOutput.slice(0, 105)}${toolOutput.length > 105 ? '…' : ''}` : summarizeToolArgs(tool);
+          return `<details class="tool-pill kind-${kind} run-tool-${toolState}" data-acc-id="${esc(toolId)}" ${isOpen ? 'open' : ''}>
+            <summary><span class="tool-state-dot" aria-hidden="true"></span><span class="tool-badge">${esc(nm)}</span><span class="tool-cmd-preview">${esc(toolPreview)}</span><span class="tiny-tag">${stTxt}</span></summary>
+            <div class="tool-render">${renderToolContent(tool, ui.tool_output_mode || 'terminal')}</div>
+          </details>`;
         }).join('') : '';
-        const stepLive = String(latestTurn?.id) === String(t.id) && !!streamActive && sIdx === (t.steps?.length || 0) - 1;
-        const stepOpen = completedThinkThisRender.has(String(t.id)) ? false : (detailsState.has(stepThinkId) ? wasOpen(stepThinkId) : (stepLive && stepThinkMode !== 'closed'));
-        const reasoning = ui.show_think && step.thinking ? `<details class="think-drawer think-mode-${stepThinkMode}" data-acc-id="${esc(stepThinkId)}" ${stepOpen ? 'open' : ''}><summary><span>تفکر مدل · ${step.thinking.length.toLocaleString()} نویسه${stepLive ? ' · در حال نوشتن' : ''}</span>${thinkModeControls(stepThinkId, ui.think_default_mode || 'half')}</summary><div class="think-body md-body">${window.ABMarkdown.render(step.thinking)}${step.thinking_fa ? `<div class="think-translation">${window.ABMarkdown.render(step.thinking_fa)}</div>` : ''}<button class="btn ghost think-translate-btn" onclick="ABChatPage.translateThink('${esc(t.id)}',${sIdx},event)">${step.thinking_fa ? 'ترجمه دوباره' : 'ترجمه‌ی این مرحله'}</button></div></details>` : '';
-        return `<section class="agent-step" data-step-id="${esc(stageId)}"><div class="step-label"><span>مرحله ${sIdx + 1}</span>${stepLive ? '<span class="step-live-indicator">در حال انجام</span>' : ''}</div><div class="step-content">${reasoning}${stepTools}</div></section>`;
+        const stepHasRunningTool = (step.tools || []).some(tool => tool.status === 'running');
+        const stepActive = stepLive && (['thinking', 'streaming'].includes(step.status) || stepHasRunningTool);
+        const stepOpen = runDetailsOpen(stageId, stepActive, detailsState, false);
+        const stepNum = Number(step.index || (sIdx + 1));
+        const stepStatus = step.status === 'error' ? 'ناموفق' : stepHasRunningTool ? 'ابزار در حال اجرا' : stepActive ? 'در حال دریافت پاسخ' : step.status === 'tools' ? 'ابزار فراخوانی شد' : 'پاسخ دریافت شد';
+        const stepClass = step.status === 'error' ? 'run-failed' : stepActive ? 'run-active' : 'run-complete';
+        const replySnippet = redactSensitiveText(String(step.reply_en || '').replace(/\s+/g, ' ').trim());
+        const visibleSnippet = replySnippet.length > 190 ? `${replySnippet.slice(0, 190)}…` : replySnippet;
+        const latestTool = (step.tools || []).at(-1);
+        const latestToolOutput = latestTool ? redactSensitiveText(typeof latestTool.output === 'string' ? latestTool.output : JSON.stringify(latestTool.output ?? '')).replace(/\s+/g, ' ').trim() : '';
+        const previewText = latestTool
+          ? `${latestTool.name || 'ابزار'} · ${latestToolOutput ? `خروجی: ${latestToolOutput.slice(0, 105)}${latestToolOutput.length > 105 ? '…' : ''}` : stepActive ? `در حال اجرا · ${summarizeToolArgs(latestTool)}` : summarizeToolArgs(latestTool)}`
+          : (visibleSnippet || (stepActive ? 'در انتظار خروجی مدل…' : 'بدون متن خروجی'));
+        const requestTrace = step.request_trace || null;
+        const requestMessages = Array.isArray(requestTrace?.messages) ? requestTrace.messages : [];
+        const requestId = `${stageId}-request`;
+        const requestOpen = wasOpen(requestId, false);
+        const requestDetails = requestTrace ? `<details class="run-request" data-acc-id="${esc(requestId)}" ${requestOpen ? 'open' : ''}>
+          <summary><span class="run-request-icon" aria-hidden="true">↗</span><span>بخشی از پیام‌های فرستاده‌شده به مدل</span><span class="run-meta-count">${Number(requestTrace.message_count || requestMessages.length)} پیام${requestTrace.model ? ` · ${esc(requestTrace.model)}` : ''}</span></summary>
+          <div class="run-request-body"><p class="run-disclosure-note">پیش‌نمایشِ ورودی واقعی این نوبت است؛ کلیدها و عبارت‌های محرمانه پوشانده شده‌اند.${requestTrace.omitted_messages ? ` ${requestTrace.omitted_messages} پیام قدیمی‌تر به‌دلیل محدودیت اندازه نمایش داده نشده.` : ''}</p>
+            ${requestMessages.map(message => `<section class="run-message"><div class="run-message-head"><span>${esc(message.role || 'پیام')}</span><span>${Number(message.chars || 0).toLocaleString()} نویسه${message.truncated ? ' · پیش‌نمایش کوتاه‌شده' : ''}</span></div><pre>${esc(message.text || '')}</pre>${(message.tool_calls || []).length ? `<div class="run-message-tools">فراخوان ابزار: ${message.tool_calls.map(esc).join('، ')}</div>` : ''}</section>`).join('') || '<p class="muted">متن پیام قابل نمایش نیست.</p>'}
+          </div></details>` : '';
+        const stepThinkOpen = completedThinkThisRender.has(String(t.id)) ? false : (detailsState.has(stepThinkId) ? wasOpen(stepThinkId) : (stepActive && stepThinkMode !== 'closed'));
+        const reasoning = ui.show_think && step.thinking ? `<details class="think-drawer think-mode-${stepThinkMode}" data-acc-id="${esc(stepThinkId)}" ${stepThinkOpen ? 'open' : ''}><summary><span>تفکر مدل · ${step.thinking.length.toLocaleString()} نویسه${stepActive ? ' · در حال نوشتن' : ''}</span>${thinkModeControls(stepThinkId, ui.think_default_mode || 'half')}</summary><div class="think-body md-body">${window.ABMarkdown.render(step.thinking)}${step.thinking_fa ? `<div class="think-translation">${window.ABMarkdown.render(step.thinking_fa)}</div>` : ''}<button class="btn ghost think-translate-btn" onclick="ABChatPage.translateThink('${esc(t.id)}',${sIdx},event)">${step.thinking_fa ? 'ترجمه دوباره' : 'ترجمه‌ی این مرحله'}</button></div></details>` : '';
+        const intermediateOutput = !stepLive && step.reply_en && step.status !== 'final' ? `<div class="run-intermediate-output"><span>پاسخ این فراخوان مدل</span><p>${window.ABMarkdown.render(step.reply_en)}</p></div>` : '';
+        const duration = Number(step.elapsed_ms || 0);
+        return `<details class="agent-step ${stepClass}" data-acc-id="${esc(stageId)}" data-step-id="${esc(stageId)}" ${stepOpen ? 'open' : ''}>
+          <summary class="run-step-head"><span class="run-step-number">${String(stepNum).padStart(2, '0')}</span><span class="run-step-title">فراخوان مدل ${stepNum}</span><span class="run-step-snippet">${esc(previewText)}</span><span class="run-step-status">${stepStatus}</span></summary>
+          <div class="step-content"><div class="run-step-meta"><span>${esc(step.model || requestTrace?.model || t.model || 'مدل محلی')}</span>${duration ? `<span>${duration < 1000 ? `${duration} ms` : `${(duration / 1000).toFixed(1)} ثانیه`}</span>` : ''}</div>${requestDetails}${reasoning}${stepTools}${intermediateOutput}${step.error ? `<p class="run-error">${esc(redactSensitiveText(step.error))}</p>` : ''}</div>
+        </details>`;
       }).join('') : '';
-
       const bodyContent = (t.reply_en || (t.blocks && t.blocks.length))
         ? window.ABMarkdown.renderBlocks(t.blocks, t.reply_en, t.reply_fa, chatMode)
         : (t.tools?.length && isLabView

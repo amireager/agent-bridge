@@ -17,7 +17,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlparse
 
-from .agents import BridgeHub
+from .agents import BridgeHub, _safe_request_trace
 from .model_accounts import PROVIDERS, discover_models, test_model
 from .translator import LOOPBACK_OPENER, test_translator_connection, translate_prose
 
@@ -137,6 +137,7 @@ def _wire_progress_turn(hub: BridgeHub, agent_id: str, model: str, messages: lis
         "steps": [{
             "index": 1, "thinking": reasoning, "tools": copy.deepcopy(streamed_tools),
             "reply_en": content, "status": "streaming",
+            "request_trace": _safe_request_trace(messages, model),
         }],
         "tools": streamed_tools, "reply_en": content, "reply_fa": "", "blocks": [],
         "tr_engine": "streaming", "status": "streaming", "elapsed_s": 0.0,

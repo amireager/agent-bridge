@@ -47,6 +47,52 @@ def _extract_msg_text(content) -> str:
     return str(content or "")
 
 
+def _safe_request_trace(messages: list[dict], model: str = "") -> dict:
+    """A bounded, secret-redacted excerpt of the actual model input for the chat UI."""
+    secret_patterns = (
+        (re.compile(r"(?i)\bBearer\s+[A-Za-z0-9._~+/=-]{8,}"), "Bearer [redacted]"),
+        (re.compile(r"(?i)\b(?:sk-[A-Za-z0-9_-]{16,}|gh[pousr]_[A-Za-z0-9_]{16,}|github_pat_[A-Za-z0-9_]{16,}|xox[baprs]-[A-Za-z0-9-]{16,}|AIza[0-9A-Za-z_-]{30,}|AKIA[0-9A-Z]{16})\b"), "[secret redacted]"),
+        (re.compile(r"(?i)(\b(?:api[_-]?key|access[_-]?token|refresh[_-]?token|password|passwd|client_secret|secret)\b\s*[:=]\s*)([\"']?)([^\s,;\"'}]+)"), r"\1[redacted]"),
+    )
+    def redact(value: str) -> str:
+        for pattern, replacement in secret_patterns:
+            value = pattern.sub(replacement, value)
+        return value
+
+    rows = []
+    source = messages if isinstance(messages, list) else []
+    selected = source[-16:]
+    budget = 9000
+    for message in selected:
+        if not isinstance(message, dict):
+            continue
+        role = str(message.get("role") or "unknown")[:24]
+        content = _extract_msg_text(message.get("content", ""))
+        content = redact(content)
+        allowance = min(1400, budget)
+        preview = content[:allowance]
+        budget -= len(preview)
+        calls = []
+        for call in message.get("tool_calls", []) if isinstance(message.get("tool_calls"), list) else []:
+            if not isinstance(call, dict):
+                continue
+            fn = call.get("function") or {}
+            calls.append(str(fn.get("name") or "tool")[:80])
+        row = {"role": role, "text": preview, "chars": len(content), "truncated": len(preview) < len(content)}
+        if calls:
+            row["tool_calls"] = calls[:8]
+        rows.append(row)
+        if budget <= 0:
+            break
+    return {
+        "model": str(model or "")[:160],
+        "message_count": len(source),
+        "omitted_messages": max(0, len(source) - len(rows)),
+        "messages": rows,
+        "redacted": True,
+    }
+
+
 def _wire_assistant_anchor(content, tool_calls: list[dict] | None) -> str:
     normalized = []
     for tc in tool_calls or []:
@@ -800,6 +846,9 @@ class BridgeHub:
                 "tools": list(tool_calls),
                 "reply_en": clean_reply,
                 "status": "tools" if tool_calls else "final",
+                "request_trace": _safe_request_trace(messages, model_name),
+                "elapsed_ms": round(max(0.0, elapsed_s) * 1000),
+                "metrics": dict(metrics or {}),
             }
             existing_turn["steps"].append(step)
             for tl in existing_turn.get("tools", []):
@@ -864,7 +913,7 @@ class BridgeHub:
             "thinking": extracted_think,
             "thinking_fa": "",
             "think_blocks": [],
-            "steps": [{"index": 1, "thinking": extracted_think, "tools": list(tool_calls), "reply_en": clean_reply, "status": "tools" if tool_calls else "final"}],
+            "steps": [{"index": 1, "thinking": extracted_think, "tools": list(tool_calls), "reply_en": clean_reply, "status": "tools" if tool_calls else "final", "request_trace": _safe_request_trace(messages, model_name), "elapsed_ms": round(max(0.0, elapsed_s) * 1000), "metrics": dict(metrics or {})}],
             "tools": tool_calls,
             "reply_en": clean_reply,
             "reply_fa": "",
@@ -954,10 +1003,14 @@ class BridgeHub:
                 step_think: list[str] = []
                 step_metrics: dict | None = None
                 step_no = len(turn.setdefault("steps", [])) + 1
-                step_record = {"index": step_no, "thinking": "", "tools": [], "reply_en": "", "status": "thinking"}
+                step_record = {
+                    "index": step_no, "thinking": "", "tools": [], "reply_en": "", "status": "thinking",
+                    "request_trace": _safe_request_trace(api_msgs, turn["model"]),
+                }
                 turn["steps"].append(step_record)
                 tool_map: dict[int, dict] = {}
                 last_bcast = 0.0
+                step_started = time.perf_counter()
 
                 with LOOPBACK_OPENER.open(req, timeout=240) as resp:
                     for raw_ln in resp:
@@ -1030,7 +1083,9 @@ class BridgeHub:
                             last_bcast = now_m
                             self.broadcast_state()
 
+                step_record["elapsed_ms"] = round((time.perf_counter() - step_started) * 1000)
                 if step_metrics:
+                    step_record["metrics"] = dict(step_metrics)
                     for key in ("uncached_in", "cached_in", "out_tok"):
                         cumulative_metrics[key] += int(step_metrics.get(key, 0) or 0)
                     for key in ("pp_tps", "tg_tps"):
@@ -1099,6 +1154,9 @@ class BridgeHub:
             self._translate_turn_fields(turn)
             turn["status"] = "done"
         except Exception as exc:
+            if turn.get("steps") and turn["steps"][-1].get("status") in {"thinking", "streaming"}:
+                turn["steps"][-1]["status"] = "error"
+                turn["steps"][-1]["error"] = str(exc)[:500]
             turn["reply_en"] = (turn.get("reply_en", "") + f"\n\n[Lab Error: {exc}]").strip()
             turn["blocks"] = split_markdown_into_blocks(turn["reply_en"])
             turn["status"] = "error"

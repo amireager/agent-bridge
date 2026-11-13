@@ -4,7 +4,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
-from backend.agents import BridgeHub, _wire_assistant_anchor
+from backend.agents import BridgeHub, _safe_request_trace, _wire_assistant_anchor
 from backend.store import DataStore
 
 
@@ -37,6 +37,56 @@ class MirrorHistoryTests(unittest.TestCase):
         self.assertEqual(turn["tools"][0]["args"], {"path": "README.md"})
         self.assertEqual(turn["tools"][0]["output"], "file contents")
         self.assertEqual(turn["tools"][0]["status"], "done")
+
+    def test_request_trace_is_bounded_and_redacts_common_secrets(self):
+        messages = [
+            {"role": "system", "content": "api_key=supersecretvalue123"},
+            {"role": "user", "content": "Bearer abcdefghijklmnopqrstuvwxyz123456"},
+            {"role": "assistant", "content": "sk-abcdefghijklmnopqrstuvwxyz123456"},
+        ]
+        trace = _safe_request_trace(messages, "local-test")
+        self.assertEqual(trace["model"], "local-test")
+        self.assertEqual(trace["message_count"], 3)
+        self.assertTrue(trace["redacted"])
+        rendered = " ".join(row["text"] for row in trace["messages"])
+        self.assertNotIn("supersecretvalue", rendered)
+        self.assertNotIn("abcdefghijklmnopqrstuvwxyz123456", rendered)
+        self.assertIn("[redacted]", rendered)
+
+    def test_successive_model_calls_are_retained_as_ordered_steps(self):
+        with TemporaryDirectory() as temp_dir:
+            hub = BridgeHub(DataStore(Path(temp_dir) / ".data"), 0)
+            hub.config["translation"]["enabled"] = False
+            try:
+                first = [
+                    {"role": "system", "content": "Be concise."},
+                    {"role": "user", "content": "Find one example."},
+                ]
+                hub.record_passive_wire_turn(
+                    agent_name="pi-trace", model_name="local-model", messages=first,
+                    raw_reply="Searching now.", reasoning_text="", tool_calls=[{
+                        "id": "call-1", "name": "search", "args": {"query": "example"},
+                        "output": "one result", "status": "done", "is_error": False,
+                    }], metrics={"uncached_in": 2, "cached_in": 0, "out_tok": 5, "tg_tps": 3}, kv_status="cold", elapsed_s=0.12,
+                )
+                second = [
+                    *first,
+                    {"role": "assistant", "content": "Searching now."},
+                    {"role": "tool", "tool_call_id": "call-1", "content": "one result"},
+                ]
+                hub.record_passive_wire_turn(
+                    agent_name="pi-trace", model_name="local-model", messages=second,
+                    raw_reply="Here is the result.", reasoning_text="", tool_calls=[],
+                    metrics={"uncached_in": 3, "cached_in": 1, "out_tok": 8, "tg_tps": 4}, kv_status="warm", elapsed_s=0.2,
+                )
+                steps = hub.mirrors["pi-trace"]["turns"][0]["steps"]
+                self.assertEqual([step["index"] for step in steps], [1, 2])
+                self.assertEqual(steps[0]["request_trace"]["message_count"], 2)
+                self.assertEqual(steps[1]["request_trace"]["message_count"], 4)
+                self.assertEqual(steps[0]["elapsed_ms"], 120)
+                self.assertEqual(steps[0]["request_trace"]["messages"][-1]["text"], "Find one example.")
+            finally:
+                hub.shutdown()
 
     def test_assistant_anchor_is_stable_and_tool_sensitive(self):
         self.assertEqual(_wire_assistant_anchor("answer", []), _wire_assistant_anchor("answer", []))
